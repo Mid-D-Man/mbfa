@@ -1,0 +1,25 @@
+[package]
+name = "mbfa"
+version = "0.1.0"
+edition = "2021"
+authors = ["MidManStudio"]
+description = "Mid Bit Folding Algorithm — iterative instruction-chain compression"
+license = "MIT"
+
+[[bin]]
+name = "mbfa"
+path = "src/main.rs"
+
+[lib]
+name = "mbfa"
+path = "src/lib.rs"
+
+[dependencies]
+bitstream-io = "2.4"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "compare"
+harness = false

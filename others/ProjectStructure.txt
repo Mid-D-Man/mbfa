@@ -1,1 +1,31 @@
+Project Structure — MidMans Bit Folding Algorithm (MBFA)
+MidManStudio
+Generated: Fri Feb 20 17:35:30 UTC 2026
+Repository: Mid-D-Man/mbfa
+Commit: 1ac51889395741a17ec72f410779c9825c35a88c
+Branch: master
+Build: #7
+==================================
 
+Source Files:
+src/bitreader.rs
+src/bitwriter.rs
+src/decoder.rs
+src/encoder.rs
+src/fold.rs
+src/lib.rs
+src/main.rs
+src/opcode.rs
+src/pairing.rs
+src/unfold.rs
+
+Bench Files:
+benches/compare.rs
+
+Config:
+Cargo.toml
+README.md
+
+Counts:
+  src: 10 files
+  benches: 1 files

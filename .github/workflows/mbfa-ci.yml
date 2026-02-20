@@ -190,6 +190,9 @@ jobs:
 
       - name: Run benchmarks
         run: |
+          # Helper: ensure bc output always has a leading zero before decimal point
+          fix_pct() { echo "$1" | sed 's/^\./0./'; }
+
           # Start JSON array
           echo "[" > bench_results/results.json
           FIRST=true
@@ -235,9 +238,9 @@ jobs:
             local zst_ms=$(( (zst_end - zst_start) / 1000000 ))
             local zst_size=$(wc -c < "bench_files/$file.zst" 2>/dev/null || echo 0)
 
-            local mbfa_pct=$(echo "scale=2; $mbfa_size * 100 / $orig_size" | bc)
-            local gz_pct=$(echo "scale=2; $gz_size * 100 / $orig_size" | bc)
-            local zst_pct=$(echo "scale=2; $zst_size * 100 / $orig_size" | bc)
+            local mbfa_pct=$(fix_pct $(echo "scale=2; $mbfa_size * 100 / $orig_size" | bc))
+            local gz_pct=$(fix_pct $(echo "scale=2; $gz_size * 100 / $orig_size" | bc))
+            local zst_pct=$(fix_pct $(echo "scale=2; $zst_size * 100 / $orig_size" | bc))
 
             # Comma between entries but not before first
             if [ "$FIRST" = "true" ]; then

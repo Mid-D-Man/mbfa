@@ -1,0 +1,136 @@
+{
+  "project": "MBFA — MidMans Bit Folding Algorithm",
+  "studio": "MidManStudio",
+  "status": "Active research implementation — core algorithm working, iterative improvement in progress",
+  "repository": "https://github.com/Mid-D-Man/mbfa",
+  "live_benchmarks": "https://mid-d-man.github.io/mbfa/",
+
+  "concept": {
+    "summary": "A novel multi-fold iterative compression algorithm. Each fold produces a bitstream of instructions that reconstruct the previous fold. The final output is a minimal seed plus a 2-byte header.",
+    "key_insight": "Fold 1 does not need to be smaller than the original data. What matters is that the instruction stream has more exploitable regularity than raw bytes — reduced alphabet, structural repetition, bounded operand ranges. Each subsequent fold exploits that regularity.",
+    "why_it_is_novel": "No existing published algorithm: (1) defines a tiny fixed instruction set, (2) LZ-encodes arbitrary data into that instruction language, then (3) recursively runs the same encoder on the resulting instruction bytes for multiple folds with explicit stopping conditions and no per-fold metadata transmission.",
+    "conceptual_family": "Sits within grammar-based and program-style compression research but is architecturally distinct from all existing members of that family.",
+    "academic_potential": "Masters or PhD viable — requires formal convergence proof, Canterbury/Silesia corpus benchmarks, and information-theoretic analysis of instruction stream entropy"
+  },
+
+  "fold_pipeline": {
+    "fold_1": "LZ scan on raw bytes using hash chain (O(n) average). Emits LIT and BACKREF tokens encoded with fixed opcode vocabulary.",
+    "fold_2": "If fold 1 output > 512 bytes: token pair encoding with Cantor-paired operands. Otherwise: LZ again.",
+    "fold_3_plus": "LZ on whatever bytes came out of the previous fold.",
+    "stopping": "Stop when improvement < 3%, output <= 64 bits, or max 8 folds reached."
+  },
+
+  "fixed_opcode_vocabulary": {
+    "note": "Fixed and shared between encoder and decoder. Never transmitted. Core design decision — eliminates per-fold table overhead.",
+    "BACKREF": { "pattern": "0",  "total_bits": 24, "operands": "15-bit offset + 8-bit length", "max_lookback": "32767 bytes" },
+    "LIT":     { "pattern": "10", "total_bits": 10, "operands": "8-bit byte value" },
+    "END":     { "pattern": "11", "total_bits": 2,  "operands": "none" }
+  },
+
+  "pair_encoding": {
+    "pairs": {
+      "LL":  { "prefix": "000", "meaning": "LIT + LIT" },
+      "LB":  { "prefix": "001", "meaning": "LIT + BACKREF" },
+      "BL":  { "prefix": "010", "meaning": "BACKREF + LIT" },
+      "BB":  { "prefix": "011", "meaning": "BACKREF + BACKREF" },
+      "SL":  { "prefix": "100", "meaning": "single LIT (odd token)" },
+      "SB":  { "prefix": "101", "meaning": "single BACKREF (odd token)" },
+      "END": { "prefix": "110", "meaning": "stream terminator" }
+    },
+    "cantor_pairing": {
+      "formula": "cantor(x,y) = (x+y)(x+y+1)/2 + y",
+      "use": "Encodes (offset, length) as single number. If result < 65536: 1 flag bit + 16-bit value = 17 bits. Else falls back to raw 24-bit encoding.",
+      "advantage": "No table, no transmission, fully reversible, deterministic",
+      "known_issue": "Grows quadratically for large offsets/lengths — Exp-Golomb replacement planned"
+    },
+    "threshold": "Only fires when fold 1 output > 512 bytes. Below threshold uses LZ to avoid pair header overhead dominating tiny streams."
+  },
+
+  "file_format": {
+    "byte_0": "fold count",
+    "byte_1": "pair flag (1 = fold 2 used pair encoding, 0 = used LZ)",
+    "remainder": "compressed bitstream"
+  },
+
+  "benchmark_results": {
+    "note": "Release build on Ubuntu via GitHub Actions CI. Lower % = better.",
+    "datasets": {
+      "repetitive_12KB":  { "mbfa": "0.2%",  "gzip": "0.8%",   "zstd": "~0.3%", "verdict": "MBFA wins — 4x better than gzip" },
+      "prose_20KB":       { "mbfa": "61.3%", "gzip": "41.6%",  "zstd": "42.8%", "verdict": "Gap remains — flat-cost literals are the bottleneck" },
+      "prose_100KB":      { "mbfa": "50.5%", "gzip": "36.4%",  "zstd": "37.6%", "verdict": "Gap remains" },
+      "random_10KB":      { "mbfa": "100%",  "gzip": "100.3%", "zstd": "100.1%","verdict": "Tie — incompressible data correctly passed through" },
+      "source_code_3KB":  { "mbfa": "52.5%", "gzip": "39.9%",  "zstd": "41.4%", "verdict": "Gap remains — pairing helped (was 57.6% before)" }
+    }
+  },
+
+  "improvements_implemented": [
+    "Hash chain LZ encoder — O(n) average vs O(n^2) brute force",
+    "15-bit offset window — 32KB lookback matching gzip territory",
+    "8-bit length field — up to 255 byte copies",
+    "Token pair encoding — fold 2 combines adjacent tokens into typed pairs",
+    "Cantor pairing — BACKREF operands compressed into single number",
+    "Adaptive fold selection — pairing only when fold 1 output > 512 bytes",
+    "Pair flag in header — decoder knows which fold 2 mode was used",
+    "Release build CI benchmarking on Ubuntu/macOS/Windows"
+  ],
+
+  "improvements_attempted_and_reverted": {
+    "entropy_coding": {
+      "what": "Huffman coding on LZ token stream",
+      "result": "Header overhead exceeded savings even with fully sparse encoding",
+      "verdict": "Reverted. Will revisit with size threshold guard — only on streams above ~5KB"
+    }
+  },
+
+  "project_structure": {
+    "src/main.rs":     "CLI — compress / decompress",
+    "src/lib.rs":      "Public API",
+    "src/opcode.rs":   "Token enum, fixed opcode constants — single source of truth",
+    "src/encoder.rs":  "LZ scanner with hash chain — &[u8] -> Vec<Token>",
+    "src/bitwriter.rs":"Vec<Token> -> packed bitstream Vec<u8>",
+    "src/bitreader.rs":"Packed bitstream Vec<u8> -> Vec<Token>",
+    "src/decoder.rs":  "Vec<Token> -> reconstructed Vec<u8>",
+    "src/pairing.rs":  "Token pair encoding + Cantor operand compression",
+    "src/fold.rs":     "Orchestrates fold passes + stopping logic",
+    "src/unfold.rs":   "Reverses N fold passes using header",
+    "benches/compare.rs": "Criterion benchmarks",
+    ".github/workflows/mbfa-ci.yml": "CI — build/test all platforms, benchmark + deploy on --publish"
+  },
+
+  "ci": {
+    "normal_push": "Build + test on Ubuntu, macOS, Windows",
+    "publish_trigger": "Add --publish or --deploy to commit message",
+    "on_publish": [
+      "Full benchmark vs gzip and zstd",
+      "Roundtrip verification on all datasets",
+      "HTML report with visual bar charts deployed to GitHub Pages",
+      "ProjectStructure.txt updated in others/"
+    ],
+    "pages_url": "https://mid-d-man.github.io/mbfa/"
+  },
+
+  "next_steps": [
+    "Replace Cantor with Exp-Golomb for offset encoding — handles large offsets without quadratic blowup",
+    "Move-To-Front transform between fold 1 and fold 2 — clusters opcodes before pairing fires",
+    "Entropy coding on large streams only — size-gated to avoid header overhead problem",
+    "Lower improvement threshold from 3% to 1.5% — lets marginal prose pairing fire",
+    "Formal benchmark on Canterbury and Silesia corpora",
+    "Convergence analysis writeup — formal proof or disproof"
+  ],
+
+  "related_work": {
+    "Re-Pair_1999":              "Recursive symbol pairing — MBFA pair encoding independently derived, operates at token level not byte level",
+    "Fractal_compression":       "Iterative self-referential — image-specific only, not general byte-level",
+    "Iterated_Function_Systems": "Mathematical ancestor of fractal compression — geometric not instruction-chain",
+    "Kolmogorov_complexity":     "Theoretical shortest program framing — MBFA is the practical counterpart",
+    "Deflate_Zstd":              "LZ + entropy coding single pass — MBFA multi-fold chain is the key distinction",
+    "GraSS":                     "Grammar-based genomic compressor — same conceptual family, domain-specific"
+  },
+
+  "reference_papers": [
+    "Barnsley et al. — Iterated Function Systems for Lossless Data Compression (Springer 2002)",
+    "Larsson & Moffat — Off-Line Dictionary-Based Compression (Re-Pair) 1999",
+    "Image Compression predicated on Recurrent Iterated Function Systems (arxiv 1304.2014)",
+    "Image Compression with IFS Finite Automata and Zerotrees: Grand Unification (arxiv cs/0003065)"
+  ]
+      }

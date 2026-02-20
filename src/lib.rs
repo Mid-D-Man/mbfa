@@ -25,3 +25,4 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
 pub fn decompress(input: &[u8]) -> io::Result<Vec<u8>> {
     unfold::unfold(input)
 }
+

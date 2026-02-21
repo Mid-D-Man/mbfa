@@ -7,7 +7,7 @@ use crate::opcode::Token;
 
 const MIN_IMPROVEMENT_RATIO: f64 = 0.97;
 const MIN_FOLD_BITS: usize = 64;
-const MIN_PAIR_BYTES: usize = 512;
+const MIN_PAIR_BYTES: usize = 3000;
 
 /// Fraction of BACKREFs whose Cantor value exceeds 16 bits.
 /// Above this threshold pairing is net-negative — the 3-bit prefix

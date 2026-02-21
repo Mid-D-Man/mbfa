@@ -89,7 +89,6 @@ jobs:
             [ -f "$f" ] || continue
             name=$(basename "$f")
 
-            # Use || true so a panic/crash is treated as FAIL, not a step crash
             ./target/release/mbfa compress "$f" "/tmp/${name}.mbfa" > "/tmp/${name}_compress.log" 2>&1 || true
             ./target/release/mbfa decompress "/tmp/${name}.mbfa" "/tmp/${name}.out" > "/tmp/${name}_decompress.log" 2>&1 || true
 
@@ -118,7 +117,6 @@ jobs:
         run: |
           fix_pct() { echo "$1" | sed 's/^\./0./'; }
 
-          # Map file extensions/names to human-readable types
           file_type() {
             local name=$(basename "$1" | tr '[:upper:]' '[:lower:]')
             case "$name" in
@@ -145,7 +143,6 @@ jobs:
             local ftype=$(file_type "$file")
             local orig=$(wc -c < "$file")
 
-            # MBFA — use || true so a crash doesn't abort the benchmark loop
             local t0=$(date +%s%N)
             ./target/release/mbfa compress "$file" "/tmp/${name}.mbfa" \
               > "/tmp/${name}_mbfa.log" 2>&1 || true
@@ -156,42 +153,36 @@ jobs:
               grep -E "^(Original|Fold|Done|Joint|Entropy)" | \
               tr '\n' '|' | sed 's/"/\\"/g')
 
-            # gzip
             t0=$(date +%s%N)
             gzip -k -f -c "$file" > "/tmp/${name}.gz"
             t1=$(date +%s%N)
             local gz_ms=$(( (t1-t0)/1000000 ))
             local gz_sz=$(wc -c < "/tmp/${name}.gz")
 
-            # zstd
             t0=$(date +%s%N)
             zstd -q -f -c "$file" > "/tmp/${name}.zst"
             t1=$(date +%s%N)
             local zst_ms=$(( (t1-t0)/1000000 ))
             local zst_sz=$(wc -c < "/tmp/${name}.zst")
 
-            # xz
             t0=$(date +%s%N)
             xz -k -f -c "$file" > "/tmp/${name}.xz"
             t1=$(date +%s%N)
             local xz_ms=$(( (t1-t0)/1000000 ))
             local xz_sz=$(wc -c < "/tmp/${name}.xz")
 
-            # brotli
             t0=$(date +%s%N)
             brotli -k -f -c "$file" > "/tmp/${name}.br"
             t1=$(date +%s%N)
             local br_ms=$(( (t1-t0)/1000000 ))
             local br_sz=$(wc -c < "/tmp/${name}.br")
 
-            # zpaq
             t0=$(date +%s%N)
             zpaq a "/tmp/${name}.zpaq" "$file" -method 2 > /dev/null 2>&1 || true
             t1=$(date +%s%N)
             local zpaq_ms=$(( (t1-t0)/1000000 ))
             local zpaq_sz=$(wc -c < "/tmp/${name}.zpaq" 2>/dev/null || echo 0)
 
-            # Percentages
             local mbfa_pct=$(fix_pct $(echo "scale=2; $mbfa_sz*100/$orig" | bc))
             local gz_pct=$(fix_pct   $(echo "scale=2; $gz_sz  *100/$orig" | bc))
             local zst_pct=$(fix_pct  $(echo "scale=2; $zst_sz *100/$orig" | bc))
@@ -199,7 +190,6 @@ jobs:
             local br_pct=$(fix_pct   $(echo "scale=2; $br_sz  *100/$orig" | bc))
             local zpaq_pct=$(fix_pct $(echo "scale=2; $zpaq_sz*100/$orig" | bc))
 
-            # MBFA rank among all 6
             local scores="$mbfa_pct $gz_pct $zst_pct $xz_pct $br_pct $zpaq_pct"
             local rank=$(echo "$scores" | tr ' ' '\n' | \
               sort -n | grep -n "^${mbfa_pct}$" | head -1 | cut -d: -f1)
@@ -267,17 +257,25 @@ jobs:
           git config --global user.email "ci@mbfa.dev"
 
           WORK=$(mktemp -d)
-          git worktree add "$WORK" gh-pages 2>/dev/null || {
-            cd "$WORK" && git init && git checkout --orphan gh-pages && cd -
-          }
 
+          # Fetch the gh-pages branch so the worktree add gets existing content.
+          # If the branch doesn't exist at all yet, create a fresh orphan.
+          if git fetch origin gh-pages:gh-pages 2>/dev/null; then
+            git worktree add "$WORK" gh-pages
+          else
+            echo "gh-pages branch does not exist yet — creating orphan"
+            git worktree add --orphan -b gh-pages "$WORK"
+          fi
+
+          # Only update the corpus/ subdirectory — leave everything else intact.
           mkdir -p "$WORK/corpus"
           cp -r corpus_results/* "$WORK/corpus/"
 
           cd "$WORK"
-          git add .
-          git commit -m "MBFA corpus benchmark — Build #${{ github.run_number }} [skip ci]" || true
-          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages --force
+          git add corpus/
+          git diff --staged --quiet && echo "No changes to corpus/" && exit 0
+          git commit -m "MBFA corpus benchmark — Build #${{ github.run_number }} [skip ci]"
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
 
           echo "Deployed to https://mid-d-man.github.io/mbfa/corpus/"
 

@@ -1,0 +1,282 @@
+name: MBFA Canterbury Corpus Benchmark
+
+on:
+  push:
+    branches: [ master, main, develop ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  parse-trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Check for corpus flag
+        id: check
+        run: |
+          SHOULD_RUN="false"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SHOULD_RUN="true"
+          else
+            COMMIT_MSG="${{ github.event.head_commit.message }}"
+            if echo "$COMMIT_MSG" | grep -qiE '\-\-corp'; then
+              SHOULD_RUN="true"
+            fi
+          fi
+          echo "should_run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
+          echo "Will run corpus benchmark: ${SHOULD_RUN}"
+
+  corpus-benchmark:
+    runs-on: ubuntu-latest
+    needs: parse-trigger
+    if: needs.parse-trigger.outputs.should_run == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install compression tools
+        run: sudo apt-get install -y gzip zstd xz-utils zpaq brotli bc
+
+      - name: Build MBFA release
+        run: cargo build --release
+
+      - name: Download Canterbury corpus
+        run: |
+          mkdir -p corpus_files corpus_results
+          echo "Downloading Canterbury corpus..."
+          if curl -fsSL --retry 3 \
+              "http://corpus.canterbury.ac.nz/resources/cantrbry.tar.gz" \
+              -o /tmp/cantrbry.tar.gz; then
+            tar -xzf /tmp/cantrbry.tar.gz -C corpus_files/ 2>/dev/null || \
+              tar -xzf /tmp/cantrbry.tar.gz -C corpus_files/ --strip-components=1
+            echo "Canterbury corpus downloaded successfully"
+          else
+            echo "Primary download failed, trying mirror..."
+            curl -fsSL --retry 3 \
+              "https://web.archive.org/web/2024/http://corpus.canterbury.ac.nz/resources/cantrbry.tar.gz" \
+              -o /tmp/cantrbry.tar.gz
+            tar -xzf /tmp/cantrbry.tar.gz -C corpus_files/ 2>/dev/null || \
+              tar -xzf /tmp/cantrbry.tar.gz -C corpus_files/ --strip-components=1
+          fi
+          echo "Corpus files:"
+          ls -lh corpus_files/
+
+      - name: Verify MBFA roundtrips on corpus
+        run: |
+          FAILED=0
+          for f in corpus_files/*; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f")
+            ./target/release/mbfa compress "$f" "/tmp/${name}.mbfa" > /dev/null 2>&1
+            ./target/release/mbfa decompress "/tmp/${name}.mbfa" "/tmp/${name}.out" > /dev/null 2>&1
+            if diff "$f" "/tmp/${name}.out" > /dev/null 2>&1; then
+              echo "PASS: $name"
+            else
+              echo "FAIL: $name"
+              FAILED=$((FAILED+1))
+            fi
+          done
+          if [ $FAILED -gt 0 ]; then
+            echo "ERROR: $FAILED roundtrip(s) failed"
+            exit 1
+          fi
+          echo "All roundtrips passed"
+
+      - name: Run corpus benchmarks
+        run: |
+          fix_pct() { echo "$1" | sed 's/^\./0./'; }
+
+          # Map file extensions/names to human-readable types
+          file_type() {
+            local name=$(basename "$1" | tr '[:upper:]' '[:lower:]')
+            case "$name" in
+              *.txt)  echo "Text" ;;
+              *.html|*.htm) echo "HTML" ;;
+              *.c|*.h|*.cpp|*.rs) echo "Source" ;;
+              *.lsp|*.lisp) echo "Lisp" ;;
+              *.xls|*.xlsx) echo "Spreadsheet" ;;
+              *.pdf)  echo "PDF" ;;
+              *.bmp|*.png|*.gif) echo "Image" ;;
+              *.wav|*.mp3) echo "Audio" ;;
+              ptt5)   echo "Binary" ;;
+              sum)    echo "Executable" ;;
+              *)      echo "Binary" ;;
+            esac
+          }
+
+          echo "[" > corpus_results/results.json
+          FIRST=true
+
+          run_one() {
+            local file=$1
+            local name=$(basename "$file")
+            local ftype=$(file_type "$file")
+            local orig=$(wc -c < "$file")
+
+            # MBFA
+            local t0=$(date +%s%N)
+            ./target/release/mbfa compress "$file" "/tmp/${name}.mbfa" \
+              > "/tmp/${name}_mbfa.log" 2>&1
+            local t1=$(date +%s%N)
+            local mbfa_ms=$(( (t1-t0)/1000000 ))
+            local mbfa_sz=$(wc -c < "/tmp/${name}.mbfa" 2>/dev/null || echo 0)
+            local fold_detail=$(cat "/tmp/${name}_mbfa.log" | \
+              grep -E "^(Original|Fold|Done|Joint|Entropy)" | \
+              tr '\n' '|' | sed 's/"/\\"/g')
+
+            # gzip
+            t0=$(date +%s%N)
+            gzip -k -f -c "$file" > "/tmp/${name}.gz"
+            t1=$(date +%s%N)
+            local gz_ms=$(( (t1-t0)/1000000 ))
+            local gz_sz=$(wc -c < "/tmp/${name}.gz")
+
+            # zstd
+            t0=$(date +%s%N)
+            zstd -q -f -c "$file" > "/tmp/${name}.zst"
+            t1=$(date +%s%N)
+            local zst_ms=$(( (t1-t0)/1000000 ))
+            local zst_sz=$(wc -c < "/tmp/${name}.zst")
+
+            # xz
+            t0=$(date +%s%N)
+            xz -k -f -c "$file" > "/tmp/${name}.xz"
+            t1=$(date +%s%N)
+            local xz_ms=$(( (t1-t0)/1000000 ))
+            local xz_sz=$(wc -c < "/tmp/${name}.xz")
+
+            # brotli
+            t0=$(date +%s%N)
+            brotli -k -f -c "$file" > "/tmp/${name}.br"
+            t1=$(date +%s%N)
+            local br_ms=$(( (t1-t0)/1000000 ))
+            local br_sz=$(wc -c < "/tmp/${name}.br")
+
+            # zpaq
+            t0=$(date +%s%N)
+            zpaq a "/tmp/${name}.zpaq" "$file" -method 2 > /dev/null 2>&1 || true
+            t1=$(date +%s%N)
+            local zpaq_ms=$(( (t1-t0)/1000000 ))
+            local zpaq_sz=$(wc -c < "/tmp/${name}.zpaq" 2>/dev/null || echo 0)
+
+            # Percentages
+            local mbfa_pct=$(fix_pct $(echo "scale=2; $mbfa_sz*100/$orig" | bc))
+            local gz_pct=$(fix_pct   $(echo "scale=2; $gz_sz  *100/$orig" | bc))
+            local zst_pct=$(fix_pct  $(echo "scale=2; $zst_sz *100/$orig" | bc))
+            local xz_pct=$(fix_pct   $(echo "scale=2; $xz_sz  *100/$orig" | bc))
+            local br_pct=$(fix_pct   $(echo "scale=2; $br_sz  *100/$orig" | bc))
+            local zpaq_pct=$(fix_pct $(echo "scale=2; $zpaq_sz*100/$orig" | bc))
+
+            # MBFA rank among all 6
+            local scores="$mbfa_pct $gz_pct $zst_pct $xz_pct $br_pct $zpaq_pct"
+            local rank=$(echo "$scores" | tr ' ' '\n' | \
+              sort -n | grep -n "^${mbfa_pct}$" | head -1 | cut -d: -f1)
+            [ -z "$rank" ] && rank="-"
+
+            if [ "$FIRST" = "true" ]; then FIRST=false; else echo "," >> corpus_results/results.json; fi
+
+            cat >> corpus_results/results.json << EOJSON
+          {
+            "file": "$name",
+            "type": "$ftype",
+            "original_bytes": $orig,
+            "mbfa_bytes": $mbfa_sz,   "mbfa_pct": $mbfa_pct,   "mbfa_ms": $mbfa_ms,
+            "gzip_bytes": $gz_sz,     "gzip_pct": $gz_pct,     "gzip_ms": $gz_ms,
+            "zstd_bytes": $zst_sz,    "zstd_pct": $zst_pct,    "zstd_ms": $zst_ms,
+            "xz_bytes": $xz_sz,       "xz_pct": $xz_pct,       "xz_ms": $xz_ms,
+            "brotli_bytes": $br_sz,   "brotli_pct": $br_pct,   "brotli_ms": $br_ms,
+            "zpaq_bytes": $zpaq_sz,   "zpaq_pct": $zpaq_pct,   "zpaq_ms": $zpaq_ms,
+            "mbfa_rank": $rank,
+            "fold_detail": "$fold_detail"
+          }
+          EOJSON
+
+            printf "%-18s %8s B | MBFA:%6s%%(#%s) gz:%6s%% zst:%6s%% xz:%6s%% br:%6s%% zpaq:%6s%%\n" \
+              "$name" "$orig" "$mbfa_pct" "$rank" \
+              "$gz_pct" "$zst_pct" "$xz_pct" "$br_pct" "$zpaq_pct"
+          }
+
+          echo "================================================"
+          echo "  MBFA — Canterbury Corpus Benchmark"
+          echo "  Build #${{ github.run_number }} | $(date -u)"
+          echo "================================================"
+
+          for f in corpus_files/*; do
+            [ -f "$f" ] && run_one "$f"
+          done
+
+          echo "]" >> corpus_results/results.json
+
+          echo "================================================"
+          cat corpus_results/results.json
+
+      - name: Generate corpus HTML
+        run: |
+          cp .github/corpus-template.html corpus_results/index.html
+          BUILD_DATE=$(date -u)
+          BUILD_NUM="${{ github.run_number }}"
+          COMMIT="${{ github.sha }}"
+          BRANCH="${{ github.ref_name }}"
+          sed -i "s/BUILD_NUM_PLACEHOLDER/${BUILD_NUM}/g"  corpus_results/index.html
+          sed -i "s/BRANCH_PLACEHOLDER/${BRANCH}/g"        corpus_results/index.html
+          sed -i "s/COMMIT_PLACEHOLDER/${COMMIT:0:8}/g"    corpus_results/index.html
+          sed -i "s|DATE_PLACEHOLDER|${BUILD_DATE}|g"      corpus_results/index.html
+
+      - name: Upload corpus results
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-results-${{ github.run_number }}
+          path: corpus_results/
+          retention-days: 90
+
+      - name: Deploy corpus to gh-pages
+        run: |
+          git config --global user.name "MBFA CI"
+          git config --global user.email "ci@mbfa.dev"
+
+          WORK=$(mktemp -d)
+          git worktree add "$WORK" gh-pages 2>/dev/null || {
+            cd "$WORK" && git init && git checkout --orphan gh-pages && cd -
+          }
+
+          mkdir -p "$WORK/corpus"
+          cp -r corpus_results/* "$WORK/corpus/"
+
+          cd "$WORK"
+          git add .
+          git commit -m "MBFA corpus benchmark — Build #${{ github.run_number }} [skip ci]" || true
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages --force
+
+          echo "Deployed to https://mid-d-man.github.io/mbfa/corpus/"
+
+  summary:
+    runs-on: ubuntu-latest
+    needs: [parse-trigger]
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "MBFA Canterbury Corpus — Build #${{ github.run_number }}"
+          echo "Triggered: ${{ needs.parse-trigger.outputs.should_run }}"
+          echo "Use --corp in commit message to run corpus benchmarks."

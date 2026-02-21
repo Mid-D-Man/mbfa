@@ -1,75 +1,127 @@
-//! Token-level pair encoding with Cantor operand compression.
+// src/pairing.rs
+//! Token-level pair encoding with Exp-Golomb operand compression.
 //! Fold 2 uses this instead of raw LZ on bytes.
+//!
+//! Operand encoding strategy (replaces Cantor pairing):
+//! Each operand (offset, length) encoded independently.
+//! 1 flag bit: 0 = exp-golomb follows, 1 = raw bits follow.
+//! Offset raw = 15 bits, Length raw = 8 bits.
+//! Exp-Golomb used only when cheaper than raw — never worse than raw.
 
 use bitstream_io::{BitWriter, BitReader, BigEndian, BitWrite, BitRead};
 use crate::opcode::Token;
 
 // 3-bit pair/single/end prefix — fixed, never transmitted
-const PREFIX_LL:  u32 = 0b000; // LIT + LIT
-const PREFIX_LB:  u32 = 0b001; // LIT + BACKREF
-const PREFIX_BL:  u32 = 0b010; // BACKREF + LIT
-const PREFIX_BB:  u32 = 0b011; // BACKREF + BACKREF
-const PREFIX_SL:  u32 = 0b100; // single LIT
-const PREFIX_SB:  u32 = 0b101; // single BACKREF
-const PREFIX_END: u32 = 0b110; // end of stream
+const PREFIX_LL:   u32 = 0b000;
+const PREFIX_LB:   u32 = 0b001;
+const PREFIX_BL:   u32 = 0b010;
+const PREFIX_BB:   u32 = 0b011;
+const PREFIX_SL:   u32 = 0b100;
+const PREFIX_SB:   u32 = 0b101;
+const PREFIX_END:  u32 = 0b110;
 const PREFIX_BITS: u32 = 3;
 
-// Bit cost summary vs current encoding:
-// LL:  3+8+8   = 19 bits  (was 10+10  = 20)  saves 1 bit
-// LB:  3+8+17  = 28 bits  (was 10+24  = 34)  saves 6 bits  (if cantor fits 16 bits)
-// BL:  3+17+8  = 28 bits  (was 24+10  = 34)  saves 6 bits
-// BB:  3+17+17 = 37 bits  (was 24+24  = 48)  saves 11 bits ← biggest win
-// SL:  3+8     = 11 bits  (was        10)    costs 1 bit
-// SB:  3+17    = 20 bits  (was        24)    saves 4 bits
-// END: 3 bits             (was         2)    costs 1 bit
+const OFFSET_RAW_BITS: u32 = 15;
+const LENGTH_RAW_BITS: u32 = 8;
 
-/// Cantor pairing — encodes two natural numbers into one
-/// cantor(x,y) = (x+y)(x+y+1)/2 + y
-fn cantor_pair(x: u32, y: u32) -> u64 {
-    let s = (x + y) as u64;
-    s * (s + 1) / 2 + y as u64
+/// How many bits exp-golomb needs for value n (k=0)
+/// Total = 2 * floor(log2(n+1)) + 1
+fn exp_golomb_bit_cost(n: u32) -> u32 {
+    if n == 0 {
+        return 1;
+    }
+    let k = 31 - (n + 1).leading_zeros(); // floor(log2(n+1))
+    2 * k + 1
 }
 
-/// Inverse Cantor — recovers x and y from cantor(x,y)
-fn cantor_unpair(z: u64) -> (u32, u32) {
-    let w = ((((8 * z + 1) as f64).sqrt() - 1.0) / 2.0).floor() as u64;
-    let t = (w * w + w) / 2;
-    let y = z - t;
-    let x = w - y;
-    (x as u32, y as u32)
+/// Write value n using k=0 Exp-Golomb coding
+fn write_exp_golomb<W: std::io::Write>(
+    w: &mut BitWriter<W, BigEndian>,
+    n: u32,
+) -> std::io::Result<()> {
+    let m = n + 1;
+    let k = 31 - m.leading_zeros(); // floor(log2(m))
+    // Write k zero bits
+    for _ in 0..k {
+        w.write(1, 0u32)?;
+    }
+    // Write m in (k+1) bits
+    w.write(k + 1, m)?;
+    Ok(())
 }
 
-/// Write a backref operand.
-/// If cantor(offset,length) < 65536: write flag=0 + 16-bit cantor value (17 bits total)
-/// Otherwise: write flag=1 + raw 15-bit offset + 8-bit length (24 bits total)
-fn write_backref_operand<W: std::io::Write>(
+/// Read k=0 Exp-Golomb coded value
+fn read_exp_golomb<R: std::io::Read>(
+    r: &mut BitReader<R, BigEndian>,
+) -> std::io::Result<u32> {
+    let mut k = 0u32;
+    // Count leading zeros
+    loop {
+        let bit = r.read::<u32>(1)?;
+        if bit == 1 {
+            break;
+        }
+        k += 1;
+    }
+    // We already consumed the leading 1 of m, read remaining k bits
+    let rest = if k > 0 { r.read::<u32>(k)? } else { 0 };
+    let m = (1 << k) | rest;
+    Ok(m - 1)
+}
+
+/// Write a BACKREF offset operand.
+/// Flag=0: exp-golomb (when cheaper). Flag=1: raw 15-bit.
+fn write_offset<W: std::io::Write>(
     w: &mut BitWriter<W, BigEndian>,
     offset: u32,
-    length: u32,
 ) -> std::io::Result<()> {
-    let c = cantor_pair(offset, length);
-    if c < 65536 {
-        w.write(1, 0u32)?;
-        w.write(16, c as u32)?;
+    let eg_bits = exp_golomb_bit_cost(offset);
+    if eg_bits < OFFSET_RAW_BITS {
+        w.write(1, 0u32)?; // flag: exp-golomb
+        write_exp_golomb(w, offset)?;
     } else {
-        w.write(1, 1u32)?;
-        w.write(15, offset)?;
-        w.write(8, length)?;
+        w.write(1, 1u32)?; // flag: raw
+        w.write(OFFSET_RAW_BITS, offset)?;
     }
     Ok(())
 }
 
-fn read_backref_operand<R: std::io::Read>(
+/// Write a BACKREF length operand.
+/// Flag=0: exp-golomb (when cheaper). Flag=1: raw 8-bit.
+fn write_length<W: std::io::Write>(
+    w: &mut BitWriter<W, BigEndian>,
+    length: u32,
+) -> std::io::Result<()> {
+    let eg_bits = exp_golomb_bit_cost(length);
+    if eg_bits < LENGTH_RAW_BITS {
+        w.write(1, 0u32)?; // flag: exp-golomb
+        write_exp_golomb(w, length)?;
+    } else {
+        w.write(1, 1u32)?; // flag: raw
+        w.write(LENGTH_RAW_BITS, length)?;
+    }
+    Ok(())
+}
+
+fn read_offset<R: std::io::Read>(
     r: &mut BitReader<R, BigEndian>,
-) -> std::io::Result<(u32, u32)> {
+) -> std::io::Result<u32> {
     let flag = r.read::<u32>(1)?;
     if flag == 0 {
-        let c = r.read::<u32>(16)? as u64;
-        Ok(cantor_unpair(c))
+        read_exp_golomb(r)
     } else {
-        let offset = r.read::<u32>(15)?;
-        let length = r.read::<u32>(8)?;
-        Ok((offset, length))
+        Ok(r.read::<u32>(OFFSET_RAW_BITS)?)
+    }
+}
+
+fn read_length<R: std::io::Read>(
+    r: &mut BitReader<R, BigEndian>,
+) -> std::io::Result<u32> {
+    let flag = r.read::<u32>(1)?;
+    if flag == 0 {
+        read_exp_golomb(r)
+    } else {
+        Ok(r.read::<u32>(LENGTH_RAW_BITS)?)
     }
 }
 
@@ -79,7 +131,6 @@ pub fn pair_encode(tokens: &[Token]) -> std::io::Result<Vec<u8>> {
     {
         let mut w = BitWriter::endian(&mut output, BigEndian);
 
-        // Collect all non-END tokens — END is written separately at the end
         let data: Vec<&Token> = tokens.iter()
             .filter(|t| !matches!(t, Token::End))
             .collect();
@@ -87,7 +138,6 @@ pub fn pair_encode(tokens: &[Token]) -> std::io::Result<Vec<u8>> {
         let mut i = 0;
         while i < data.len() {
             if i + 1 < data.len() {
-                // Write a pair
                 match (data[i], data[i + 1]) {
                     (Token::Lit { byte: b1 }, Token::Lit { byte: b2 }) => {
                         w.write(PREFIX_BITS, PREFIX_LL)?;
@@ -97,24 +147,27 @@ pub fn pair_encode(tokens: &[Token]) -> std::io::Result<Vec<u8>> {
                     (Token::Lit { byte: b }, Token::Backref { offset, length }) => {
                         w.write(PREFIX_BITS, PREFIX_LB)?;
                         w.write(8, *b as u32)?;
-                        write_backref_operand(&mut w, *offset, *length)?;
+                        write_offset(&mut w, *offset)?;
+                        write_length(&mut w, *length)?;
                     }
                     (Token::Backref { offset, length }, Token::Lit { byte: b }) => {
                         w.write(PREFIX_BITS, PREFIX_BL)?;
-                        write_backref_operand(&mut w, *offset, *length)?;
+                        write_offset(&mut w, *offset)?;
+                        write_length(&mut w, *length)?;
                         w.write(8, *b as u32)?;
                     }
                     (Token::Backref { offset: o1, length: l1 },
-                        Token::Backref { offset: o2, length: l2 }) => {
+                     Token::Backref { offset: o2, length: l2 }) => {
                         w.write(PREFIX_BITS, PREFIX_BB)?;
-                        write_backref_operand(&mut w, *o1, *l1)?;
-                        write_backref_operand(&mut w, *o2, *l2)?;
+                        write_offset(&mut w, *o1)?;
+                        write_length(&mut w, *l1)?;
+                        write_offset(&mut w, *o2)?;
+                        write_length(&mut w, *l2)?;
                     }
                     _ => unreachable!("END should be filtered"),
                 }
                 i += 2;
             } else {
-                // Odd token out — write as single
                 match data[i] {
                     Token::Lit { byte: b } => {
                         w.write(PREFIX_BITS, PREFIX_SL)?;
@@ -122,7 +175,8 @@ pub fn pair_encode(tokens: &[Token]) -> std::io::Result<Vec<u8>> {
                     }
                     Token::Backref { offset, length } => {
                         w.write(PREFIX_BITS, PREFIX_SB)?;
-                        write_backref_operand(&mut w, *offset, *length)?;
+                        write_offset(&mut w, *offset)?;
+                        write_length(&mut w, *length)?;
                     }
                     _ => unreachable!(),
                 }
@@ -156,19 +210,23 @@ pub fn pair_decode(input: &[u8]) -> std::io::Result<Vec<Token>> {
             }
             p if p == PREFIX_LB => {
                 let b = r.read::<u32>(8)? as u8;
-                let (offset, length) = read_backref_operand(&mut r)?;
+                let offset = read_offset(&mut r)?;
+                let length = read_length(&mut r)?;
                 tokens.push(Token::Lit { byte: b });
                 tokens.push(Token::Backref { offset, length });
             }
             p if p == PREFIX_BL => {
-                let (offset, length) = read_backref_operand(&mut r)?;
+                let offset = read_offset(&mut r)?;
+                let length = read_length(&mut r)?;
                 let b = r.read::<u32>(8)? as u8;
                 tokens.push(Token::Backref { offset, length });
                 tokens.push(Token::Lit { byte: b });
             }
             p if p == PREFIX_BB => {
-                let (o1, l1) = read_backref_operand(&mut r)?;
-                let (o2, l2) = read_backref_operand(&mut r)?;
+                let o1 = read_offset(&mut r)?;
+                let l1 = read_length(&mut r)?;
+                let o2 = read_offset(&mut r)?;
+                let l2 = read_length(&mut r)?;
                 tokens.push(Token::Backref { offset: o1, length: l1 });
                 tokens.push(Token::Backref { offset: o2, length: l2 });
             }
@@ -177,7 +235,8 @@ pub fn pair_decode(input: &[u8]) -> std::io::Result<Vec<Token>> {
                 tokens.push(Token::Lit { byte: b });
             }
             p if p == PREFIX_SB => {
-                let (offset, length) = read_backref_operand(&mut r)?;
+                let offset = read_offset(&mut r)?;
+                let length = read_length(&mut r)?;
                 tokens.push(Token::Backref { offset, length });
             }
             p if p == PREFIX_END => {

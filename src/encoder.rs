@@ -1,3 +1,4 @@
+// src/encoder.rs
 //! LZ-style scanner with hash chain match finding.
 //! O(n) average case instead of O(n²) brute force.
 
@@ -6,12 +7,10 @@ use crate::opcode::{Token, OFFSET_BITS, LENGTH_BITS, BACKREF_TOTAL_BITS, LIT_TOT
 const MAX_OFFSET: usize = (1 << OFFSET_BITS) as usize - 1;  // 32767
 const MAX_LENGTH: usize = (1 << LENGTH_BITS) as usize - 1;  // 255
 
-// Hash table size — power of 2 for fast modulo via bitwise AND
 const HASH_SIZE: usize = 1 << 16;  // 65536 buckets
 const HASH_MASK: usize = HASH_SIZE - 1;
-const CHAIN_LIMIT: usize = 64;  // max chain depth to follow per position
+const CHAIN_LIMIT: usize = 256;  // was 64 — deeper search finds longer matches
 
-/// Hash 3 bytes into a table index
 #[inline]
 fn hash3(input: &[u8], pos: usize) -> usize {
     if pos + 2 >= input.len() {
@@ -28,9 +27,7 @@ pub fn scan(input: &[u8]) -> Vec<Token> {
     let mut tokens = Vec::new();
     let n = input.len();
 
-    // head[h] = most recent position with hash h, u32::MAX = empty
     let mut head = vec![u32::MAX; HASH_SIZE];
-    // prev[i] = previous position in chain for position i
     let mut prev = vec![u32::MAX; n];
 
     let mut i = 0;
@@ -40,7 +37,6 @@ pub fn scan(input: &[u8]) -> Vec<Token> {
         let (best_offset, best_len) = find_match(input, i, h, &head, &prev);
 
         if best_len >= 2 && BACKREF_TOTAL_BITS < (best_len as u32 * LIT_TOTAL_BITS) {
-            // Insert all positions we're skipping into hash table
             for k in 0..best_len {
                 if i + k + 2 < n {
                     let hk = hash3(input, i + k);
@@ -80,7 +76,6 @@ fn find_match(
     let mut cur = head[h];
     while cur != u32::MAX && steps < CHAIN_LIMIT {
         let j = cur as usize;
-        // Must be within lookback window
         if i - j > MAX_OFFSET {
             break;
         }
@@ -98,7 +93,7 @@ fn find_match(
             best_len = len;
             best_offset = span;
             if best_len == MAX_LENGTH {
-                break; // can't do better
+                break;
             }
         }
 
@@ -107,4 +102,4 @@ fn find_match(
     }
 
     (best_offset, best_len)
-}
+        }

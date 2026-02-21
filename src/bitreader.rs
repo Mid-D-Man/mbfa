@@ -1,9 +1,11 @@
+// src/bitreader.rs
 //! Reads a compact bitstream back into a Token stream.
+//! offset_bits must match the value used during encoding (read from file header).
 
 use bitstream_io::{BitReader, BigEndian, BitRead};
 use crate::opcode::*;
 
-pub fn read_tokens(input: &[u8]) -> std::io::Result<Vec<Token>> {
+pub fn read_tokens(input: &[u8], offset_bits: u32) -> std::io::Result<Vec<Token>> {
     let mut tokens = Vec::new();
     let mut reader = BitReader::endian(std::io::Cursor::new(input), BigEndian);
 
@@ -14,7 +16,7 @@ pub fn read_tokens(input: &[u8]) -> std::io::Result<Vec<Token>> {
         };
 
         if first_bit == OPCODE_BACKREF_VAL {
-            let offset = reader.read::<u32>(OFFSET_BITS)?;
+            let offset = reader.read::<u32>(offset_bits)?;
             let length = reader.read::<u32>(LENGTH_BITS)?;
             tokens.push(Token::Backref { offset, length });
         } else {

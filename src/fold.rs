@@ -3,7 +3,7 @@ use crate::bitwriter::write_tokens;
 use crate::bitreader::read_tokens;
 use crate::pairing::pair_encode;
 
-const MIN_IMPROVEMENT_RATIO: f64 = 0.97;
+const MIN_IMPROVEMENT_RATIO: f64 = 0.985;  // was 0.97 — lowered to let marginal folds fire
 const MIN_FOLD_BITS: usize = 64;
 const MIN_PAIR_BYTES: usize = 512;
 
@@ -32,7 +32,7 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool)>
         println!("Fold {} ({}): {} bits ({} bytes)", fold_num, fold_type, folded_bits, folded.len());
 
         let ratio = folded_bits as f64 / prev_size as f64;
-        if folded_bits >= (prev_size as f64 * MIN_IMPROVEMENT_RATIO) as usize {
+        if ratio >= MIN_IMPROVEMENT_RATIO {
             println!("Fold {} not worth it (ratio {:.3}), stopping at fold {}",
                      fold_num, ratio, folds_done);
             break;

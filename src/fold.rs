@@ -1,9 +1,10 @@
+// src/fold.rs
 use crate::encoder::scan;
 use crate::bitwriter::write_tokens;
 use crate::bitreader::read_tokens;
 use crate::pairing::pair_encode;
 
-const MIN_IMPROVEMENT_RATIO: f64 = 0.985;  // was 0.97 — lowered to let marginal folds fire
+const MIN_IMPROVEMENT_RATIO: f64 = 0.97;
 const MIN_FOLD_BITS: usize = 64;
 const MIN_PAIR_BYTES: usize = 512;
 

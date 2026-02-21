@@ -24,16 +24,20 @@ pub const OPCODE_END_BITS:     u32 = 2;
 pub const OPCODE_END_VAL:      u32 = 0b11;
 
 // ── Operand bit widths ────────────────────────────────────────────────────────
-// OFFSET: 15 bits = 32767 byte lookback window (matches gzip territory)
+// OFFSET: 17 bits = 131071 byte lookback window (~128KB)
+//   Previously 15 bits (32KB). Raised to capture repetition patterns in large
+//   files whose repetition period exceeds 32KB (e.g. source files > 32KB
+//   repeated across a 1MB corpus). Cost increase: 24 bits → 26 bits per
+//   BACKREF, break-even still at match length 3 (3 * 10 = 30 > 26).
 // LENGTH:  8 bits = 255  byte max copy length
-pub const OFFSET_BITS: u32 = 15;
+pub const OFFSET_BITS: u32 = 17;
 pub const LENGTH_BITS: u32 = 8;
 pub const BYTE_BITS:   u32 = 8;
 
 // ── Token bit cost helpers ────────────────────────────────────────────────────
-pub const LIT_TOTAL_BITS:     u32 = OPCODE_LIT_BITS + BYTE_BITS;
-pub const BACKREF_TOTAL_BITS: u32 = OPCODE_BACKREF_BITS + OFFSET_BITS + LENGTH_BITS;
-pub const END_TOTAL_BITS:     u32 = OPCODE_END_BITS;
+pub const LIT_TOTAL_BITS:     u32 = OPCODE_LIT_BITS + BYTE_BITS;        // 10
+pub const BACKREF_TOTAL_BITS: u32 = OPCODE_BACKREF_BITS + OFFSET_BITS + LENGTH_BITS; // 26
+pub const END_TOTAL_BITS:     u32 = OPCODE_END_BITS;                     // 2
 
 /// Returns how many bits a token costs when encoded
 pub fn token_bit_cost(token: &Token) -> u32 {
@@ -42,4 +46,4 @@ pub fn token_bit_cost(token: &Token) -> u32 {
         Token::Backref { .. } => BACKREF_TOTAL_BITS,
         Token::End            => END_TOTAL_BITS,
     }
-}
+    }

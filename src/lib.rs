@@ -12,12 +12,11 @@ pub mod entropy;
 
 use std::io;
 
-/// File header layout:
+/// File header layout (4 bytes):
 ///   Byte 0: fold_count
-///   Byte 1: pair_flag   (1 = fold 2 used pair encoding)
-///   Byte 2: entropy_flag (0 = raw, 1 = joint Huffman wraps outermost fold)
-///   Byte 3: offset_bits  (actual offset field width used in LZ bitstream,
-///                          range [7, 17]. Allows adaptive window per file.)
+///   Byte 1: pair_flag    (1 = fold 2 used pair encoding)
+///   Byte 2: entropy_flag (0 = raw bitstream, 1 = joint Huffman)
+///   Byte 3: offset_bits  (LZ offset field width, range 7–17)
 pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     let (compressed, folds_done, used_pairing, offset_bits) =
         fold::fold(input, max_folds)?;
@@ -30,7 +29,7 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
         let tokens = bitreader::read_tokens(&compressed, offset_bits)?;
         match entropy::build_encode_table(&tokens) {
             Some(enc_table) => {
-                let coded       = entropy::write_tokens_joint(&tokens, &enc_table)?;
+                let coded       = entropy::write_tokens_joint(&tokens, &enc_table, offset_bits)?;
                 let table_bytes = entropy::serialize_table(&enc_table);
                 let total       = coded.len() + table_bytes.len();
                 if total < compressed.len() {
@@ -42,7 +41,8 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                     payload.extend_from_slice(&coded);
                     (payload, 1u8)
                 } else {
-                    println!("Joint entropy skipped (no gain: {} vs {} raw)", total, compressed.len());
+                    println!("Joint entropy skipped (no gain: {} vs {} raw)",
+                             total, compressed.len());
                     (compressed, 0u8)
                 }
             }
@@ -56,11 +56,11 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     output.push(folds_done);
     output.push(used_pairing as u8);
     output.push(entropy_flag);
-    output.push(offset_bits as u8);   // NEW: byte 3
+    output.push(offset_bits as u8);
     output.extend_from_slice(&final_payload);
     Ok(output)
 }
 
 pub fn decompress(input: &[u8]) -> io::Result<Vec<u8>> {
     unfold::unfold(input)
-        }
+}

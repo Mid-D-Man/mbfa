@@ -1,21 +1,18 @@
 // src/fold.rs
-use crate::encoder::scan;
+use crate::encoder::{scan, scan_adaptive};
 use crate::bitwriter::write_tokens;
 use crate::bitreader::read_tokens;
 use crate::pairing::pair_encode;
-use crate::opcode::Token;
+use crate::opcode::{Token, compute_optimal_offset_bits, OFFSET_BITS_MAX, OFFSET_BITS_MIN};
 
 const MIN_IMPROVEMENT_RATIO: f64 = 0.97;
 const MIN_FOLD_BITS: usize = 64;
 const MIN_PAIR_BYTES: usize = 512;
 const MAX_CANTOR_FALLBACK_RATE: f64 = 0.80;
 
-// Only attempt fold 2+ LZ on the packed bitstream if fold 1 compressed
-// to below this fraction of the original. At higher ratios the bitstream
-// bytes have no LZ-exploitable structure (they look quasi-random due to
-// bit-packing boundary misalignment) and fold 2 LZ will expand the data.
-// 0.10 = only try if fold 1 already achieved 90%+ reduction (e.g. highly
-// repetitive data). For everything else, fold 2 is pairing-only or skip.
+// Only attempt fold 2+ LZ on packed bitstream bytes when fold 1 has
+// already achieved extreme compression. Below this ratio the bytes are
+// quasi-random due to bit-boundary misalignment and LZ will expand them.
 const FOLD2_LZ_MAX_RATIO: f64 = 0.10;
 
 fn cantor(x: u32, y: u32) -> u64 {
@@ -29,32 +26,26 @@ fn cantor_fallback_rate(tokens: &[Token]) -> f64 {
     for t in tokens {
         if let Token::Backref { offset, length } = t {
             total_br += 1;
-            if cantor(*offset, *length) >= 65536 {
-                fallbacks += 1;
-            }
+            if cantor(*offset, *length) >= 65536 { fallbacks += 1; }
         }
     }
     if total_br == 0 { return 0.0; }
     fallbacks as f64 / total_br as f64
 }
 
-/// Emit diagnostics about window utilization for a token stream.
-/// Helps identify when the lookback window is the compression bottleneck.
-fn log_window_diagnostics(tokens: &[Token]) {
-    let max_offset_bits = crate::opcode::OFFSET_BITS;
-    let max_offset = (1u32 << max_offset_bits) - 1;
-
+fn log_window_diagnostics(tokens: &[Token], offset_bits: u32) {
+    let max_off = (1u32 << offset_bits) - 1;
     let mut total_br: u64 = 0;
-    let mut at_max_window: u64 = 0;
-    let mut above_half_window: u64 = 0;
+    let mut at_max: u64 = 0;
+    let mut above_half: u64 = 0;
     let mut total_lit: u64 = 0;
 
     for t in tokens {
         match t {
             Token::Backref { offset, .. } => {
                 total_br += 1;
-                if *offset == max_offset { at_max_window += 1; }
-                if *offset > max_offset / 2 { above_half_window += 1; }
+                if *offset == max_off { at_max += 1; }
+                if *offset > max_off / 2 { above_half += 1; }
             }
             Token::Lit { .. } => total_lit += 1,
             Token::End => {}
@@ -63,84 +54,86 @@ fn log_window_diagnostics(tokens: &[Token]) {
 
     if total_br + total_lit == 0 { return; }
     let total = total_br + total_lit;
-    let br_pct = total_br as f64 / total as f64 * 100.0;
-    let saturated_pct = if total_br > 0 {
-        at_max_window as f64 / total_br as f64 * 100.0
-    } else { 0.0 };
-    let deep_pct = if total_br > 0 {
-        above_half_window as f64 / total_br as f64 * 100.0
-    } else { 0.0 };
+    let br_pct    = total_br as f64 / total as f64 * 100.0;
+    let sat_pct   = if total_br > 0 { at_max    as f64 / total_br as f64 * 100.0 } else { 0.0 };
+    let deep_pct  = if total_br > 0 { above_half as f64 / total_br as f64 * 100.0 } else { 0.0 };
 
     println!(
         "Window diagnostics: {}/{} tokens are BACKREF ({:.1}%) | \
-         {:.1}% at max window ({} bytes) | {:.1}% in upper half of window | \
-         Window utilization: {}",
+         {:.1}% at max window ({} bytes) | {:.1}% in upper half | \
+         offset_bits={} — {}",
         total_br, total, br_pct,
-        saturated_pct, max_offset,
+        sat_pct, max_off,
         deep_pct,
-        if saturated_pct > 5.0 {
-            "⚠ SATURATED — increasing OFFSET_BITS would help"
-        } else if deep_pct > 30.0 {
-            "HEAVY — large offsets dominant"
-        } else {
-            "OK"
-        }
+        offset_bits,
+        if sat_pct > 5.0 { "⚠ SATURATED — window too small" }
+        else if deep_pct > 30.0 { "HEAVY — large offsets dominant" }
+        else { "OK" }
     );
 }
 
-/// Returns (compressed_bytes, folds_done, used_pairing)
-pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool)> {
+/// Returns (compressed_bytes, folds_done, used_pairing, offset_bits_used)
+pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, u32)> {
     let mut current = input.to_vec();
     let mut folds_done: u8 = 0;
     let mut prev_size = input.len() * 8;
     let original_size = input.len() * 8;
     let mut final_used_pairing = false;
+    let mut stored_offset_bits: u32 = OFFSET_BITS_MIN; // will be set on fold 1
 
     println!("Original size: {} bits ({} bytes)", prev_size, input.len());
 
     for fold_num in 1..=max_folds {
-        // ── Decide fold strategy ─────────────────────────────────────────────
-        //
-        // Fold 1: always LZ on raw input bytes.
-        //
-        // Fold 2+: the current `bytes` are a packed BigEndian bitstream of
-        // LIT/BACKREF/END tokens. Running LZ directly on these bytes is
-        // almost always counterproductive — bit-packing misaligns token
-        // boundaries with byte boundaries, so consecutive tokens produce
-        // byte sequences with no local repetition even if the token STREAM
-        // has high structural regularity. The LZ scanner finds nothing and
-        // emits mostly LIT tokens, adding ~25% overhead.
-        //
-        // Strategy: for fold 2+ we only attempt pairing (token-level) when
-        // the Cantor fallback rate is acceptable. We only fall back to LZ on
-        // packed bytes when fold 1 achieved extreme compression (< 10% of
-        // original) — which means the packed bytes ARE highly repetitive
-        // (e.g. the repetitive_12KB case, fold 1 → 0.13%).
-
         let current_ratio = current.len() as f64 * 8.0 / original_size as f64;
+
+        // ── Fold 1: adaptive LZ scan on raw bytes ────────────────────────────
+        if fold_num == 1 {
+            // Scan with maximum window, compute tight offset_bits from actual usage.
+            let (tokens, optimal_bits) = scan_adaptive(&current);
+            stored_offset_bits = optimal_bits;
+
+            log_window_diagnostics(&tokens, optimal_bits);
+            println!(
+                "Fold 1 adaptive: offset_bits={} (max window={} bytes, covers {} unique offsets)",
+                optimal_bits,
+                (1u32 << optimal_bits) - 1,
+                tokens.iter().filter(|t| matches!(t, Token::Backref { .. })).count()
+            );
+
+            let folded = write_tokens(&tokens, optimal_bits)?;
+            let folded_bits = folded.len() * 8;
+            println!("Fold 1 (LZ): {} bits ({} bytes)", folded_bits, folded.len());
+
+            let ratio = folded_bits as f64 / prev_size as f64;
+            if ratio >= MIN_IMPROVEMENT_RATIO {
+                println!("Fold 1 not worth it (ratio {:.3}), stopping at fold 0", ratio);
+                break;
+            }
+            if folded_bits <= MIN_FOLD_BITS {
+                println!("Hit minimum size floor at fold 1");
+                current = folded;
+                folds_done = 1;
+                break;
+            }
+            current = folded;
+            folds_done = 1;
+            prev_size = folded_bits;
+            continue;
+        }
+
+        // ── Fold 2+: decide strategy ─────────────────────────────────────────
+        let allow_lz_on_packed = current_ratio < FOLD2_LZ_MAX_RATIO;
 
         let consider_pairing = fold_num == 2
             && folds_done == 1
             && current.len() >= MIN_PAIR_BYTES;
 
-        // Only try fold 2+ LZ if the stream is extremely compressed already.
-        // For everything else, LZ on packed bytes will expand the data.
-        let allow_lz_on_packed = current_ratio < FOLD2_LZ_MAX_RATIO;
-
         let use_pairing = if consider_pairing {
-            let tokens = read_tokens(&current)?;
-
-            // Log window diagnostics on fold 1 output — this is where we can
-            // see if the lookback window is the bottleneck.
-            if fold_num == 2 {
-                log_window_diagnostics(&tokens);
-            }
-
+            let tokens = read_tokens(&current, stored_offset_bits)?;
             let fallback_rate = cantor_fallback_rate(&tokens);
             println!(
                 "Fold {} pairing pre-scan: Cantor fallback rate = {:.1}% (threshold {}%)",
-                fold_num,
-                fallback_rate * 100.0,
+                fold_num, fallback_rate * 100.0,
                 (MAX_CANTOR_FALLBACK_RATE * 100.0) as u32
             );
             if fallback_rate > MAX_CANTOR_FALLBACK_RATE {
@@ -153,25 +146,25 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool)>
             false
         };
 
-        // Skip this fold entirely if: not pairing AND LZ on packed bytes is
-        // not allowed (stream is not extremely compressed). This avoids the
-        // expand-then-stop cycle that wastes time and clutters fold logs.
         if fold_num >= 2 && !use_pairing && !allow_lz_on_packed {
             println!(
                 "Fold {} skipped — LZ on packed bytes not beneficial \
-                 (current ratio {:.3}, threshold {:.2}), stream not extreme enough",
+                 (current ratio {:.3}, threshold {:.2})",
                 fold_num, current_ratio, FOLD2_LZ_MAX_RATIO
             );
             break;
         }
 
         let folded = if use_pairing {
-            let tokens = read_tokens(&current)?;
+            let tokens = read_tokens(&current, stored_offset_bits)?;
             pair_encode(&tokens)?
         } else {
-            // LZ on packed bytes — only reached when current_ratio < 0.10
-            let tokens = scan(&current);
-            write_tokens(&tokens)?
+            // LZ on packed bytes — only when current_ratio < FOLD2_LZ_MAX_RATIO.
+            // These bytes are near-random from bit-packing so use a wide scan;
+            // compute adaptive offset_bits for this fold's output too.
+            let (tokens, new_bits) = scan_adaptive(&current);
+            stored_offset_bits = new_bits;
+            write_tokens(&tokens, new_bits)?
         };
 
         let folded_bits = folded.len() * 8;
@@ -180,13 +173,10 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool)>
 
         let ratio = folded_bits as f64 / prev_size as f64;
         if ratio >= MIN_IMPROVEMENT_RATIO {
-            println!(
-                "Fold {} not worth it (ratio {:.3}), stopping at fold {}",
-                fold_num, ratio, folds_done
-            );
+            println!("Fold {} not worth it (ratio {:.3}), stopping at fold {}",
+                     fold_num, ratio, folds_done);
             break;
         }
-
         if folded_bits <= MIN_FOLD_BITS {
             println!("Hit minimum size floor at fold {}", fold_num);
             current = folded;
@@ -201,5 +191,5 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool)>
         prev_size = folded_bits;
     }
 
-    Ok((current, folds_done, final_used_pairing))
-                    }
+    Ok((current, folds_done, final_used_pairing, stored_offset_bits))
+    }

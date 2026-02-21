@@ -88,15 +88,26 @@ jobs:
           for f in corpus_files/*; do
             [ -f "$f" ] || continue
             name=$(basename "$f")
-            ./target/release/mbfa compress "$f" "/tmp/${name}.mbfa" > /dev/null 2>&1
-            ./target/release/mbfa decompress "/tmp/${name}.mbfa" "/tmp/${name}.out" > /dev/null 2>&1
+
+            # Use || true so a panic/crash is treated as FAIL, not a step crash
+            ./target/release/mbfa compress "$f" "/tmp/${name}.mbfa" > "/tmp/${name}_compress.log" 2>&1 || true
+            ./target/release/mbfa decompress "/tmp/${name}.mbfa" "/tmp/${name}.out" > "/tmp/${name}_decompress.log" 2>&1 || true
+
             if diff "$f" "/tmp/${name}.out" > /dev/null 2>&1; then
               echo "PASS: $name"
             else
               echo "FAIL: $name"
+              echo "  --- compress log ---"
+              cat "/tmp/${name}_compress.log" || true
+              echo "  --- decompress log ---"
+              cat "/tmp/${name}_decompress.log" || true
               FAILED=$((FAILED+1))
             fi
           done
+
+          echo ""
+          echo "Roundtrip summary: $(($(ls corpus_files | wc -l) - FAILED)) passed, ${FAILED} failed"
+
           if [ $FAILED -gt 0 ]; then
             echo "ERROR: $FAILED roundtrip(s) failed"
             exit 1
@@ -134,10 +145,10 @@ jobs:
             local ftype=$(file_type "$file")
             local orig=$(wc -c < "$file")
 
-            # MBFA
+            # MBFA — use || true so a crash doesn't abort the benchmark loop
             local t0=$(date +%s%N)
             ./target/release/mbfa compress "$file" "/tmp/${name}.mbfa" \
-              > "/tmp/${name}_mbfa.log" 2>&1
+              > "/tmp/${name}_mbfa.log" 2>&1 || true
             local t1=$(date +%s%N)
             local mbfa_ms=$(( (t1-t0)/1000000 ))
             local mbfa_sz=$(wc -c < "/tmp/${name}.mbfa" 2>/dev/null || echo 0)

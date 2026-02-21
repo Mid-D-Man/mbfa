@@ -1,0 +1,6 @@
+Original size: 80000 bits (10000 bytes)
+Window diagnostics: 4/9992 tokens are BACKREF (0.0%) | 0.0% at max window (8191 bytes) | 50.0% in upper half | offset_bits=13 — HEAVY — large offsets dominant
+Fold 1 adaptive: offset_bits=13 (window=8191 bytes)
+Fold 1 (LZ): 99976 bits (12497 bytes)
+Fold 1 not worth it (ratio 1.250), stopping at fold 0
+Done. 10000 bytes → 10003 bytes

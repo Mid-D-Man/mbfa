@@ -166,7 +166,8 @@ jobs:
         run: |
           mkdir -p bench_files bench_results
 
-          # Existing datasets
+          # ── Existing small/medium datasets ──────────────────────────────────
+
           python3 -c "print('the the the and the and ' * 500)" > bench_files/repetitive.txt
           python3 -c "import os; open('bench_files/random.bin','wb').write(os.urandom(10000))"
           cp src/encoder.rs bench_files/source_code.rs
@@ -175,7 +176,7 @@ jobs:
           head -c 20000  bench_files/alice.txt > bench_files/alice_small.txt
           head -c 100000 bench_files/alice.txt > bench_files/alice_100k.txt
 
-          # New: JSON dataset — realistic nested records
+          # JSON — realistic nested records (~100KB)
           python3 -c "
           import json, random
           random.seed(42)
@@ -195,59 +196,117 @@ jobs:
           open('bench_files/data.json','w').write(json.dumps({'records':records},indent=2))
           "
 
-          # New: WAV audio — synthetic tones, raw uncompressed PCM
+          # WAV audio — synthetic tones, raw uncompressed PCM (~44KB)
           python3 -c "
           import struct, math
-          sr = 44100
-          dur = 0.5
-          n = int(sr * dur)
-          pcm = []
-          for i in range(n):
-              t = i / sr
-              v = (math.sin(2*math.pi*440*t)*0.5 +
-                   math.sin(2*math.pi*880*t)*0.3 +
-                   math.sin(2*math.pi*220*t)*0.2)
-              pcm.append(int(v * 32767))
+          sr = 44100; dur = 0.5; n = int(sr * dur)
+          pcm = [int((math.sin(2*math.pi*440*i/sr)*0.5 +
+                      math.sin(2*math.pi*880*i/sr)*0.3 +
+                      math.sin(2*math.pi*220*i/sr)*0.2) * 32767) for i in range(n)]
           pcm_bytes = struct.pack(f'<{n}h', *pcm)
           fmt  = b'fmt ' + struct.pack('<IHHIIHH', 16, 1, 1, sr, sr*2, 2, 16)
           data = b'data' + struct.pack('<I', len(pcm_bytes)) + pcm_bytes
           body = b'WAVE' + fmt + data
-          wav  = b'RIFF' + struct.pack('<I', len(body)) + body
-          open('bench_files/audio.wav','wb').write(wav)
+          open('bench_files/audio.wav','wb').write(b'RIFF' + struct.pack('<I', len(body)) + body)
           "
 
-          # New: BMP image — 100x100 gradient, raw uncompressed pixels
+          # BMP image — 100x100 gradient (~29KB)
           python3 -c "
           import struct
-          w, h   = 100, 100
-          pad    = (4 - (w*3) % 4) % 4
-          row_sz = w*3 + pad
-          px_sz  = row_sz * h
-          hdr_sz = 54
-          hdr = (b'BM' +
-                 struct.pack('<I', hdr_sz+px_sz) +
-                 struct.pack('<HH',0,0) +
-                 struct.pack('<I', hdr_sz) +
+          w, h = 100, 100
+          pad  = (4 - (w*3) % 4) % 4
+          px_sz = (w*3 + pad) * h
+          hdr = (b'BM' + struct.pack('<I', 54+px_sz) + struct.pack('<HH',0,0) +
+                 struct.pack('<I', 54) +
                  struct.pack('<IiiHHIIiiII',40,w,h,1,24,0,px_sz,2835,2835,0,0))
           rows = []
           for y in range(h):
               row = b''
               for x in range(w):
-                  r = int(x/w*255)
-                  g = int(y/h*255)
-                  b = int((x+y)/(w+h)*255)
-                  row += bytes([b,g,r])
-              row += b'\x00'*pad
-              rows.append(row)
+                  row += bytes([int(x/w*255), int(y/h*255), int((x+y)/(w+h)*255)])
+              rows.append(row + b'\x00'*pad)
           open('bench_files/image.bmp','wb').write(hdr + b''.join(reversed(rows)))
           "
 
-          echo "Benchmark files prepared:"
+          # ── NEW: Large datasets (MB scale) ──────────────────────────────────
+
+          # Large prose — War and Peace (~3.3 MB), fallback to triple-alice
+          echo "Downloading War and Peace..."
+          if curl -fsSL --retry 3 --max-time 60 \
+              "https://www.gutenberg.org/files/2600/2600-0.txt" \
+              -o bench_files/prose_3mb.txt 2>/dev/null; then
+            echo "War and Peace downloaded: $(wc -c < bench_files/prose_3mb.txt) bytes"
+          else
+            echo "Download failed, generating fallback large prose file..."
+            cat bench_files/alice.txt bench_files/alice.txt bench_files/alice.txt \
+                bench_files/alice.txt bench_files/alice.txt bench_files/alice.txt \
+                bench_files/alice.txt bench_files/alice.txt > bench_files/prose_3mb.txt
+          fi
+
+          # Large repetitive — 2MB of structured repeating pattern
+          # Uses a longer base phrase so fold 2+ has more interesting structure to exploit
+          python3 -c "
+          import sys
+          unit = ('the the the and the and the cat sat on the mat and the rat was fat ' * 8 +
+                  'hello world foo bar baz qux the end and the beginning ' * 4)
+          target = 2 * 1024 * 1024
+          out = (unit * (target // len(unit) + 1))[:target]
+          open('bench_files/repetitive_2mb.txt', 'w').write(out)
+          "
+
+          # Large JSON — 2MB of realistic nested records with more variety
+          python3 -c "
+          import json, random
+          random.seed(99)
+          names    = ['alice','bob','charlie','diana','eve','frank','grace','henry',
+                      'ivan','julia','karl','lena','mike','nina','oscar','paula']
+          cities   = ['london','paris','berlin','tokyo','sydney','cairo','oslo','lima',
+                      'moscow','delhi','chicago','dubai','seoul','toronto','madrid','rome']
+          products = ['widget','gadget','doohickey','thingamajig','whatsit','gizmo',
+                      'contraption','device','apparatus','mechanism']
+          records = []
+          for i in range(8000):
+              records.append({
+                  'id': i,
+                  'name': random.choice(names),
+                  'email': f'user{i}@example.com',
+                  'city': random.choice(cities),
+                  'country': random.choice(['US','UK','DE','JP','AU','FR','CA','BR']),
+                  'score': round(random.uniform(0,100), 2),
+                  'rank': random.randint(1, 1000),
+                  'active': random.choice([True, False]),
+                  'product': random.choice(products),
+                  'quantity': random.randint(1, 500),
+                  'tags': random.sample(['admin','user','guest','mod','viewer','editor'], 2),
+                  'notes': f'Record {i} created automatically for benchmark testing purposes'
+              })
+          open('bench_files/data_2mb.json','w').write(json.dumps({'version':1,'records':records},indent=2))
+          "
+
+          # Large source — concatenate all Rust source files, repeat to ~1MB
+          # Tests how MBFA handles real structured code at scale
+          cat src/*.rs > /tmp/all_src_once.rs
+          SRC_SIZE=$(wc -c < /tmp/all_src_once.rs)
+          TARGET=1048576
+          REPS=$(( TARGET / SRC_SIZE + 1 ))
+          python3 -c "
+          src = open('/tmp/all_src_once.rs').read()
+          target = 1048576
+          out = (src * (target // len(src) + 1))[:target]
+          open('bench_files/source_1mb.rs','w').write(out)
+          "
+
+          echo ""
+          echo "All benchmark files prepared:"
           ls -lh bench_files/
+          echo ""
+          echo "Large file sizes:"
+          wc -c bench_files/prose_3mb.txt bench_files/repetitive_2mb.txt \
+                 bench_files/data_2mb.json bench_files/source_1mb.rs
 
       - name: Roundtrip verification
         run: |
-          echo "the the the and the and the cat sat on the mat" > bench_files/roundtrip_test.txt
+          echo "the the the and the and the and the cat sat on the mat" > bench_files/roundtrip_test.txt
           ./target/release/mbfa compress bench_files/roundtrip_test.txt bench_files/roundtrip_test.mbfa
           ./target/release/mbfa decompress bench_files/roundtrip_test.mbfa bench_files/roundtrip_recovered.txt
           if diff bench_files/roundtrip_test.txt bench_files/roundtrip_recovered.txt > /dev/null 2>&1; then
@@ -364,7 +423,7 @@ jobs:
           }
           EOJSON
 
-            printf "%-22s %8s B | MBFA:%6s%%(%sms) gz:%6s%% zst:%6s%% xz:%6s%% br:%6s%% zpaq:%6s%% rt:%s\n" \
+            printf "%-26s %9s B | MBFA:%6s%%(%sms) gz:%6s%% zst:%6s%% xz:%6s%% br:%6s%% zpaq:%6s%% rt:%s\n" \
               "$name" "$orig_size" \
               "$mbfa_pct" "$mbfa_ms" \
               "$gz_pct" "$zst_pct" "$xz_pct" "$br_pct" "$zpaq_pct" \
@@ -375,7 +434,8 @@ jobs:
           echo "  MidMans Bit Folding Algorithm — Extended Benchmark"
           echo "  Build #${{ github.run_number }} | $(date -u)"
           echo "================================================================"
-
+          echo ""
+          echo "── Small / Medium (existing) ────────────────────────────────────"
           run_bench "repetitive.txt"  "Repetitive_12KB"
           run_bench "alice_small.txt" "Prose_Alice_20KB"
           run_bench "alice_100k.txt"  "Prose_Alice_100KB"
@@ -384,9 +444,16 @@ jobs:
           run_bench "data.json"       "JSON_100KB"
           run_bench "audio.wav"       "Audio_WAV_44KB"
           run_bench "image.bmp"       "Image_BMP_29KB"
+          echo ""
+          echo "── Large (MB scale — new) ───────────────────────────────────────"
+          run_bench "prose_3mb.txt"      "Prose_WarAndPeace_3MB"
+          run_bench "repetitive_2mb.txt" "Repetitive_2MB"
+          run_bench "data_2mb.json"      "JSON_2MB"
+          run_bench "source_1mb.rs"      "Source_1MB"
 
           echo "]" >> bench_results/results.json
 
+          echo ""
           echo "================================================================"
           echo "Lower % = better. rt = roundtrip."
           cat bench_results/results.json

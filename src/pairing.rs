@@ -21,9 +21,33 @@ fn cantor_pair(x: u32, y: u32) -> u64 {
 }
 
 fn cantor_unpair(z: u64) -> (u32, u32) {
-    let w = ((((8 * z + 1) as f64).sqrt() - 1.0) / 2.0).floor() as u64;
-    let t = (w * w + w) / 2;
+    // Compute w = floor((sqrt(8z+1) - 1) / 2)
+    let w = ((((8u64.saturating_mul(z).saturating_add(1)) as f64).sqrt() - 1.0) / 2.0).floor() as u64;
+
+    // Guard: float imprecision can push w one too high, step it down if needed
+    let w = if w > 0 && (w * (w + 1) / 2) > z {
+        w.saturating_sub(1)
+    } else {
+        w
+    };
+
+    let t = w * (w + 1) / 2;
+
+    // Sanity check: t must be <= z, and y = z - t must be <= w
+    if t > z {
+        // Corrupt or impossible value — return safe fallback (offset=1, length=2)
+        eprintln!("Warning: cantor_unpair({}) produced invalid t={} — using fallback", z, t);
+        return (1, 2);
+    }
+
     let y = z - t;
+
+    if y > w {
+        // y > w means the pair was not on the valid Cantor triangle — fallback
+        eprintln!("Warning: cantor_unpair({}) produced y={} > w={} — using fallback", z, y, w);
+        return (1, 2);
+    }
+
     let x = w - y;
     (x as u32, y as u32)
 }
@@ -51,7 +75,15 @@ fn read_backref_operand<R: std::io::Read>(
     let flag = r.read::<u32>(1)?;
     if flag == 0 {
         let c = r.read::<u32>(16)? as u64;
-        Ok(cantor_unpair(c))
+        let (offset, length) = cantor_unpair(c);
+        // Additional safety: if cantor_unpair returned offset=0, treat as error
+        if offset == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("cantor_unpair produced offset=0 for z={}", c),
+            ));
+        }
+        Ok((offset, length))
     } else {
         let offset = r.read::<u32>(15)?;
         let length = r.read::<u32>(8)?;
@@ -173,4 +205,4 @@ pub fn pair_decode(input: &[u8]) -> std::io::Result<Vec<Token>> {
     }
 
     Ok(tokens)
-}
+    }

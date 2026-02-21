@@ -67,12 +67,6 @@ fn log_window_diagnostics(tokens: &[Token], offset_bits: u32) {
 }
 
 /// Returns (compressed_bytes, folds_done, used_pairing, offset_bits_per_fold)
-///
-/// offset_bits_per_fold has one entry per accepted fold (length == folds_done).
-/// For LZ folds the entry is the actual offset_bits used to encode that fold.
-/// For PAIR folds (only ever fold 2) the entry is 0 — a sentinel meaning
-/// "this fold used pair encoding, no LZ offset_bits".
-/// The decompressor uses these values in reverse order to undo each fold.
 pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>)> {
     let mut current = input.to_vec();
     let mut folds_done: u8 = 0;
@@ -80,14 +74,10 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
     let original_size = input.len() * 8;
     let mut final_used_pairing = false;
 
-    // Per-fold offset_bits. Index 0 = fold 1, index 1 = fold 2, etc.
-    // Appended only when a fold is ACCEPTED.
-    // PAIR folds store 0 as a sentinel (no LZ bitstream, no offset_bits needed).
     let mut offset_bits_per_fold: Vec<u32> = Vec::new();
 
-    // Tracks the offset_bits of the CURRENT encoded bytes so fold N+1 can
+    // Tracks the offset_bits of the current encoded bytes so fold N+1 can
     // decode them correctly during the pairing pre-scan.
-    // Only updated when a fold is accepted.
     let mut current_ob: u32 = OFFSET_BITS_MIN;
 
     println!("Original size: {} bits ({} bytes)", prev_size, input.len());
@@ -122,7 +112,6 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
                 offset_bits_per_fold.push(optimal_bits);
                 break;
             }
-            // Accept fold 1.
             current_ob = optimal_bits;
             current = folded;
             folds_done = 1;
@@ -139,7 +128,6 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
             && current.len() >= MIN_PAIR_BYTES;
 
         let use_pairing = if consider_pairing {
-            // Use current_ob to correctly decode the fold 1 bitstream.
             let tokens = read_tokens(&current, current_ob)?;
             let fallback_rate = cantor_fallback_rate(&tokens);
             println!(
@@ -166,13 +154,13 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
             break;
         }
 
-        // Produce candidate output. candidate_ob is provisional until acceptance.
+        // Produce candidate output.
         let (folded, candidate_ob) = if use_pairing {
-            // PAIR fold: no LZ bitstream, sentinel ob = 0.
+            // PAIR fold: pass current_ob so the fallback path uses the correct
+            // offset field width. Sentinel ob=0 stored in header for PAIR folds.
             let tokens = read_tokens(&current, current_ob)?;
-            (pair_encode(&tokens)?, 0u32)
+            (pair_encode(&tokens, current_ob)?, 0u32)
         } else {
-            // LZ on packed bytes — only when current_ratio < FOLD2_LZ_MAX_RATIO.
             let (tokens, new_bits) = scan_adaptive(&current);
             let encoded = write_tokens(&tokens, new_bits)?;
             (encoded, new_bits)
@@ -184,7 +172,6 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
 
         let ratio = folded_bits as f64 / prev_size as f64;
         if ratio >= MIN_IMPROVEMENT_RATIO {
-            // REJECTED — do NOT update current_ob or offset_bits_per_fold.
             println!("Fold {} not worth it (ratio {:.3}), stopping at fold {}",
                      fold_num, ratio, folds_done);
             break;
@@ -192,7 +179,6 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
 
         if folded_bits <= MIN_FOLD_BITS {
             println!("Hit minimum size floor at fold {}", fold_num);
-            // ACCEPTED.
             current_ob = candidate_ob;
             current = folded;
             folds_done = fold_num;
@@ -201,7 +187,6 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
             break;
         }
 
-        // ACCEPTED.
         current_ob = candidate_ob;
         current = folded;
         folds_done = fold_num;
@@ -211,4 +196,4 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
     }
 
     Ok((current, folds_done, final_used_pairing, offset_bits_per_fold))
-        }
+}

@@ -7,7 +7,12 @@ use crate::opcode::Token;
 
 const MIN_IMPROVEMENT_RATIO: f64 = 0.97;
 const MIN_FOLD_BITS: usize = 64;
-const MIN_PAIR_BYTES: usize = 3000;
+
+/// Minimum fold output size (bytes) before pair encoding is attempted.
+/// Kept at 512 — analysis showed small files (< ~3KB) have too many
+/// distinct symbols for the Huffman table overhead to be worth it,
+/// and pair encoding wins on those without a table cost.
+const MIN_PAIR_BYTES: usize = 512;
 
 /// Fraction of BACKREFs whose Cantor value exceeds 16 bits.
 /// Above this threshold pairing is net-negative — the 3-bit prefix
@@ -47,11 +52,6 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool)>
     println!("Original size: {} bits ({} bytes)", prev_size, input.len());
 
     for fold_num in 1..=max_folds {
-        // Pairing conditions:
-        // 1. Must be fold 2 on a fold 1 output
-        // 2. Fold 1 output must exceed MIN_PAIR_BYTES
-        // 3. Cantor fallback rate must be below threshold — if most BACKREFs
-        //    have large offsets, the pair prefix overhead makes output bigger
         let consider_pairing = fold_num == 2
             && folds_done == 1
             && current.len() >= MIN_PAIR_BYTES;
@@ -108,4 +108,4 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool)>
     }
 
     Ok((current, folds_done, final_used_pairing))
-            }
+}

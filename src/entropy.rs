@@ -1,46 +1,58 @@
 // src/entropy.rs
-//! Canonical Huffman entropy coding applied to LIT byte values only.
+//! Joint Huffman entropy coding — fold output post-processing.
 //!
-//! The opcode bits (BACKREF/LIT/END) stay fixed-width as normal.
-//! Only the 8-bit byte payload inside LIT tokens is Huffman-coded.
-//! This is applied as post-processing on the final fold output when
-//! the stream is large enough for the table overhead to be worth it.
+//! Joint alphabet (symbols 0–510):
+//!   0–255  = LIT byte values
+//!   256    = END of stream
+//!   257–510 = BACKREF length codes (symbol = 255 + length, length = 2..255)
+//!
+//! Offsets are encoded raw at OFFSET_BITS (15) bits immediately after each
+//! BACKREF length symbol. Offsets have too flat a distribution for a Huffman
+//! table to pay off vs the header cost.
+//!
+//! This eliminates the fixed LIT opcode (2 bits per LIT token) and the fixed
+//! BACKREF opcode (1 bit) + length field (8 bits), replacing them with a
+//! single variable-length code per token. Savings are ~2 bits per LIT token
+//! and ~6 bits per BACKREF token on typical prose.
+//!
+//! Only applied when fold output exceeds ENTROPY_MIN_BYTES and only on
+//! non-pair-encoded streams.
 
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
 use bitstream_io::{BitWriter, BitReader, BigEndian, BitWrite, BitRead};
-use crate::opcode::{
-    Token,
-    OPCODE_BACKREF_BITS, OPCODE_BACKREF_VAL,
-    OPCODE_LIT_BITS, OPCODE_LIT_VAL,
-    OPCODE_END_BITS, OPCODE_END_VAL,
-    OFFSET_BITS, LENGTH_BITS,
-};
+use crate::opcode::{Token, OFFSET_BITS};
 
-/// Minimum compressed stream size (bytes) before entropy coding fires.
-/// Below this the table overhead dominates any savings.
+/// Minimum compressed stream size in bytes before joint entropy fires.
 pub const ENTROPY_MIN_BYTES: usize = 5000;
 
-/// symbol -> (canonical_code: u32, bit_length: u32)
-pub type EncodeTable = HashMap<u8, (u32, u32)>;
-/// (canonical_code: u32, bit_length: u32) -> symbol
-pub type DecodeTable = HashMap<(u32, u32), u8>;
+// ── Symbol encoding ───────────────────────────────────────────────────────────
+const SYM_END: u32 = 256;
+#[inline] fn sym_from_length(len: u32)  -> u32 { 255 + len }       // len 2..255 → 257..510
+#[inline] fn length_from_sym(sym: u32)  -> u32 { sym - 255 }       // 257..510 → 2..255
 
-// ── Frequency counting ───────────────────────────────────────────────────────
+pub type EncodeTable = HashMap<u32, (u32, u32)>; // symbol → (code, bit_len)
+pub type DecodeTable = HashMap<(u32, u32), u32>; // (code, bit_len) → symbol
 
-fn count_lit_freq(tokens: &[Token]) -> HashMap<u8, u64> {
-    let mut freq: HashMap<u8, u64> = HashMap::new();
+// ── Frequency counting ────────────────────────────────────────────────────────
+
+fn count_joint_freq(tokens: &[Token]) -> HashMap<u32, u64> {
+    let mut freq: HashMap<u32, u64> = HashMap::new();
     for t in tokens {
-        if let Token::Lit { byte } = t {
-            *freq.entry(*byte).or_insert(0) += 1;
+        match t {
+            Token::Lit { byte }          => { *freq.entry(*byte as u32).or_insert(0) += 1; }
+            Token::Backref { length, .. } => { *freq.entry(sym_from_length(*length)).or_insert(0) += 1; }
+            Token::End                    => { *freq.entry(SYM_END).or_insert(0) += 1; }
         }
     }
+    // Ensure END is always present even if tokens had no End marker
+    freq.entry(SYM_END).or_insert(1);
     freq
 }
 
-// ── Huffman tree construction → code lengths ─────────────────────────────────
+// ── Huffman tree → code lengths ───────────────────────────────────────────────
 
-fn assign_code_lengths(freq: &HashMap<u8, u64>) -> HashMap<u8, u32> {
+fn assign_code_lengths(freq: &HashMap<u32, u64>) -> HashMap<u32, u32> {
     let n = freq.len();
     if n == 0 { return HashMap::new(); }
     if n == 1 {
@@ -48,49 +60,51 @@ fn assign_code_lengths(freq: &HashMap<u8, u64>) -> HashMap<u8, u32> {
         return [(sym, 1)].into_iter().collect();
     }
 
-    // Flat node storage: index = node id
-    let mut node_freq: Vec<u64> = Vec::with_capacity(2 * n);
-    let mut left_child:  Vec<Option<usize>> = Vec::with_capacity(2 * n);
-    let mut right_child: Vec<Option<usize>> = Vec::with_capacity(2 * n);
+    // Flat node store
+    let mut node_freq:  Vec<u64>         = Vec::with_capacity(2 * n);
+    let mut left_child: Vec<Option<usize>> = Vec::with_capacity(2 * n);
+    let mut right_child:Vec<Option<usize>> = Vec::with_capacity(2 * n);
 
-    // symbol -> leaf node id
-    let mut sym_to_node: HashMap<u8, usize> = HashMap::new();
+    let mut sym_to_node: HashMap<u32, usize> = HashMap::new();
+    // Sort for determinism before inserting into heap
+    let mut sym_list: Vec<(u32, u64)> = freq.iter().map(|(&s,&f)|(s,f)).collect();
+    sym_list.sort_by_key(|&(s,_)| s);
 
-    for (&sym, &f) in freq {
+    for (sym, f) in &sym_list {
         let id = node_freq.len();
-        sym_to_node.insert(sym, id);
-        node_freq.push(f);
+        sym_to_node.insert(*sym, id);
+        node_freq.push(*f);
         left_child.push(None);
         right_child.push(None);
     }
 
-    // Min-heap by frequency
-    let mut heap: BinaryHeap<(Reverse<u64>, usize)> = sym_to_node
+    // (Reverse<freq>, tie-break counter, node_id)
+    let mut heap: BinaryHeap<(Reverse<u64>, Reverse<usize>, usize)> = sym_to_node
         .values()
-        .map(|&id| (Reverse(node_freq[id]), id))
+        .map(|&id| (Reverse(node_freq[id]), Reverse(id), id))
         .collect();
 
-    // Merge two lowest-frequency nodes until one root remains
+    let mut counter = node_freq.len();
     while heap.len() > 1 {
-        let (Reverse(f1), id1) = heap.pop().unwrap();
-        let (Reverse(f2), id2) = heap.pop().unwrap();
-        let parent_id = node_freq.len();
+        let (Reverse(f1), _, id1) = heap.pop().unwrap();
+        let (Reverse(f2), _, id2) = heap.pop().unwrap();
+        let pid = node_freq.len();
         node_freq.push(f1 + f2);
         left_child.push(Some(id1));
         right_child.push(Some(id2));
-        heap.push((Reverse(f1 + f2), parent_id));
+        heap.push((Reverse(f1 + f2), Reverse(counter), pid));
+        counter += 1;
     }
 
-    let root = heap.pop().unwrap().1;
+    let root = heap.pop().unwrap().2;
+    let node_to_sym: HashMap<usize, u32> =
+        sym_to_node.iter().map(|(&s,&id)| (id,s)).collect();
 
-    // Iterative DFS to assign depths
-    let node_to_sym: HashMap<usize, u8> = sym_to_node.iter().map(|(&s, &id)| (id, s)).collect();
-    let mut depths: HashMap<u8, u32> = HashMap::new();
+    // Iterative DFS for depths
+    let mut depths: HashMap<u32, u32> = HashMap::new();
     let mut stack: Vec<(usize, u32)> = vec![(root, 0)];
-
     while let Some((node, depth)) = stack.pop() {
         if left_child[node].is_none() {
-            // Leaf node
             if let Some(&sym) = node_to_sym.get(&node) {
                 depths.insert(sym, depth.max(1));
             }
@@ -99,16 +113,14 @@ fn assign_code_lengths(freq: &HashMap<u8, u64>) -> HashMap<u8, u32> {
             if let Some(r) = right_child[node] { stack.push((r, depth + 1)); }
         }
     }
-
     depths
 }
 
-// ── Canonical code assignment ────────────────────────────────────────────────
+// ── Canonical code assignment ─────────────────────────────────────────────────
 
-fn canonical_codes_from_lengths(lengths: &HashMap<u8, u32>) -> EncodeTable {
-    // Sort by (length, symbol) — this is the canonical ordering
-    let mut sorted: Vec<(u8, u32)> = lengths.iter().map(|(&s, &l)| (s, l)).collect();
-    sorted.sort_by_key(|&(s, l)| (l, s));
+fn canonical_codes_from_lengths(lengths: &HashMap<u32, u32>) -> EncodeTable {
+    let mut sorted: Vec<(u32, u32)> = lengths.iter().map(|(&s,&l)|(s,l)).collect();
+    sorted.sort_by_key(|&(s,l)| (l, s));
 
     let mut table = EncodeTable::new();
     let mut code: u32 = 0;
@@ -117,23 +129,19 @@ fn canonical_codes_from_lengths(lengths: &HashMap<u8, u32>) -> EncodeTable {
     for (sym, len) in sorted {
         if len == 0 { continue; }
         if prev_len > 0 {
-            // Shift code left by the difference in lengths, then increment
             code = (code + 1) << (len - prev_len);
         }
-        // First symbol: code stays 0
         table.insert(sym, (code, len));
         prev_len = len;
     }
-
     table
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// ── Public API ────────────────────────────────────────────────────────────────
 
-/// Build an encode table from the LIT byte distribution in a token stream.
-/// Returns None if there are no LIT tokens.
+/// Build a joint encode table from a token stream.
 pub fn build_encode_table(tokens: &[Token]) -> Option<EncodeTable> {
-    let freq = count_lit_freq(tokens);
+    let freq = count_joint_freq(tokens);
     if freq.is_empty() { return None; }
     let lengths = assign_code_lengths(&freq);
     Some(canonical_codes_from_lengths(&lengths))
@@ -144,18 +152,19 @@ pub fn decode_table_from_encode(enc: &EncodeTable) -> DecodeTable {
     enc.iter().map(|(&sym, &(code, len))| ((code, len), sym)).collect()
 }
 
-/// Serialize table: [n_symbols: u8] then n × [symbol: u8, bit_length: u8]
-/// Sorted by symbol for determinism. Total: 1 + 2n bytes.
+/// Serialize: [n_symbols: u16 LE] [n × (symbol: u16 LE, bit_len: u8)]
 pub fn serialize_table(table: &EncodeTable) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.push(table.len() as u8);
-    let mut entries: Vec<(u8, u8)> = table
+    let mut entries: Vec<(u32, u8)> = table
         .iter()
         .map(|(&s, &(_, l))| (s, l as u8))
         .collect();
     entries.sort_by_key(|&(s, _)| s);
+
+    let n = entries.len() as u16;
+    let mut out = Vec::with_capacity(2 + entries.len() * 3);
+    out.extend_from_slice(&n.to_le_bytes());
     for (sym, len) in entries {
-        out.push(sym);
+        out.extend_from_slice(&(sym as u16).to_le_bytes());
         out.push(len);
     }
     out
@@ -163,62 +172,62 @@ pub fn serialize_table(table: &EncodeTable) -> Vec<u8> {
 
 /// Deserialize table. Returns (encode_table, bytes_consumed).
 pub fn deserialize_table(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
-    if data.is_empty() {
+    if data.len() < 2 {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "entropy table: empty",
-        ));
+            std::io::ErrorKind::UnexpectedEof, "joint table: too short"));
     }
-    let n = data[0] as usize;
-    let needed = 1 + n * 2;
+    let n = u16::from_le_bytes([data[0], data[1]]) as usize;
+    let needed = 2 + n * 3;
     if data.len() < needed {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "entropy table: truncated",
-        ));
+            std::io::ErrorKind::UnexpectedEof, "joint table: truncated"));
     }
-    let mut lengths: HashMap<u8, u32> = HashMap::new();
+    let mut lengths: HashMap<u32, u32> = HashMap::new();
     for i in 0..n {
-        let sym = data[1 + i * 2];
-        let len = data[2 + i * 2] as u32;
+        let base = 2 + i * 3;
+        let sym = u16::from_le_bytes([data[base], data[base + 1]]) as u32;
+        let len = data[base + 2] as u32;
         lengths.insert(sym, len);
     }
-    // Rebuild canonical codes from the same lengths — encoder and decoder
-    // will produce identical codes because canonical assignment is deterministic.
     let table = canonical_codes_from_lengths(&lengths);
     Ok((table, needed))
 }
 
-// ── Bit-level encode / decode ────────────────────────────────────────────────
+// ── Bit-level encode ──────────────────────────────────────────────────────────
 
-/// Write a token stream to bytes.
-/// BACKREF and END use fixed opcodes as normal.
-/// LIT opcode bits are fixed (2 bits "10"), but the byte payload uses Huffman codes.
-pub fn write_tokens_entropy(tokens: &[Token], table: &EncodeTable) -> std::io::Result<Vec<u8>> {
+/// Encode a token stream using the joint Huffman table.
+/// LIT  → joint_code(byte_value)
+/// END  → joint_code(256)
+/// BACKREF → joint_code(255+length) + raw OFFSET_BITS offset
+pub fn write_tokens_joint(tokens: &[Token], table: &EncodeTable) -> std::io::Result<Vec<u8>> {
     let mut output = Vec::new();
     {
         let mut w = BitWriter::endian(&mut output, BigEndian);
         for token in tokens {
             match token {
                 Token::Lit { byte } => {
-                    w.write(OPCODE_LIT_BITS, OPCODE_LIT_VAL)?;
-                    match table.get(byte) {
-                        Some(&(code, len)) => w.write(len, code)?,
-                        None => {
-                            // Symbol not seen during table build — shouldn't happen
-                            // since we build from the same token stream we encode.
-                            // Fallback: raw 8 bits (marks this token as uncompressed).
-                            w.write(8, *byte as u32)?;
-                        }
-                    }
+                    let sym = *byte as u32;
+                    let &(code, len) = table.get(&sym).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("lit sym {} not in table", sym))
+                    })?;
+                    w.write(len, code)?;
                 }
                 Token::Backref { offset, length } => {
-                    w.write(OPCODE_BACKREF_BITS, OPCODE_BACKREF_VAL)?;
+                    let sym = sym_from_length(*length);
+                    let &(code, len) = table.get(&sym).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("backref len sym {} not in table", sym))
+                    })?;
+                    w.write(len, code)?;
                     w.write(OFFSET_BITS, *offset)?;
-                    w.write(LENGTH_BITS, *length)?;
                 }
                 Token::End => {
-                    w.write(OPCODE_END_BITS, OPCODE_END_VAL)?;
+                    let &(code, len) = table.get(&SYM_END).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            "END sym not in table")
+                    })?;
+                    w.write(len, code)?;
                 }
             }
         }
@@ -227,46 +236,45 @@ pub fn write_tokens_entropy(tokens: &[Token], table: &EncodeTable) -> std::io::R
     Ok(output)
 }
 
-/// Read a token stream from a Huffman-coded bitstream.
-pub fn read_tokens_entropy(input: &[u8], dtable: &DecodeTable) -> std::io::Result<Vec<Token>> {
-    let max_code_len = dtable.keys().map(|&(_, l)| l).max().unwrap_or(16);
+// ── Bit-level decode ──────────────────────────────────────────────────────────
+
+/// Decode a joint-Huffman bitstream back into a token stream.
+pub fn read_tokens_joint(input: &[u8], dtable: &DecodeTable) -> std::io::Result<Vec<Token>> {
+    let max_code_len = dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
     let mut tokens = Vec::new();
     let mut r = BitReader::endian(std::io::Cursor::new(input), BigEndian);
 
     loop {
-        let first_bit = match r.read::<u32>(1) {
-            Ok(b) => b,
-            Err(_) => break,
+        // Read the joint Huffman code for the next symbol
+        let sym = match read_huffman_sym(&mut r, dtable, max_code_len) {
+            Ok(s)  => s,
+            Err(_) => break,  // EOF — byte-aligned padding may cause this
         };
 
-        if first_bit == OPCODE_BACKREF_VAL {
-            // BACKREF: fixed-width operands, unchanged
-            let offset = r.read::<u32>(OFFSET_BITS)?;
-            let length = r.read::<u32>(LENGTH_BITS)?;
-            tokens.push(Token::Backref { offset, length });
+        if sym < 256 {
+            tokens.push(Token::Lit { byte: sym as u8 });
+        } else if sym == SYM_END {
+            tokens.push(Token::End);
+            break;
         } else {
-            let second_bit = r.read::<u32>(1)?;
-            if second_bit == 1 {
-                // END
-                tokens.push(Token::End);
-                break;
-            }
-            // LIT: read Huffman-coded byte value
-            // Huffman payload only starts here, after both opcode bits are consumed.
-            // No ambiguity with BACKREF opcode (which is caught by first_bit == 0 above).
-            let byte = read_huffman_byte(&mut r, dtable, max_code_len)?;
-            tokens.push(Token::Lit { byte });
+            // BACKREF length symbol — read raw offset immediately after
+            let length = length_from_sym(sym);
+            let offset = match r.read::<u32>(OFFSET_BITS) {
+                Ok(o)  => o,
+                Err(e) => return Err(e),
+            };
+            tokens.push(Token::Backref { offset, length });
         }
     }
 
     Ok(tokens)
 }
 
-fn read_huffman_byte<R: std::io::Read>(
+fn read_huffman_sym<R: std::io::Read>(
     r: &mut BitReader<R, BigEndian>,
     dtable: &DecodeTable,
     max_len: u32,
-) -> std::io::Result<u8> {
+) -> std::io::Result<u32> {
     let mut code: u32 = 0;
     for len in 1..=max_len {
         let bit = r.read::<u32>(1)?;
@@ -277,6 +285,6 @@ fn read_huffman_byte<R: std::io::Read>(
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
-        format!("invalid huffman code after {} bits: {:#b}", max_len, code),
+        format!("invalid huffman symbol after {} bits", max_len),
     ))
-                                }
+}

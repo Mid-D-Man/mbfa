@@ -1,18 +1,14 @@
 // src/fold.rs
-use crate::encoder::{scan, scan_adaptive};
+use crate::encoder::scan_adaptive;
 use crate::bitwriter::write_tokens;
 use crate::bitreader::read_tokens;
 use crate::pairing::pair_encode;
-use crate::opcode::{Token, compute_optimal_offset_bits, OFFSET_BITS_MAX, OFFSET_BITS_MIN};
+use crate::opcode::{Token, OFFSET_BITS_MIN};
 
 const MIN_IMPROVEMENT_RATIO: f64 = 0.97;
 const MIN_FOLD_BITS: usize = 64;
 const MIN_PAIR_BYTES: usize = 512;
 const MAX_CANTOR_FALLBACK_RATE: f64 = 0.80;
-
-// Only attempt fold 2+ LZ on packed bitstream bytes when fold 1 has
-// already achieved extreme compression. Below this ratio the bytes are
-// quasi-random due to bit-boundary misalignment and LZ will expand them.
 const FOLD2_LZ_MAX_RATIO: f64 = 0.10;
 
 fn cantor(x: u32, y: u32) -> u64 {
@@ -53,10 +49,10 @@ fn log_window_diagnostics(tokens: &[Token], offset_bits: u32) {
     }
 
     if total_br + total_lit == 0 { return; }
-    let total = total_br + total_lit;
-    let br_pct    = total_br as f64 / total as f64 * 100.0;
-    let sat_pct   = if total_br > 0 { at_max    as f64 / total_br as f64 * 100.0 } else { 0.0 };
-    let deep_pct  = if total_br > 0 { above_half as f64 / total_br as f64 * 100.0 } else { 0.0 };
+    let total    = total_br + total_lit;
+    let br_pct   = total_br as f64 / total as f64 * 100.0;
+    let sat_pct  = if total_br > 0 { at_max     as f64 / total_br as f64 * 100.0 } else { 0.0 };
+    let deep_pct = if total_br > 0 { above_half as f64 / total_br as f64 * 100.0 } else { 0.0 };
 
     println!(
         "Window diagnostics: {}/{} tokens are BACKREF ({:.1}%) | \
@@ -66,9 +62,9 @@ fn log_window_diagnostics(tokens: &[Token], offset_bits: u32) {
         sat_pct, max_off,
         deep_pct,
         offset_bits,
-        if sat_pct > 5.0 { "⚠ SATURATED — window too small" }
+        if sat_pct > 5.0      { "⚠ SATURATED — window too small" }
         else if deep_pct > 30.0 { "HEAVY — large offsets dominant" }
-        else { "OK" }
+        else                    { "OK" }
     );
 }
 
@@ -79,7 +75,7 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
     let mut prev_size = input.len() * 8;
     let original_size = input.len() * 8;
     let mut final_used_pairing = false;
-    let mut stored_offset_bits: u32 = OFFSET_BITS_MIN; // will be set on fold 1
+    let mut stored_offset_bits: u32 = OFFSET_BITS_MIN;
 
     println!("Original size: {} bits ({} bytes)", prev_size, input.len());
 
@@ -88,16 +84,14 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
 
         // ── Fold 1: adaptive LZ scan on raw bytes ────────────────────────────
         if fold_num == 1 {
-            // Scan with maximum window, compute tight offset_bits from actual usage.
             let (tokens, optimal_bits) = scan_adaptive(&current);
             stored_offset_bits = optimal_bits;
 
             log_window_diagnostics(&tokens, optimal_bits);
             println!(
-                "Fold 1 adaptive: offset_bits={} (max window={} bytes, covers {} unique offsets)",
+                "Fold 1 adaptive: offset_bits={} (window={} bytes)",
                 optimal_bits,
-                (1u32 << optimal_bits) - 1,
-                tokens.iter().filter(|t| matches!(t, Token::Backref { .. })).count()
+                (1u32 << optimal_bits) - 1
             );
 
             let folded = write_tokens(&tokens, optimal_bits)?;
@@ -159,9 +153,7 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
             let tokens = read_tokens(&current, stored_offset_bits)?;
             pair_encode(&tokens)?
         } else {
-            // LZ on packed bytes — only when current_ratio < FOLD2_LZ_MAX_RATIO.
-            // These bytes are near-random from bit-packing so use a wide scan;
-            // compute adaptive offset_bits for this fold's output too.
+            // LZ on packed bytes — only reached when current_ratio < 0.10.
             let (tokens, new_bits) = scan_adaptive(&current);
             stored_offset_bits = new_bits;
             write_tokens(&tokens, new_bits)?
@@ -192,4 +184,4 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
     }
 
     Ok((current, folds_done, final_used_pairing, stored_offset_bits))
-    }
+        }

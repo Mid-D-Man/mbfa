@@ -66,20 +66,29 @@ fn log_window_diagnostics(tokens: &[Token], offset_bits: u32) {
     );
 }
 
-/// Returns (compressed_bytes, folds_done, used_pairing, offset_bits_used)
-pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, u32)> {
+/// Returns (compressed_bytes, folds_done, used_pairing, offset_bits_per_fold)
+///
+/// offset_bits_per_fold has one entry per accepted fold (length == folds_done).
+/// For LZ folds the entry is the actual offset_bits used to encode that fold.
+/// For PAIR folds (only ever fold 2) the entry is 0 — a sentinel meaning
+/// "this fold used pair encoding, no LZ offset_bits".
+/// The decompressor uses these values in reverse order to undo each fold.
+pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>)> {
     let mut current = input.to_vec();
     let mut folds_done: u8 = 0;
     let mut prev_size = input.len() * 8;
     let original_size = input.len() * 8;
     let mut final_used_pairing = false;
 
-    // stored_offset_bits tracks the offset_bits used to encode `current`.
-    // CRITICAL: only update this when a fold is actually ACCEPTED — i.e.
-    // after we write `current = folded`. If a fold is computed but rejected
-    // (ratio >= threshold), `current` still holds the previous encoding and
-    // stored_offset_bits must remain unchanged.
-    let mut stored_offset_bits: u32 = OFFSET_BITS_MIN;
+    // Per-fold offset_bits. Index 0 = fold 1, index 1 = fold 2, etc.
+    // Appended only when a fold is ACCEPTED.
+    // PAIR folds store 0 as a sentinel (no LZ bitstream, no offset_bits needed).
+    let mut offset_bits_per_fold: Vec<u32> = Vec::new();
+
+    // Tracks the offset_bits of the CURRENT encoded bytes so fold N+1 can
+    // decode them correctly during the pairing pre-scan.
+    // Only updated when a fold is accepted.
+    let mut current_ob: u32 = OFFSET_BITS_MIN;
 
     println!("Original size: {} bits ({} bytes)", prev_size, input.len());
 
@@ -107,17 +116,18 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
             }
             if folded_bits <= MIN_FOLD_BITS {
                 println!("Hit minimum size floor at fold 1");
-                // Accept — commit offset_bits before writing current.
-                stored_offset_bits = optimal_bits;
+                current_ob = optimal_bits;
                 current = folded;
                 folds_done = 1;
+                offset_bits_per_fold.push(optimal_bits);
                 break;
             }
-            // Accept fold 1 — commit offset_bits.
-            stored_offset_bits = optimal_bits;
+            // Accept fold 1.
+            current_ob = optimal_bits;
             current = folded;
             folds_done = 1;
             prev_size = folded_bits;
+            offset_bits_per_fold.push(optimal_bits);
             continue;
         }
 
@@ -129,7 +139,8 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
             && current.len() >= MIN_PAIR_BYTES;
 
         let use_pairing = if consider_pairing {
-            let tokens = read_tokens(&current, stored_offset_bits)?;
+            // Use current_ob to correctly decode the fold 1 bitstream.
+            let tokens = read_tokens(&current, current_ob)?;
             let fallback_rate = cantor_fallback_rate(&tokens);
             println!(
                 "Fold {} pairing pre-scan: Cantor fallback rate = {:.1}% (threshold {}%)",
@@ -155,17 +166,13 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
             break;
         }
 
-        // Produce the candidate output for this fold.
-        // For the LZ branch we also compute a candidate offset_bits —
-        // but we must NOT commit it to stored_offset_bits until we
-        // confirm the fold is accepted (ratio check below).
-        let (folded, candidate_offset_bits) = if use_pairing {
-            let tokens = read_tokens(&current, stored_offset_bits)?;
-            // Pairing does not change offset_bits — it operates at token level.
-            (pair_encode(&tokens)?, stored_offset_bits)
+        // Produce candidate output. candidate_ob is provisional until acceptance.
+        let (folded, candidate_ob) = if use_pairing {
+            // PAIR fold: no LZ bitstream, sentinel ob = 0.
+            let tokens = read_tokens(&current, current_ob)?;
+            (pair_encode(&tokens)?, 0u32)
         } else {
-            // LZ on packed bytes. Scan with adaptive window.
-            // candidate_offset_bits is provisional until acceptance confirmed.
+            // LZ on packed bytes — only when current_ratio < FOLD2_LZ_MAX_RATIO.
             let (tokens, new_bits) = scan_adaptive(&current);
             let encoded = write_tokens(&tokens, new_bits)?;
             (encoded, new_bits)
@@ -177,8 +184,7 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
 
         let ratio = folded_bits as f64 / prev_size as f64;
         if ratio >= MIN_IMPROVEMENT_RATIO {
-            // REJECTED — do NOT update stored_offset_bits.
-            // current and stored_offset_bits remain consistent with each other.
+            // REJECTED — do NOT update current_ob or offset_bits_per_fold.
             println!("Fold {} not worth it (ratio {:.3}), stopping at fold {}",
                      fold_num, ratio, folds_done);
             break;
@@ -186,21 +192,23 @@ pub fn fold(input: &[u8], max_folds: u8) -> std::io::Result<(Vec<u8>, u8, bool, 
 
         if folded_bits <= MIN_FOLD_BITS {
             println!("Hit minimum size floor at fold {}", fold_num);
-            // ACCEPTED — commit offset_bits now, before updating current.
-            stored_offset_bits = candidate_offset_bits;
+            // ACCEPTED.
+            current_ob = candidate_ob;
             current = folded;
             folds_done = fold_num;
+            offset_bits_per_fold.push(candidate_ob);
             if use_pairing { final_used_pairing = true; }
             break;
         }
 
-        // ACCEPTED — commit offset_bits, then update current.
-        stored_offset_bits = candidate_offset_bits;
+        // ACCEPTED.
+        current_ob = candidate_ob;
         current = folded;
         folds_done = fold_num;
-        if use_pairing { final_used_pairing = true; }
         prev_size = folded_bits;
+        offset_bits_per_fold.push(candidate_ob);
+        if use_pairing { final_used_pairing = true; }
     }
 
-    Ok((current, folds_done, final_used_pairing, stored_offset_bits))
-    }
+    Ok((current, folds_done, final_used_pairing, offset_bits_per_fold))
+        }

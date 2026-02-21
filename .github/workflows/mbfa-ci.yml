@@ -157,7 +157,7 @@ jobs:
           key: ubuntu-latest-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install tools
-        run: sudo apt-get install -y gzip zstd bc
+        run: sudo apt-get install -y gzip zstd xz-utils zpaq brotli bc
 
       - name: Build Release
         run: cargo build --release
@@ -165,13 +165,85 @@ jobs:
       - name: Prepare benchmark files
         run: |
           mkdir -p bench_files bench_results
+
+          # Existing datasets
           python3 -c "print('the the the and the and ' * 500)" > bench_files/repetitive.txt
           python3 -c "import os; open('bench_files/random.bin','wb').write(os.urandom(10000))"
           cp src/encoder.rs bench_files/source_code.rs
           curl -s -o bench_files/alice.txt "https://www.gutenberg.org/files/11/11-0.txt" || \
             python3 -c "print('the quick brown fox ' * 5000)" > bench_files/alice.txt
-          head -c 20000 bench_files/alice.txt > bench_files/alice_small.txt
+          head -c 20000  bench_files/alice.txt > bench_files/alice_small.txt
           head -c 100000 bench_files/alice.txt > bench_files/alice_100k.txt
+
+          # New: JSON dataset — realistic nested records
+          python3 -c "
+          import json, random
+          random.seed(42)
+          names  = ['alice','bob','charlie','diana','eve','frank','grace','henry']
+          cities = ['london','paris','berlin','tokyo','sydney','cairo','oslo','lima']
+          records = []
+          for i in range(500):
+              records.append({
+                  'id': i,
+                  'name': random.choice(names),
+                  'email': f'user{i}@example.com',
+                  'city': random.choice(cities),
+                  'score': round(random.uniform(0,100),2),
+                  'active': random.choice([True,False]),
+                  'tags': random.sample(['admin','user','guest','mod'],2)
+              })
+          open('bench_files/data.json','w').write(json.dumps({'records':records},indent=2))
+          "
+
+          # New: WAV audio — synthetic tones, raw uncompressed PCM
+          python3 -c "
+          import struct, math
+          sr = 44100
+          dur = 0.5
+          n = int(sr * dur)
+          pcm = []
+          for i in range(n):
+              t = i / sr
+              v = (math.sin(2*math.pi*440*t)*0.5 +
+                   math.sin(2*math.pi*880*t)*0.3 +
+                   math.sin(2*math.pi*220*t)*0.2)
+              pcm.append(int(v * 32767))
+          pcm_bytes = struct.pack(f'<{n}h', *pcm)
+          fmt  = b'fmt ' + struct.pack('<IHHIIHH', 16, 1, 1, sr, sr*2, 2, 16)
+          data = b'data' + struct.pack('<I', len(pcm_bytes)) + pcm_bytes
+          body = b'WAVE' + fmt + data
+          wav  = b'RIFF' + struct.pack('<I', len(body)) + body
+          open('bench_files/audio.wav','wb').write(wav)
+          "
+
+          # New: BMP image — 100x100 gradient, raw uncompressed pixels
+          python3 -c "
+          import struct
+          w, h   = 100, 100
+          pad    = (4 - (w*3) % 4) % 4
+          row_sz = w*3 + pad
+          px_sz  = row_sz * h
+          hdr_sz = 54
+          hdr = (b'BM' +
+                 struct.pack('<I', hdr_sz+px_sz) +
+                 struct.pack('<HH',0,0) +
+                 struct.pack('<I', hdr_sz) +
+                 struct.pack('<IiiHHIIiiII',40,w,h,1,24,0,px_sz,2835,2835,0,0))
+          rows = []
+          for y in range(h):
+              row = b''
+              for x in range(w):
+                  r = int(x/w*255)
+                  g = int(y/h*255)
+                  b = int((x+y)/(w+h)*255)
+                  row += bytes([b,g,r])
+              row += b'\x00'*pad
+              rows.append(row)
+          open('bench_files/image.bmp','wb').write(hdr + b''.join(reversed(rows)))
+          "
+
+          echo "Benchmark files prepared:"
+          ls -lh bench_files/
 
       - name: Roundtrip verification
         run: |
@@ -197,6 +269,7 @@ jobs:
             local name=$2
             local orig_size=$(wc -c < "bench_files/$file")
 
+            # ── MBFA ──────────────────────────────────────────────────────────
             local mbfa_start=$(date +%s%N)
             ./target/release/mbfa compress "bench_files/$file" "bench_files/$file.mbfa" \
               > bench_results/mbfa_log_${name}.txt 2>&1
@@ -205,9 +278,8 @@ jobs:
             local mbfa_size=$(wc -c < "bench_files/$file.mbfa" 2>/dev/null || echo 0)
 
             local fold_detail=$(cat bench_results/mbfa_log_${name}.txt | \
-              grep -E "^(Original|Fold|Done)" | \
-              tr '\n' '|' | \
-              sed 's/"/\\"/g')
+              grep -E "^(Original|Fold|Done|Joint|Entropy)" | \
+              tr '\n' '|' | sed 's/"/\\"/g')
 
             ./target/release/mbfa decompress "bench_files/$file.mbfa" "bench_files/$file.recovered" \
               > /dev/null 2>&1
@@ -216,21 +288,48 @@ jobs:
               roundtrip="FAIL"
             fi
 
+            # ── gzip ──────────────────────────────────────────────────────────
             local gz_start=$(date +%s%N)
             gzip -k -f "bench_files/$file" 2>/dev/null
             local gz_end=$(date +%s%N)
             local gz_ms=$(( (gz_end - gz_start) / 1000000 ))
             local gz_size=$(wc -c < "bench_files/$file.gz" 2>/dev/null || echo 0)
 
+            # ── zstd ──────────────────────────────────────────────────────────
             local zst_start=$(date +%s%N)
             zstd -q -f "bench_files/$file" -o "bench_files/$file.zst" 2>/dev/null
             local zst_end=$(date +%s%N)
             local zst_ms=$(( (zst_end - zst_start) / 1000000 ))
             local zst_size=$(wc -c < "bench_files/$file.zst" 2>/dev/null || echo 0)
 
+            # ── xz (lzma) ─────────────────────────────────────────────────────
+            local xz_start=$(date +%s%N)
+            xz -k -f "bench_files/$file" 2>/dev/null
+            local xz_end=$(date +%s%N)
+            local xz_ms=$(( (xz_end - xz_start) / 1000000 ))
+            local xz_size=$(wc -c < "bench_files/$file.xz" 2>/dev/null || echo 0)
+
+            # ── brotli ────────────────────────────────────────────────────────
+            local br_start=$(date +%s%N)
+            brotli -k -f "bench_files/$file" -o "bench_files/$file.br" 2>/dev/null
+            local br_end=$(date +%s%N)
+            local br_ms=$(( (br_end - br_start) / 1000000 ))
+            local br_size=$(wc -c < "bench_files/$file.br" 2>/dev/null || echo 0)
+
+            # ── zpaq ─────────────────────────────────────────────────────────
+            local zpaq_start=$(date +%s%N)
+            zpaq a "bench_files/$file.zpaq" "bench_files/$file" -method 2 > /dev/null 2>&1 || true
+            local zpaq_end=$(date +%s%N)
+            local zpaq_ms=$(( (zpaq_end - zpaq_start) / 1000000 ))
+            local zpaq_size=$(wc -c < "bench_files/$file.zpaq" 2>/dev/null || echo 0)
+
+            # ── percentages ───────────────────────────────────────────────────
             local mbfa_pct=$(fix_pct $(echo "scale=2; $mbfa_size * 100 / $orig_size" | bc))
-            local gz_pct=$(fix_pct $(echo "scale=2; $gz_size * 100 / $orig_size" | bc))
-            local zst_pct=$(fix_pct $(echo "scale=2; $zst_size * 100 / $orig_size" | bc))
+            local gz_pct=$(fix_pct   $(echo "scale=2; $gz_size   * 100 / $orig_size" | bc))
+            local zst_pct=$(fix_pct  $(echo "scale=2; $zst_size  * 100 / $orig_size" | bc))
+            local xz_pct=$(fix_pct   $(echo "scale=2; $xz_size   * 100 / $orig_size" | bc))
+            local br_pct=$(fix_pct   $(echo "scale=2; $br_size   * 100 / $orig_size" | bc))
+            local zpaq_pct=$(fix_pct $(echo "scale=2; $zpaq_size * 100 / $orig_size" | bc))
 
             if [ "$FIRST" = "true" ]; then
               FIRST=false
@@ -252,16 +351,28 @@ jobs:
             "zstd_bytes": $zst_size,
             "zstd_pct": $zst_pct,
             "zstd_ms": $zst_ms,
+            "xz_bytes": $xz_size,
+            "xz_pct": $xz_pct,
+            "xz_ms": $xz_ms,
+            "brotli_bytes": $br_size,
+            "brotli_pct": $br_pct,
+            "brotli_ms": $br_ms,
+            "zpaq_bytes": $zpaq_size,
+            "zpaq_pct": $zpaq_pct,
+            "zpaq_ms": $zpaq_ms,
             "fold_detail": "$fold_detail"
           }
           EOJSON
 
-            printf "%-22s %9s B | MBFA: %6s%% (%sms) | gzip: %6s%% (%sms) | zstd: %6s%% (%sms) | rt: %s\n" \
-              "$name" "$orig_size" "$mbfa_pct" "$mbfa_ms" "$gz_pct" "$gz_ms" "$zst_pct" "$zst_ms" "$roundtrip"
+            printf "%-22s %8s B | MBFA:%6s%%(%sms) gz:%6s%% zst:%6s%% xz:%6s%% br:%6s%% zpaq:%6s%% rt:%s\n" \
+              "$name" "$orig_size" \
+              "$mbfa_pct" "$mbfa_ms" \
+              "$gz_pct" "$zst_pct" "$xz_pct" "$br_pct" "$zpaq_pct" \
+              "$roundtrip"
           }
 
           echo "================================================================"
-          echo "  MidMans Bit Folding Algorithm — Benchmark Results"
+          echo "  MidMans Bit Folding Algorithm — Extended Benchmark"
           echo "  Build #${{ github.run_number }} | $(date -u)"
           echo "================================================================"
 
@@ -269,13 +380,15 @@ jobs:
           run_bench "alice_small.txt" "Prose_Alice_20KB"
           run_bench "alice_100k.txt"  "Prose_Alice_100KB"
           run_bench "random.bin"      "Random_10KB"
-          run_bench "source_code.rs"  "Source_Code_3KB"
+          run_bench "source_code.rs"  "Source_Code"
+          run_bench "data.json"       "JSON_100KB"
+          run_bench "audio.wav"       "Audio_WAV_44KB"
+          run_bench "image.bmp"       "Image_BMP_29KB"
 
           echo "]" >> bench_results/results.json
 
           echo "================================================================"
-          echo "Lower % = better"
-          echo "--- results.json preview ---"
+          echo "Lower % = better. rt = roundtrip."
           cat bench_results/results.json
 
       - name: Generate HTML report

@@ -5,8 +5,8 @@
 //!         [offset_bits[0]: u8] ... [offset_bits[fold_count-1]: u8]
 //!         [payload...]
 //!
-//! offset_bits[i] is the LZ window size used for fold (i+1).
-//! PAIR folds store 0 as a sentinel — they do not use an LZ bitstream.
+//! entropy_flag=1 means joint Huffman + offset bucket coding was applied
+//! to the outermost fold. offset_bits are still stored for the LZ passes.
 
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
@@ -35,15 +35,14 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             .unwrap_or(OFFSET_BITS_DEFAULT)
     };
 
-    let final_ob = ob_for_fold(fold_count);
-
     // Entropy wraps the outermost fold — decode it first if present.
+    // offset_bits not passed — entropy now uses bucket coding internally.
     let (mut current, folds_to_undo) = if entropy_flag == 1 {
         let payload = &input[payload_start..];
         let (enc_table, bytes_consumed) = entropy::deserialize_table(payload)?;
         let dtable   = entropy::decode_table_from_encode(&enc_table);
         let stream   = &payload[bytes_consumed..];
-        let tokens   = entropy::read_tokens_joint(stream, &dtable, final_ob)?;
+        let tokens   = entropy::read_tokens_joint(stream, &dtable)?;
         let recovered = reconstruct(&tokens);
         println!("Joint entropy unfold: {} bytes recovered", recovered.len());
         (recovered, fold_count.saturating_sub(1))
@@ -60,25 +59,12 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         let ob = ob_for_fold(pass);
 
         if pass == 2 && pair_flag == 1 {
-            // Fold 2 was PAIR.
-            //
-            // pair_encode stored a pair-encoded version of fold 1's Token stream.
-            // pair_decode gives back those tokens.
-            // reconstruct on those tokens gives back the original input bytes.
-            //
-            // That is the COMPLETE undo of both fold 2 (pair) AND fold 1 (LZ).
-            // Do NOT attempt a second read_tokens + reconstruct after this —
-            // current is already the original bytes at this point.
-            //
-            // ob_for_fold(1) is the offset_bits used by fold 1's LZ encoding,
-            // which is what pair_encode used in its Cantor fallback path.
             let ob1 = ob_for_fold(1);
             let tokens = pair_decode(&current, ob1)?;
             current = reconstruct(&tokens);
             println!("Unfold pass 2 (PAIR) + pass 1 (LZ): {} bytes", current.len());
             return Ok(current);
         } else {
-            // LZ fold — ob is the offset_bits used when this fold was encoded.
             let tokens = read_tokens(&current, ob)?;
             current = reconstruct(&tokens);
             println!("Unfold pass {} (LZ): {} bytes", pass, current.len());
@@ -88,7 +74,6 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(current)
 }
 
-/// Parse the per-fold offset_bits array from the header.
 fn parse_offset_bits(input: &[u8], fold_count: usize) -> (Vec<u32>, usize) {
     let new_format_end = 3 + fold_count;
     if fold_count > 0 && input.len() >= new_format_end {
@@ -115,4 +100,4 @@ fn parse_offset_bits(input: &[u8], fold_count: usize) -> (Vec<u32>, usize) {
 
     let v = vec![OFFSET_BITS_DEFAULT; fold_count];
     (v, 3)
-            }
+}

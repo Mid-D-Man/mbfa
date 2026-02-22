@@ -9,7 +9,7 @@ use crate::opcode::{Token, OFFSET_BITS_MIN};
 const MIN_IMPROVEMENT_RATIO: f64 = 0.985; // was 0.97
 const MIN_FOLD_BITS: usize = 64;
 const MIN_PAIR_BYTES: usize = 512;
-const MAX_CANTOR_FALLBACK_RATE: f64 = 0.80;
+const MAX_CANTOR_FALLBACK_RATE: f64 = 0.77;
 const FOLD2_LZ_MAX_RATIO: f64 = 0.10;
 
 fn cantor(x: u32, y: u32) -> u64 {

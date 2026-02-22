@@ -5,6 +5,7 @@ use crate::bitreader::read_tokens;
 use crate::pairing::pair_encode;
 use crate::opcode::{Token, OFFSET_BITS_MIN};
 
+
 // src/fold.rs — line 9
 const MIN_IMPROVEMENT_RATIO: f64 = 0.985; // was 0.97
 const MIN_FOLD_BITS: usize = 64;

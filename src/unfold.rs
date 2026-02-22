@@ -5,8 +5,8 @@
 //!         [offset_bits[0]: u8] ... [offset_bits[fold_count-1]: u8]
 //!         [payload...]
 //!
-//! entropy_flag=1 means joint Huffman + offset bucket coding was applied
-//! to the outermost fold. offset_bits are still stored for the LZ passes.
+//! offset_bits[i] is the LZ window size used for fold (i+1).
+//! PAIR folds store 0 as a sentinel — they do not use an LZ bitstream.
 
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
@@ -35,14 +35,14 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             .unwrap_or(OFFSET_BITS_DEFAULT)
     };
 
-    // Entropy wraps the outermost fold — decode it first if present.
-    // offset_bits not passed — entropy now uses bucket coding internally.
+    let final_ob = ob_for_fold(fold_count);
+
     let (mut current, folds_to_undo) = if entropy_flag == 1 {
         let payload = &input[payload_start..];
         let (enc_table, bytes_consumed) = entropy::deserialize_table(payload)?;
         let dtable   = entropy::decode_table_from_encode(&enc_table);
         let stream   = &payload[bytes_consumed..];
-        let tokens   = entropy::read_tokens_joint(stream, &dtable)?;
+        let tokens   = entropy::read_tokens_joint(stream, &dtable, final_ob)?;
         let recovered = reconstruct(&tokens);
         println!("Joint entropy unfold: {} bytes recovered", recovered.len());
         (recovered, fold_count.saturating_sub(1))
@@ -54,7 +54,6 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         return Ok(current);
     }
 
-    // Undo folds in reverse order.
     for pass in (1..=folds_to_undo).rev() {
         let ob = ob_for_fold(pass);
 

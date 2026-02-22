@@ -15,22 +15,18 @@ use std::io;
 /// File header layout:
 ///   Byte 0:              fold_count
 ///   Byte 1:              pair_flag    (1 = fold 2 used pair encoding)
-///   Byte 2:              entropy_flag (0 = raw bitstream, 1 = joint Huffman)
+///   Byte 2:              entropy_flag (0 = raw bitstream, 1 = joint Huffman + offset buckets)
 ///   Bytes 3..3+N:        offset_bits[0..N] where N = fold_count
 ///                        One byte per accepted fold, in fold order (fold 1 first).
 ///                        PAIR folds store 0 as a sentinel.
+///                        Still written for the non-entropy LZ unfold passes.
 ///   Byte 3+N onward:     compressed payload
-///
-/// The per-fold offset_bits array lets the decompressor use the correct LZ
-/// window size when undoing each fold, even when different folds used
-/// different adaptive window sizes.
 pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     let (compressed, folds_done, used_pairing, offset_bits_per_fold) =
         fold::fold(input, max_folds)?;
 
-    // The final fold's offset_bits is used for entropy coding.
-    // If no folds ran (fold 0 passthrough), offset_bits is irrelevant but
-    // we need a valid value for the entropy path guard below.
+    // final_ob is still needed to read the LZ bitstream back into tokens
+    // for entropy coding — the raw bitstream uses offset_bits normally.
     let final_ob = offset_bits_per_fold.last().copied()
         .unwrap_or(opcode::OFFSET_BITS_MIN);
 
@@ -42,7 +38,8 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
         let tokens = bitreader::read_tokens(&compressed, final_ob)?;
         match entropy::build_encode_table(&tokens) {
             Some(enc_table) => {
-                let coded       = entropy::write_tokens_joint(&tokens, &enc_table, final_ob)?;
+                // offset_bits no longer passed — entropy uses bucket coding
+                let coded       = entropy::write_tokens_joint(&tokens, &enc_table)?;
                 let table_bytes = entropy::serialize_table(&enc_table);
                 let total       = coded.len() + table_bytes.len();
                 if total < compressed.len() {
@@ -69,7 +66,6 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     output.push(folds_done);
     output.push(used_pairing as u8);
     output.push(entropy_flag);
-    // Write per-fold offset_bits (one byte each, values fit in u8: range 7–17).
     for &ob in &offset_bits_per_fold {
         output.push(ob as u8);
     }
@@ -79,4 +75,4 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
 
 pub fn decompress(input: &[u8]) -> io::Result<Vec<u8>> {
     unfold::unfold(input)
-                    }
+}

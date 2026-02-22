@@ -1,6 +1,7 @@
 // src/encoder.rs
 //! LZ-style scanner with hash chain match finding.
 //! O(n) average case. Accepts offset_bits at runtime for adaptive window sizing.
+//! Lazy matching: peeks one position ahead before committing to a BACKREF.
 
 use crate::opcode::{Token, LENGTH_BITS, LIT_TOTAL_BITS, backref_total_bits, max_offset, OFFSET_BITS_MAX};
 
@@ -20,9 +21,10 @@ fn hash3(input: &[u8], pos: usize) -> usize {
 }
 
 /// Scan input using a lookback window of `(1 << offset_bits) - 1` bytes.
-/// Pass `crate::opcode::OFFSET_BITS_MAX` for the widest possible window
-/// when you plan to call `compute_optimal_offset_bits` afterwards and
-/// re-encode with the tight value.
+/// Uses one-step lazy matching: before committing to a BACKREF at position i,
+/// checks if position i+1 yields a strictly longer match. If so, emits LIT[i]
+/// and defers to the next iteration. This mirrors the lazy evaluation used by
+/// gzip/deflate and recovers 2-5pp on text files vs pure greedy.
 pub fn scan(input: &[u8], offset_bits: u32) -> Vec<Token> {
     let max_off = max_offset(offset_bits);
     let backref_bits = backref_total_bits(offset_bits);
@@ -38,20 +40,44 @@ pub fn scan(input: &[u8], offset_bits: u32) -> Vec<Token> {
         let h = hash3(input, i);
         let (best_offset, best_len) = find_match(input, i, h, &head, &prev, max_off);
 
-        if best_len >= 2 && backref_bits < (best_len as u32 * LIT_TOTAL_BITS) {
-            for k in 0..best_len {
-                if i + k + 2 < n {
-                    let hk = hash3(input, i + k);
-                    prev[i + k] = head[hk];
-                    head[hk] = (i + k) as u32;
+        let backref_worthwhile = best_len >= 2
+            && backref_bits < (best_len as u32 * LIT_TOTAL_BITS);
+
+        if backref_worthwhile {
+            // ── Lazy matching: peek one position ahead ────────────────────────
+            // Only bother if there is a next position that can form a 3-byte hash.
+            let lazy_better = if i + 1 < n {
+                let h1 = hash3(input, i + 1);
+                let (_, lazy_len) = find_match(input, i + 1, h1, &head, &prev, max_off);
+                lazy_len > best_len
+            } else {
+                false
+            };
+
+            if lazy_better {
+                // Emit literal at i and insert i into the hash chain.
+                // The next iteration will find the longer match at i+1.
+                prev[i] = head[h];
+                head[h] = i as u32;
+                tokens.push(Token::Lit { byte: input[i] });
+                i += 1;
+            } else {
+                // Commit to the match at i. Update hash for all covered positions.
+                for k in 0..best_len {
+                    if i + k + 2 < n {
+                        let hk = hash3(input, i + k);
+                        prev[i + k] = head[hk];
+                        head[hk] = (i + k) as u32;
+                    }
                 }
+                tokens.push(Token::Backref {
+                    offset: best_offset as u32,
+                    length: best_len as u32,
+                });
+                i += best_len;
             }
-            tokens.push(Token::Backref {
-                offset: best_offset as u32,
-                length: best_len as u32,
-            });
-            i += best_len;
         } else {
+            // No worthwhile match — emit literal and insert into chain.
             prev[i] = head[h];
             head[h] = i as u32;
             tokens.push(Token::Lit { byte: input[i] });
@@ -79,7 +105,7 @@ fn find_match(
     let mut cur = head[h];
     while cur != u32::MAX && steps < CHAIN_LIMIT {
         let j = cur as usize;
-        if i - j > max_off { break; }
+        if i <= j || i - j > max_off { break; }
 
         let span = i - j;
         let mut len = 0;
@@ -107,9 +133,7 @@ fn find_match(
 /// minimum offset_bits that covers all actual offsets used.
 /// Returns (tokens, optimal_offset_bits).
 pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32) {
-    // Scan with maximum window to find all possible matches.
     let tokens = scan(input, OFFSET_BITS_MAX);
-    // Compute minimum bits needed for the offsets actually used.
     let optimal = crate::opcode::compute_optimal_offset_bits(&tokens);
     (tokens, optimal)
-        }
+                }

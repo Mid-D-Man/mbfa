@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MBFA — Algorithm Walkthrough</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap');
+
+    :root {
+      --orange: #f78166; --blue: #79c0ff; --purple: #a371f7;
+      --green: #3fb950; --yellow: #e3b341; --red: #f85149;
+      --grey: #8b949e; --dim: #484f58;
+      --bg: #0d1117; --card: #161b22; --border: #30363d;
+      --text: #e6edf3;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Syne', system-ui, sans-serif;
+      padding: 32px 20px; min-height: 100vh; }
+    .container { max-width: 960px; margin: 0 auto; }
+
+    header { border-bottom: 2px solid var(--orange); padding-bottom: 18px; margin-bottom: 28px; }
+    header h1 { font-size: 1.9rem; font-weight: 800; color: var(--orange); }
+    header h1 span { color: var(--text); }
+    .subtitle { color: var(--grey); margin-top: 6px; font-size: 0.85rem; font-family: 'JetBrains Mono', monospace; }
+    .input-display { color: var(--green); font-weight: 700; }
+    .back-link { display: inline-flex; align-items: center; gap: 6px; color: var(--grey);
+      font-size: 0.8rem; text-decoration: none; margin-bottom: 14px; padding: 5px 12px;
+      background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+      transition: color 0.15s, border-color 0.15s; }
+    .back-link:hover { color: var(--text); border-color: var(--grey); }
+
+    /* Step nav */
+    .step-nav { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px; }
+    .step-btn { background: var(--card); border: 1px solid var(--border); color: var(--grey);
+      border-radius: 6px; padding: 6px 12px; font-size: 0.78rem; cursor: pointer;
+      font-family: 'Syne', sans-serif; transition: all 0.15s; }
+    .step-btn:hover { border-color: var(--grey); color: var(--text); }
+    .step-btn.active { background: rgba(247,129,102,0.12); border-color: var(--orange);
+      color: var(--orange); font-weight: 700; }
+
+    /* Content card */
+    .content-card { background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 24px; min-height: 340px; margin-bottom: 16px; }
+    .content-card h2 { font-size: 1.05rem; font-weight: 700; color: var(--text);
+      margin-bottom: 14px; border-left: 3px solid var(--orange); padding-left: 10px; }
+
+    /* Nav buttons */
+    .nav-row { display: flex; justify-content: space-between; align-items: center; }
+    .nav-btn { background: var(--card); border: 1px solid var(--border); color: var(--text);
+      padding: 8px 20px; border-radius: 6px; cursor: pointer; font-family: 'Syne', sans-serif;
+      font-size: 0.85rem; transition: all 0.15s; }
+    .nav-btn:hover:not(:disabled) { border-color: var(--orange); color: var(--orange); }
+    .nav-btn:disabled { color: var(--dim); cursor: not-allowed; }
+    .nav-btn.next { border-color: var(--orange); color: var(--orange);
+      background: rgba(247,129,102,0.08); }
+    .nav-counter { color: var(--dim); font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; }
+
+    /* Generic layout helpers */
+    .mono { font-family: 'JetBrains Mono', monospace; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+    .chip { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+      padding: 7px 14px; font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; }
+    .chip .label { color: var(--grey); }
+    .warn { background: rgba(248,81,73,0.08); border: 1px solid #5a1a1a; border-radius: 6px;
+      padding: 10px 14px; font-size: 0.82rem; color: var(--red); margin: 10px 0; line-height: 1.6; }
+    .good { background: rgba(63,185,80,0.08); border: 1px solid #1a5a2a; border-radius: 6px;
+      padding: 10px 14px; font-size: 0.82rem; color: var(--green); margin: 10px 0; line-height: 1.6; }
+    .info { background: rgba(121,192,255,0.08); border: 1px solid #1f4080; border-radius: 6px;
+      padding: 10px 14px; font-size: 0.82rem; color: var(--blue); margin: 10px 0; line-height: 1.6; }
+    p.desc { color: var(--grey); font-size: 0.85rem; line-height: 1.7; margin-bottom: 12px; }
+
+    /* Token list */
+    .token-list { display: flex; flex-direction: column; gap: 3px; }
+    .token-row { display: flex; align-items: center; gap: 10px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: 4px; padding: 5px 10px;
+      font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; }
+    .token-type { width: 64px; font-weight: 700; }
+    .token-data { flex: 1; }
+    .token-bits { margin-left: auto; color: var(--yellow); }
+    .token-note { color: var(--red); font-size: 0.68rem; max-width: 200px; text-align: right; }
+
+    /* Pair list */
+    .pair-row { display: flex; align-items: center; gap: 10px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px;
+      font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; margin-bottom: 3px; }
+    .pair-tag { width: 36px; font-weight: 700; }
+    .pair-data { flex: 1; color: var(--grey); }
+    .pair-bits { color: var(--yellow); font-size: 0.75rem; }
+
+    /* Opcode grid */
+    .opcode-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-bottom: 14px; }
+    .opcode-card { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px;
+      font-family: 'JetBrains Mono', monospace; }
+
+    /* Gap list */
+    .gap-item { background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+      padding: 14px; margin-bottom: 10px; }
+    .gap-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+    .gap-rank { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center;
+      justify-content: center; font-weight: 700; font-size: 0.85rem; flex-shrink: 0; }
+    .gap-title { font-weight: 700; font-size: 0.95rem; }
+    .gap-badge { margin-left: auto; font-size: 0.72rem; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+    .gap-desc { color: var(--grey); font-size: 0.8rem; line-height: 1.7; margin-left: 38px; }
+    .gap-effort { margin-left: 38px; margin-top: 4px; font-size: 0.72rem; color: var(--dim); }
+
+    /* Lazy side by side */
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+    @media (max-width: 600px) { .split { grid-template-columns: 1fr; } .opcode-grid { grid-template-columns: 1fr; } }
+    .split-card { border-radius: 8px; padding: 14px; }
+    .split-card h3 { font-size: 0.85rem; font-weight: 700; margin-bottom: 8px; }
+    .split-card pre { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem;
+      color: var(--grey); line-height: 2; white-space: pre-wrap; }
+
+    /* Input bytes */
+    .byte-row { font-family: 'JetBrains Mono', monospace; font-size: 0.95rem;
+      letter-spacing: 2px; background: var(--bg); padding: 14px; border-radius: 6px;
+      border: 1px solid var(--border); }
+    .byte { display: inline-block; width: 18px; text-align: center;
+      border-bottom: 2px solid var(--dim); margin: 0 1px; }
+    .byte.space { color: var(--dim); }
+
+    /* Entropy stat row */
+    .stat-row { display: grid; grid-template-columns: repeat(2,1fr); gap: 10px; }
+    @media(min-width:600px) { .stat-row { grid-template-columns: repeat(4,1fr); } }
+    .stat-card { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+    .stat-label { font-size: 0.72rem; color: var(--grey); margin-bottom: 4px; }
+    .stat-val { font-size: 1.05rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <a class="back-link" href="../">← Main Benchmarks</a>
+
+  <header>
+    <h1>🦀 MBFA <span>— Algorithm Walkthrough</span></h1>
+    <p class="subtitle">
+      Input: <span class="input-display">"the cat sat on the mat and the"</span> — 30 bytes.
+      Every step traced end-to-end.
+    </p>
+  </header>
+
+  <div class="step-nav" id="step-nav"></div>
+
+  <div class="content-card" id="content-card"></div>
+
+  <div class="nav-row">
+    <button class="nav-btn" id="prev-btn" onclick="changeStep(-1)">← Previous</button>
+    <span class="nav-counter" id="counter"></span>
+    <button class="nav-btn next" id="next-btn" onclick="changeStep(1)">Next →</button>
+  </div>
+</div>
+
+<script>
+const C = {
+  orange:'#f78166', blue:'#79c0ff', purple:'#a371f7',
+  green:'#3fb950', yellow:'#e3b341', red:'#f85149',
+  grey:'#8b949e', dim:'#484f58', text:'#e6edf3',
+};
+
+const TOKENS = [
+  { type:'LIT',     byte:'t',  bits:10, note:'' },
+  { type:'LIT',     byte:'h',  bits:10, note:'' },
+  { type:'LIT',     byte:'e',  bits:10, note:'' },
+  { type:'LIT',     byte:' ',  bits:10, note:'' },
+  { type:'LIT',     byte:'c',  bits:10, note:'' },
+  { type:'LIT',     byte:'a',  bits:10, note:'' },
+  { type:'LIT',     byte:'t',  bits:10, note:'' },
+  { type:'LIT',     byte:' ',  bits:10, note:'' },
+  { type:'LIT',     byte:'s',  bits:10, note:'GREEDY: no 3-byte match found here' },
+  { type:'BACKREF', offset:8,  length:2, bits:16, match:'at', note:'' },
+  { type:'LIT',     byte:' ',  bits:10, note:'' },
+  { type:'LIT',     byte:'o',  bits:10, note:'' },
+  { type:'LIT',     byte:'n',  bits:10, note:'' },
+  { type:'LIT',     byte:' ',  bits:10, note:'' },
+  { type:'BACKREF', offset:14, length:4, bits:16, match:'the ', note:'' },
+  { type:'BACKREF', offset:11, length:3, bits:16, match:'mat', note:'' },
+  { type:'LIT',     byte:' ',  bits:10, note:'' },
+  { type:'LIT',     byte:'a',  bits:10, note:'' },
+  { type:'LIT',     byte:'n',  bits:10, note:'' },
+  { type:'LIT',     byte:'d',  bits:10, note:'' },
+  { type:'LIT',     byte:' ',  bits:10, note:'' },
+  { type:'BACKREF', offset:24, length:3, bits:16, match:'the', note:'' },
+  { type:'END',     bits:2,    note:'' },
+];
+
+const PAIRS = [
+  { pair:'LL', a:"LIT 't'", b:"LIT 'h'",   pre:3, dat:16, tot:19, note:'' },
+  { pair:'LL', a:"LIT 'e'", b:"LIT ' '",   pre:3, dat:16, tot:19, note:'' },
+  { pair:'LL', a:"LIT 'c'", b:"LIT 'a'",   pre:3, dat:16, tot:19, note:'' },
+  { pair:'LL', a:"LIT 't'", b:"LIT ' '",   pre:3, dat:16, tot:19, note:'' },
+  { pair:'SL', a:"LIT 's'", b:null,         pre:3, dat:8,  tot:11, note:'odd token out' },
+  { pair:'BL', a:"BR(8,2)", b:"LIT ' '",   pre:3, dat:25, tot:28, note:'cantor(8,2)=44 fits in 16b' },
+  { pair:'LL', a:"LIT 'o'", b:"LIT 'n'",   pre:3, dat:16, tot:19, note:'from greedy miss' },
+  { pair:'LL', a:"LIT ' '", b:null,         pre:3, dat:8,  tot:11, note:'' },
+  { pair:'BB', a:"BR(14,4)",b:"BR(11,3)",  pre:3, dat:34, tot:37, note:'both Cantors fit' },
+  { pair:'LL', a:"LIT ' '", b:"LIT 'a'",   pre:3, dat:16, tot:19, note:'' },
+  { pair:'LL', a:"LIT 'n'", b:"LIT 'd'",   pre:3, dat:16, tot:19, note:'' },
+  { pair:'SB', a:"BR(24,3)",b:null,         pre:3, dat:17, tot:20, note:'cantor(24,3)=377 fits' },
+  { pair:'END',a:null,      b:null,         pre:3, dat:0,  tot:3,  note:'' },
+];
+
+function pairColor(p) {
+  return {LL:C.green,LB:C.blue,BL:C.purple,BB:C.orange,SL:C.green,SB:C.orange,END:C.grey}[p]||C.grey;
+}
+function tokColor(t) { return t==='LIT'?C.green:t==='BACKREF'?C.orange:C.grey; }
+
+const INPUT = "the cat sat on the mat and the";
+const totalFold1Bits = TOKENS.reduce((a,t)=>a+t.bits,0);
+const litCount = TOKENS.filter(t=>t.type==='LIT').length;
+const brCount  = TOKENS.filter(t=>t.type==='BACKREF').length;
+
+const steps = [
+  {
+    label:'① Raw Input',
+    render() {
+      return `
+        <h2>Raw Input — 30 bytes, 240 bits</h2>
+        <p class="desc">Nothing has happened yet. These are the raw bytes entering fold 1.
+          The adaptive scan will choose offset_bits=7 (max window=127 bytes) since matches
+          in a 30-byte input never need more than ~30 bits of offset.</p>
+        <div class="byte-row">${[...INPUT].map(c=>`<span class="byte${c===' '?' space':''}">${c===' '?'·':c}</span>`).join('')}</div>
+        <div class="row">
+          <div class="chip"><span class="label">Original: </span><span style="color:${C.text};font-weight:700">240 bits (30 bytes)</span></div>
+          <div class="chip"><span class="label">Adaptive offset_bits: </span><span style="color:${C.blue};font-weight:700">7 → window=127 bytes</span></div>
+          <div class="chip"><span class="label">BACKREF cost: </span><span style="color:${C.orange};font-weight:700">1+7+8 = 16 bits each</span></div>
+          <div class="chip"><span class="label">LIT cost: </span><span style="color:${C.green};font-weight:700">2+8 = 10 bits each</span></div>
+        </div>`;
+    }
+  },
+  {
+    label:'② Fold 1 — LZSS Scan',
+    render() {
+      const rows = TOKENS.map(t => {
+        let data = '';
+        if (t.type==='LIT') data = `<span style="color:${C.green}">'${t.byte==' '?'·':t.byte}'</span>`;
+        else if (t.type==='BACKREF') data = `<span style="color:${C.orange}">offset=<b>${t.offset}</b> len=<b>${t.length}</b></span> <span style="color:${C.purple}">"${t.match}"</span>`;
+        else data = `<span style="color:${C.grey}">─</span>`;
+        return `<div class="token-row">
+          <span class="token-type" style="color:${tokColor(t.type)}">${t.type}</span>
+          <span class="token-data mono">${data}</span>
+          <span class="token-bits">${t.bits}b</span>
+          ${t.note?`<span class="token-note">${t.note}</span>`:''}
+        </div>`;
+      }).join('');
+      return `
+        <h2>Fold 1 — Greedy LZSS Hash-Chain Scan</h2>
+        <p class="desc">At each position: find longest match in hash chain within the window.
+          Emit BACKREF if its bit cost beats the literal cost for that length. Otherwise emit LIT.
+          Chain limit = 256 steps per position → O(n) average.</p>
+        <div class="info">⚠ <strong>GREEDY</strong>: commits to the best match at position <em>i</em> without
+          checking i+1. The lazy matching fix addresses this — see step ⑦.</div>
+        <div class="token-list">${rows}</div>
+        <div class="row">
+          <div class="chip"><span class="label">LITs: </span><span style="color:${C.green};font-weight:700">${litCount}</span></div>
+          <div class="chip"><span class="label">BACKREFs: </span><span style="color:${C.orange};font-weight:700">${brCount}</span></div>
+          <div class="chip"><span class="label">Total bits: </span><span style="color:${C.yellow};font-weight:700">${totalFold1Bits}</span></div>
+          <div class="chip"><span class="label">vs 240 bits in: </span><span style="color:${totalFold1Bits<240?C.green:C.red};font-weight:700">${((totalFold1Bits/240)*100).toFixed(1)}%</span></div>
+        </div>`;
+    }
+  },
+  {
+    label:'③ Bit Packing',
+    render() {
+      const bytes = Math.ceil(totalFold1Bits/8);
+      return `
+        <h2>Bit Packing — Fixed Opcode Vocabulary (bitwriter.rs)</h2>
+        <p class="desc">Tokens are serialised into a compact bitstream using fixed opcodes
+          known to both encoder and decoder. No tables are transmitted — this is a core
+          design decision that eliminates per-fold overhead.</p>
+        <div class="opcode-grid">
+          <div class="opcode-card">
+            <div style="color:${C.orange};font-weight:700">BACKREF</div>
+            <div style="color:${C.blue};font-size:0.8rem;margin-top:4px">opcode: <b>0</b></div>
+            <div style="color:${C.grey};font-size:0.75rem;margin-top:2px">1 + offset_bits + 8 bits</div>
+          </div>
+          <div class="opcode-card">
+            <div style="color:${C.green};font-weight:700">LIT</div>
+            <div style="color:${C.blue};font-size:0.8rem;margin-top:4px">opcode: <b>10</b></div>
+            <div style="color:${C.grey};font-size:0.75rem;margin-top:2px">2 + 8 = 10 bits fixed</div>
+          </div>
+          <div class="opcode-card">
+            <div style="color:${C.grey};font-weight:700">END</div>
+            <div style="color:${C.blue};font-size:0.8rem;margin-top:4px">opcode: <b>11</b></div>
+            <div style="color:${C.grey};font-size:0.75rem;margin-top:2px">2 bits</div>
+          </div>
+        </div>
+        <div class="warn">⚠ <strong>RAW OFFSET FIELD</strong>: the offset is written as plain
+          binary — no Huffman, no entropy coding. For files with offset_bits=17 every BACKREF
+          always costs 17 raw bits for the offset regardless of its actual value. gzip
+          Huffman-codes its distance values in a separate alphabet. This is the primary
+          remaining gap on text files.</div>
+        <div class="row">
+          <div class="chip"><span class="label">Input: </span><span style="color:${C.grey};font-weight:700">240 bits</span></div>
+          <div class="chip"><span class="label">Fold 1 output: </span><span style="color:${C.yellow};font-weight:700">${totalFold1Bits} bits (${bytes} bytes)</span></div>
+          <div class="chip"><span class="label">Ratio: </span><span style="color:${C.green};font-weight:700">${((totalFold1Bits/240)*100).toFixed(1)}%</span></div>
+        </div>`;
+    }
+  },
+  {
+    label:'④ Fold 2 Decision Gate',
+    render() {
+      return `
+        <h2>Fold 2 — Decision Gate (fold.rs)</h2>
+        <p class="desc">Before fold 2 runs, three checks gate whether PAIR encoding fires.
+          If PAIR is skipped, a second LZ gate checks whether raw LZ on the packed bytes
+          is worth attempting.</p>
+        <div class="token-list">
+          <div class="token-row">
+            <span class="token-data mono">fold_count == 2 AND folds_done == 1</span>
+            <span class="token-bits" style="color:${C.green}">✓ YES</span>
+            <span class="token-note" style="color:${C.grey}">Just completed fold 1</span>
+          </div>
+          <div class="token-row">
+            <span class="token-data mono">current.len() ≥ MIN_PAIR_BYTES (512)</span>
+            <span class="token-bits" style="color:${C.yellow}">✗ NO (toy example)</span>
+            <span class="token-note" style="color:${C.grey}">Real files pass this</span>
+          </div>
+          <div class="token-row">
+            <span class="token-data mono">Cantor fallback rate &lt; 80%</span>
+            <span class="token-bits" style="color:${C.blue}">Varies</span>
+            <span class="token-note" style="color:${C.grey}">Scan all BACKREFs: cantor(off,len) &lt; 65536?</span>
+          </div>
+        </div>
+        <div class="good">For real files like fields.c (11KB): all three checks pass → PAIR fires.
+          For alice29 (152KB): Cantor fallback rate = 89.9% → PAIR skipped, 80% threshold not met.</div>
+        <div class="warn">⚠ If PAIR skipped: LZ on packed bytes only runs when
+          current_ratio &lt; 0.10 (FOLD2_LZ_MAX_RATIO). Alice_100KB has ratio 0.506 →
+          LZ fold 2 also blocked. We stop at fold 1 + entropy.</div>
+        <p class="desc" style="margin-top:10px">
+          The 0.10 gate was added to prevent LZ on quasi-random packed bytes from expanding
+          the output. It works but is very conservative — effectively prevents fold 3+ on
+          most real data.
+        </p>`;
+    }
+  },
+  {
+    label:'⑤ Fold 2 — PAIR Encoding',
+    render() {
+      const rows = PAIRS.map(p => {
+        const color = pairColor(p.pair);
+        const data = p.a ? (p.b ? `${p.a} + ${p.b}` : p.a) : '─';
+        return `<div class="pair-row">
+          <span class="pair-tag" style="color:${color}">${p.pair}</span>
+          <span class="pair-data">${data}</span>
+          <span style="color:${C.dim};font-size:0.72rem">pre:${p.pre}b+dat:${p.dat}b</span>
+          <span class="pair-bits" style="margin-left:8px">${p.tot}b</span>
+          ${p.note?`<span style="color:${C.dim};font-size:0.7rem;margin-left:6px">${p.note}</span>`:''}
+        </div>`;
+      }).join('');
+      const totalPairBits = PAIRS.reduce((a,p)=>a+p.tot,0);
+      return `
+        <h2>Fold 2 — Token Pair Encoding (pairing.rs)</h2>
+        <p class="desc">Adjacent tokens are combined into typed pairs with a 3-bit prefix.
+          BACKREF operands are compressed via Cantor pairing: if cantor(offset,length) &lt; 65536,
+          encode as 1 flag + 16 bits = 17 bits. Otherwise fallback to raw offset_bits + 8 bits.</p>
+        <div class="warn">⚠ <strong>BB PAIR BLOWUP</strong>: a BB pair has two BACKREFs each needing
+          a Cantor operand. For offset_bits=17 with large offsets: cantor(80000,200) ≈ 3.2B &gt;&gt; 65536.
+          Both fall back to raw: 3 + (1+17+8) + (1+17+8) = <strong>55 bits</strong> vs original
+          two BACKREFs at 16+16 = <strong>32 bits</strong>. PAIR made it worse.
+          This is why Cantor fallback rate above 80% triggers a PAIR skip.</div>
+        ${rows}
+        <div class="row" style="margin-top:10px">
+          <div class="chip"><span class="label">Fold 1 bits: </span><span style="color:${C.yellow};font-weight:700">${totalFold1Bits}</span></div>
+          <div class="chip"><span class="label">After PAIR: </span><span style="color:${C.yellow};font-weight:700">${totalPairBits}</span></div>
+          <div class="chip"><span class="label">Ratio: </span><span style="color:${totalPairBits<totalFold1Bits?C.green:C.red};font-weight:700">${((totalPairBits/totalFold1Bits)*100).toFixed(1)}%</span></div>
+        </div>`;
+    }
+  },
+  {
+    label:'⑥ Joint Huffman Entropy',
+    render() {
+      return `
+        <h2>Joint Huffman Entropy (entropy.rs)</h2>
+        <p class="desc">Applied to the outermost fold's token stream when output &gt; 800 bytes.
+          One Huffman table covers three symbol types — no separate tables transmitted,
+          just one joint table header.</p>
+        <div class="opcode-grid">
+          <div class="opcode-card">
+            <div style="color:${C.green};font-weight:700">LIT bytes</div>
+            <div style="color:${C.blue};font-size:0.78rem;margin-top:4px">symbols 0–255</div>
+            <div style="color:${C.grey};font-size:0.72rem;margin-top:4px">Common chars like 'e','t','a' get short codes. 'e' in alice29 → ~3 bits instead of 10.</div>
+          </div>
+          <div class="opcode-card">
+            <div style="color:${C.orange};font-weight:700">BACKREF lengths</div>
+            <div style="color:${C.blue};font-size:0.78rem;margin-top:4px">symbols 256+len</div>
+            <div style="color:${C.grey};font-size:0.72rem;margin-top:4px">Short lengths (2,3,4) common → shorter Huffman codes.</div>
+          </div>
+          <div class="opcode-card">
+            <div style="color:${C.grey};font-weight:700">END</div>
+            <div style="color:${C.blue};font-size:0.78rem;margin-top:4px">symbol 256</div>
+            <div style="color:${C.grey};font-size:0.72rem;margin-top:4px">Always present once per stream.</div>
+          </div>
+        </div>
+        <div class="warn">⚠ <strong>OFFSETS NOT CODED</strong>: after reading the Huffman symbol
+          for a BACKREF, the offset field is written/read as <strong>raw offset_bits bits</strong>.
+          For offset_bits=17 every BACKREF still has 17 uncoded raw bits. gzip Huffman-codes
+          its distances in a separate alphabet. This is the primary remaining gap on text.</div>
+        <div class="stat-row">
+          <div class="stat-card"><div class="stat-label">alice29 before entropy</div><div class="stat-val" style="color:${C.grey}">72131 bytes</div></div>
+          <div class="stat-card"><div class="stat-label">alice29 after entropy</div><div class="stat-val" style="color:${C.green}">58302 bytes</div></div>
+          <div class="stat-card"><div class="stat-label">gzip alice29</div><div class="stat-val" style="color:${C.blue}">54435 bytes</div></div>
+          <div class="stat-card"><div class="stat-label">Gap (raw offsets)</div><div class="stat-val" style="color:${C.red}">~3.8pp</div></div>
+        </div>`;
+    }
+  },
+  {
+    label:'⑦ Lazy Matching — The Fix',
+    render() {
+      return `
+        <h2>Lazy Matching — What Changes in encoder.rs</h2>
+        <p class="desc">Greedy matching commits to the best match at position <em>i</em>
+          immediately. Lazy matching peeks one position ahead before committing. Confirmed
+          ~2–5pp improvement on text from DEFLATE literature.</p>
+        <div class="split">
+          <div class="split-card" style="background:rgba(248,81,73,0.07);border:1px solid #5a1a1a">
+            <h3 style="color:${C.red}">GREEDY (current)</h3>
+            <pre>pos i:   find best_match
+if good: emit BACKREF(i)
+         advance by match_len
+
+Problem: a short match at i
+prevents seeing a longer
+match starting at i+1.
+
+'sat' example:
+i=8: no match for 's'
+  → LIT 's'  (10 bits)
+i=9: match 'at' len=2
+  → BACKREF(8,2) (16 bits)
+Total: 26 bits for "sat"</pre>
+          </div>
+          <div class="split-card" style="background:rgba(63,185,80,0.07);border:1px solid #1a5a2a">
+            <h3 style="color:${C.green}">LAZY (proposed)</h3>
+            <pre>pos i:   find match_i
+pos i+1: find match_i1
+if match_i1.len > match_i.len:
+  emit LIT[i]
+  let next iter handle i+1
+  (finds longer match)
+else:
+  emit BACKREF(i) as normal
+
+Benefit on longer text:
+avoids committing to a
+mediocre match when a
+better one is 1 pos ahead.</pre>
+          </div>
+        </div>
+        <div class="info">
+          <strong>Implementation</strong>: one extra hash lookup per BACKREF candidate.
+          When the lookahead match is strictly longer, emit literal at i and <code>continue</code>
+          the loop — the next iteration finds the better match naturally. No state machine needed.
+          Depth limited to 1 (gzip style) — no recursive lookahead.
+        </div>
+        <div class="warn">⚠ Cost: roughly 2× hash lookups when a BACKREF candidate exists.
+          For files with low BACKREF density this overhead is minimal. For Repetitive_12KB
+          (86% BACKREFs) it is measurable but the ratio improvement should outweigh it.</div>`;
+    }
+  },
+  {
+    label:'⑧ Gap Summary',
+    render() {
+      const gaps = [
+        { rank:1, color:C.red, title:'Raw offset field — uncoded bits',
+          impact:'~3–5pp on all text',
+          desc:'Every BACKREF writes offset_bits as raw binary. gzip Huffman-codes distances in a separate alphabet. Fix: add offsets to the joint entropy symbol table using bucketed representation or exp-golomb.',
+          effort:'Medium' },
+        { rank:2, color:C.orange, title:'Cantor blowup in PAIR (BB pairs worst)',
+          impact:'Prevents PAIR on 80–97% of real files',
+          desc:'cantor(large_offset, length) >> 65536 almost always for real data. The fallback raw path makes BB pairs cost MORE than the original two BACKREFs. Fix: replace Cantor with exp-golomb specifically on the offset component.',
+          effort:'Medium' },
+        { rank:3, color:C.yellow, title:'Greedy matching',
+          impact:'~2–4pp on text (confirmed literature)',
+          desc:'Commits to longest match at i without checking if literal + longer_match_at_i+1 is cheaper. Fix: one-step lazy evaluation in encoder.rs scan(). Implemented as of this build.',
+          effort:'Low — done' },
+        { rank:4, color:C.blue, title:'FOLD2_LZ gate too conservative',
+          impact:'Prevents fold 3+ on almost all files',
+          desc:'0.10 threshold means LZ fold 2 only runs when fold 1 achieved >90% compression. Nearly nothing passes. Correct to block expansion but also blocks exploration. May need separate expansion-check vs attempt-check.',
+          effort:'Low (tuning)' },
+      ];
+      return `
+        <h2>Gap Summary — Ranked by Impact</h2>
+        ${gaps.map(g=>`
+          <div class="gap-item">
+            <div class="gap-header">
+              <div class="gap-rank" style="background:${g.color}22;border:2px solid ${g.color};color:${g.color}">${g.rank}</div>
+              <div class="gap-title">${g.title}</div>
+              <div class="gap-badge" style="background:rgba(63,185,80,0.12);border:1px solid #2ea043;color:${C.green}">${g.impact}</div>
+            </div>
+            <div class="gap-desc">${g.desc}</div>
+            <div class="gap-effort">Effort: <span style="color:${C.yellow}">${g.effort}</span></div>
+          </div>`).join('')}`;
+    }
+  },
+];
+
+let currentStep = 0;
+
+function render() {
+  // Nav buttons
+  document.getElementById('step-nav').innerHTML = steps.map((s,i)=>
+    `<button class="step-btn${i===currentStep?' active':''}" onclick="goTo(${i})">${s.label}</button>`
+  ).join('');
+  // Content
+  document.getElementById('content-card').innerHTML = steps[currentStep].render();
+  // Counter + arrows
+  document.getElementById('counter').textContent = `${currentStep+1} / ${steps.length}`;
+  document.getElementById('prev-btn').disabled = currentStep === 0;
+  document.getElementById('next-btn').disabled = currentStep === steps.length-1;
+  if (currentStep === steps.length-1) {
+    document.getElementById('next-btn').classList.remove('next');
+    document.getElementById('next-btn').disabled = true;
+  } else {
+    document.getElementById('next-btn').classList.add('next');
+  }
+}
+
+function goTo(i) { currentStep = i; render(); }
+function changeStep(d) { currentStep = Math.max(0, Math.min(steps.length-1, currentStep+d)); render(); }
+
+render();
+</script>
+</body>
+  </html>

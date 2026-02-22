@@ -275,8 +275,6 @@ jobs:
           "
 
           # Large source — concatenate all Rust source files, repeat to ~1MB
-          # NOTE: if src/*.rs total > 65KB, repetition period exceeds old 32KB window.
-          # With OFFSET_BITS=17 (128KB window) this should now compress much better.
           cat src/*.rs > /tmp/all_src_once.rs
           SRC_BYTES=$(wc -c < /tmp/all_src_once.rs)
           echo "Source bundle size: ${SRC_BYTES} bytes (window is $((131071)) bytes)"
@@ -502,21 +500,30 @@ jobs:
           git config --global user.name "MBFA CI"
           git config --global user.email "ci@mbfa.dev"
 
-          mkdir -p /tmp/gh-pages
-          git worktree add /tmp/gh-pages gh-pages 2>/dev/null || {
-            cd /tmp/gh-pages && git init && git checkout --orphan gh-pages && cd -
-          }
+          # Fetch gh-pages so worktree gets existing content (keeps corpus/ intact)
+          if git fetch origin gh-pages:gh-pages 2>/dev/null; then
+            git worktree add /tmp/gh-pages gh-pages
+          else
+            echo "gh-pages does not exist yet — creating orphan"
+            git worktree add --orphan -b gh-pages /tmp/gh-pages
+          fi
 
+          # Copy benchmark results to root (index.html) and versioned build folder
           mkdir -p /tmp/gh-pages/builds/build_${{ github.run_number }}
           cp -r bench_results/* /tmp/gh-pages/builds/build_${{ github.run_number }}/
           cp -r bench_results/* /tmp/gh-pages/
 
+          # Deploy the algorithm visual walkthrough alongside the main page
+          cp .github/mbfa-visual.html /tmp/gh-pages/visual.html
+
           cd /tmp/gh-pages
           git add .
-          git commit -m "MBFA benchmark — Build #${{ github.run_number }} [skip ci]" || true
-          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages --force
+          git diff --staged --quiet && echo "No changes to deploy" && exit 0
+          git commit -m "MBFA benchmark — Build #${{ github.run_number }} [skip ci]"
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
 
           echo "Deployed to https://mid-d-man.github.io/mbfa/"
+          echo "Visual walkthrough at https://mid-d-man.github.io/mbfa/visual.html"
 
   summary:
     runs-on: ubuntu-latest

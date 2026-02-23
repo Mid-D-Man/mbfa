@@ -1,0 +1,10 @@
+Original size: 25154240 bits (3144280 bytes)
+Window diagnostics: 59860/107453 tokens are BACKREF (55.7%) | 0.0% at max window (131071 bytes) | 23.3% in upper half | offset_bits=17 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes)
+Fold 1 (LZ): 2032296 bits (254037 bytes)
+Fold 2 pairing pre-scan: Cantor fallback rate = 98.5% (threshold 77%)
+Fold 2 pairing skipped — high fallback rate
+Fold 2 (LZ): 2311192 bits (288899 bytes)
+Fold 2 not worth it (ratio 1.137), stopping at fold 1
+Joint entropy applied: 254037 → 201055 bytes (table 500 B, stream 200555 B)
+Done. 3144280 bytes → 201059 bytes

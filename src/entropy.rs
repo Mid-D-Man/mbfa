@@ -1,31 +1,69 @@
 // src/entropy.rs
-//! Joint Huffman entropy coding applied to LIT byte values only.
+//! Joint Huffman entropy coding.
 //!
-//! The opcode bits (BACKREF/LIT/END) stay fixed-width as normal.
-//! Only the 8-bit byte payload inside LIT tokens is Huffman-coded.
-//! BACKREF offsets are written with the caller-supplied offset_bits
-//! (stored in the file header) rather than a fixed constant.
+//! entropy_flag=1 (v1): Huffman on LIT bytes + BACKREF lengths. Offsets raw.
+//! entropy_flag=2 (v2): Same lit/length Huffman PLUS separate offset bucket
+//!                      Huffman table. Offsets encoded as (bucket_code +
+//!                      extra_bits) using a deflate-compatible bucketing scheme.
+//!                      Max table overhead: 104B for offset_bits=17.
 
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
 use bitstream_io::{BitWriter, BitReader, BigEndian, BitWrite, BitRead};
 use crate::opcode::Token;
 
-/// Minimum compressed stream size (bytes) before joint entropy fires.
-/// Set conservatively: the existing `if total < compressed.len()` guard
-/// in lib.rs prevents entropy from ever expanding the output, so this
-/// threshold only needs to be large enough that the Huffman table header
-/// overhead (~2 + n*3 bytes) has a realistic chance of being recovered.
-/// 400 bytes is sufficient — even a 50-symbol table costs ~152 bytes,
-/// which entropy can recover on any non-random stream of that size.
+/// Minimum compressed stream size (bytes) before entropy fires.
 pub const ENTROPY_MIN_BYTES: usize = 400;
 
 const SYM_END: u32 = 256;
 #[inline] fn sym_from_length(len: u32) -> u32 { 255 + len }
-#[inline] fn length_from_sym(sym: u32) -> u32 { sym - 255 }
+#[inline] fn length_from_sym(sym: u32) -> u32  { sym - 255 }
 
 pub type EncodeTable = HashMap<u32, (u32, u32)>;
 pub type DecodeTable = HashMap<(u32, u32), u32>;
+
+// ── Offset bucket scheme ──────────────────────────────────────────────────────
+//
+// Deflate-compatible bucketing covering offsets 1..=131071 (offset_bits=17).
+// Buckets 0-3: offsets 1-4, 0 extra bits each.
+// Buckets 4+:  pairs sharing the same extra_bits count, covering 2×size offsets.
+//   extra_bits = (bucket - 2) >> 1
+//   size       = 1 << extra_bits
+//   base       = 1 + 2 * size
+//   half       = bucket & 1          (0=low range, 1=high range)
+//   offset     = base + half*size + extra_val
+// Max bucket for offset 131071 = 33.  Table overhead = 2 + 34*3 = 104 bytes.
+
+/// Returns (bucket, extra_bits_count, extra_bits_value) for a 1-based offset.
+pub fn offset_to_bucket(offset: u32) -> (u32, u32, u32) {
+    debug_assert!(offset >= 1);
+    if offset <= 4 {
+        return (offset - 1, 0, 0);
+    }
+    let extra_bits = (offset - 1).ilog2().saturating_sub(1);
+    let size = 1u32 << extra_bits;
+    let base = 1 + 2 * size;
+    let half = (offset - base) / size;
+    let bucket = 2 + 2 * extra_bits + half;
+    let extra_val = offset - base - half * size;
+    (bucket, extra_bits, extra_val)
+}
+
+/// Inverse: (bucket, extra_val) → 1-based offset.
+pub fn bucket_to_offset(bucket: u32, extra_val: u32) -> u32 {
+    if bucket < 4 { return bucket + 1; }
+    let extra_bits = (bucket - 2) >> 1;
+    let size = 1u32 << extra_bits;
+    let base = 1 + 2 * size;
+    let half = bucket & 1;
+    base + half * size + extra_val
+}
+
+/// Number of extra bits that follow a given bucket code — pure function.
+#[inline]
+pub fn bucket_extra_bits(bucket: u32) -> u32 {
+    if bucket < 4 { 0 } else { (bucket - 2) >> 1 }
+}
 
 // ── Frequency counting ────────────────────────────────────────────────────────
 
@@ -39,6 +77,18 @@ fn count_joint_freq(tokens: &[Token]) -> HashMap<u32, u64> {
         }
     }
     freq.entry(SYM_END).or_insert(1);
+    freq
+}
+
+/// Build offset bucket frequency table from a token stream.
+pub fn count_offset_bucket_freq(tokens: &[Token]) -> HashMap<u32, u64> {
+    let mut freq: HashMap<u32, u64> = HashMap::new();
+    for t in tokens {
+        if let Token::Backref { offset, .. } = t {
+            let (bucket, _, _) = offset_to_bucket(*offset);
+            *freq.entry(bucket).or_insert(0) += 1;
+        }
+    }
     freq
 }
 
@@ -134,6 +184,14 @@ pub fn build_encode_table(tokens: &[Token]) -> Option<EncodeTable> {
     Some(canonical_codes_from_lengths(&lengths))
 }
 
+/// Build the offset bucket Huffman table. Returns None if no BACKREFs present.
+pub fn build_offset_encode_table(tokens: &[Token]) -> Option<EncodeTable> {
+    let freq = count_offset_bucket_freq(tokens);
+    if freq.is_empty() { return None; }
+    let lengths = assign_code_lengths(&freq);
+    Some(canonical_codes_from_lengths(&lengths))
+}
+
 pub fn decode_table_from_encode(enc: &EncodeTable) -> DecodeTable {
     enc.iter().map(|(&sym, &(code, len))| ((code, len), sym)).collect()
 }
@@ -159,13 +217,13 @@ pub fn serialize_table(table: &EncodeTable) -> Vec<u8> {
 pub fn deserialize_table(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
     if data.len() < 2 {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof, "joint table: too short"));
+            std::io::ErrorKind::UnexpectedEof, "table: too short"));
     }
     let n = u16::from_le_bytes([data[0], data[1]]) as usize;
     let needed = 2 + n * 3;
     if data.len() < needed {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof, "joint table: truncated"));
+            std::io::ErrorKind::UnexpectedEof, "table: truncated"));
     }
     let mut lengths: HashMap<u32, u32> = HashMap::new();
     for i in 0..n {
@@ -178,7 +236,7 @@ pub fn deserialize_table(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
     Ok((table, needed))
 }
 
-// ── Bit-level encode ──────────────────────────────────────────────────────────
+// ── v1: Bit-level encode (offsets raw) ───────────────────────────────────────
 
 pub fn write_tokens_joint(
     tokens: &[Token],
@@ -221,7 +279,7 @@ pub fn write_tokens_joint(
     Ok(output)
 }
 
-// ── Bit-level decode ──────────────────────────────────────────────────────────
+// ── v1: Bit-level decode ──────────────────────────────────────────────────────
 
 pub fn read_tokens_joint(
     input: &[u8],
@@ -256,6 +314,114 @@ pub fn read_tokens_joint(
     Ok(tokens)
 }
 
+// ── v2: Bit-level encode (offsets bucket-coded) ───────────────────────────────
+//
+// Payload layout: [lit_table][offset_table][bitstream]
+// lit_table  : same symbols as v1 (lit bytes 0-255, length syms, END)
+// offset_table: bucket indices (0-33 for offset_bits=17)
+// bitstream  : LIT → lit Huffman code
+//              BACKREF → lit Huffman code (length sym) +
+//                        offset Huffman code (bucket) +
+//                        extra_bits raw bits
+//              END → lit Huffman code (END sym)
+// offset_bits is NOT needed during v2 encode/decode — bucket scheme is
+// completely self-contained.
+
+pub fn write_tokens_joint_v2(
+    tokens: &[Token],
+    lit_table: &EncodeTable,
+    offset_table: &EncodeTable,
+) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    {
+        let mut w = BitWriter::endian(&mut output, BigEndian);
+        for token in tokens {
+            match token {
+                Token::Lit { byte } => {
+                    let sym = *byte as u32;
+                    let &(code, len) = lit_table.get(&sym).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v2 lit sym {} not in lit_table", sym))
+                    })?;
+                    w.write(len, code)?;
+                }
+                Token::Backref { offset, length } => {
+                    // Length → lit_table (same as v1)
+                    let sym = sym_from_length(*length);
+                    let &(code, len) = lit_table.get(&sym).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v2 length sym {} not in lit_table", sym))
+                    })?;
+                    w.write(len, code)?;
+                    // Offset → bucket code + raw extra bits
+                    let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
+                    let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v2 offset bucket {} not in offset_table", bucket))
+                    })?;
+                    w.write(blen, bcode)?;
+                    if extra_cnt > 0 {
+                        w.write(extra_cnt, extra_val)?;
+                    }
+                }
+                Token::End => {
+                    let &(code, len) = lit_table.get(&SYM_END).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            "v2 END sym not in lit_table")
+                    })?;
+                    w.write(len, code)?;
+                }
+            }
+        }
+        w.byte_align()?;
+    }
+    Ok(output)
+}
+
+// ── v2: Bit-level decode ──────────────────────────────────────────────────────
+
+pub fn read_tokens_joint_v2(
+    input: &[u8],
+    lit_dtable: &DecodeTable,
+    offset_dtable: &DecodeTable,
+) -> std::io::Result<Vec<Token>> {
+    let lit_max_len    = lit_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
+    let offset_max_len = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
+    let mut tokens = Vec::new();
+    let mut r = BitReader::endian(std::io::Cursor::new(input), BigEndian);
+
+    loop {
+        let sym = match read_huffman_sym(&mut r, lit_dtable, lit_max_len) {
+            Ok(s)  => s,
+            Err(_) => break,
+        };
+
+        if sym < 256 {
+            tokens.push(Token::Lit { byte: sym as u8 });
+        } else if sym == SYM_END {
+            tokens.push(Token::End);
+            break;
+        } else {
+            let length = length_from_sym(sym);
+            // Read bucket index from offset Huffman table
+            let bucket = read_huffman_sym(&mut r, offset_dtable, offset_max_len)?;
+            // Read extra bits — count is a pure function of bucket, no state needed
+            let extra_cnt = bucket_extra_bits(bucket);
+            let extra_val = if extra_cnt > 0 {
+                r.read::<u32>(extra_cnt)?
+            } else {
+                0
+            };
+            let offset = bucket_to_offset(bucket, extra_val);
+            tokens.push(Token::Backref { offset, length });
+        }
+    }
+
+    Ok(tokens)
+}
+
+// ── Shared Huffman bit reader ─────────────────────────────────────────────────
+
 fn read_huffman_sym<R: std::io::Read>(
     r: &mut BitReader<R, BigEndian>,
     dtable: &DecodeTable,
@@ -273,4 +439,4 @@ fn read_huffman_sym<R: std::io::Read>(
         std::io::ErrorKind::InvalidData,
         format!("invalid huffman symbol after {} bits", max_len),
     ))
-                                               }
+               }

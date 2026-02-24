@@ -12,7 +12,13 @@ use bitstream_io::{BitWriter, BitReader, BigEndian, BitWrite, BitRead};
 use crate::opcode::Token;
 
 /// Minimum compressed stream size (bytes) before joint entropy fires.
-pub const ENTROPY_MIN_BYTES: usize = 800;
+/// Set conservatively: the existing `if total < compressed.len()` guard
+/// in lib.rs prevents entropy from ever expanding the output, so this
+/// threshold only needs to be large enough that the Huffman table header
+/// overhead (~2 + n*3 bytes) has a realistic chance of being recovered.
+/// 400 bytes is sufficient — even a 50-symbol table costs ~152 bytes,
+/// which entropy can recover on any non-random stream of that size.
+pub const ENTROPY_MIN_BYTES: usize = 400;
 
 const SYM_END: u32 = 256;
 #[inline] fn sym_from_length(len: u32) -> u32 { 255 + len }
@@ -267,4 +273,4 @@ fn read_huffman_sym<R: std::io::Read>(
         std::io::ErrorKind::InvalidData,
         format!("invalid huffman symbol after {} bits", max_len),
     ))
-                           }
+                                               }

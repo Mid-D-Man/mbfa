@@ -5,8 +5,9 @@
 //!         [offset_bits[0]: u8] ... [offset_bits[fold_count-1]: u8]
 //!         [payload...]
 //!
-//! offset_bits[i] is the LZ window size used for fold (i+1).
-//! PAIR folds store 0 as a sentinel — they do not use an LZ bitstream.
+//! entropy_flag=0: raw bitstream
+//! entropy_flag=1: [lit_table][bitstream]  — offsets raw
+//! entropy_flag=2: [lit_table][offset_table][bitstream]  — offsets bucketed
 
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
@@ -37,15 +38,31 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
 
     let final_ob = ob_for_fold(fold_count);
 
+    // ── Undo outermost entropy layer (if any) ─────────────────────────────────
     let (mut current, folds_to_undo) = if entropy_flag == 1 {
+        // v1: [lit_table][bitstream]
         let payload = &input[payload_start..];
         let (enc_table, bytes_consumed) = entropy::deserialize_table(payload)?;
-        let dtable   = entropy::decode_table_from_encode(&enc_table);
-        let stream   = &payload[bytes_consumed..];
-        let tokens   = entropy::read_tokens_joint(stream, &dtable, final_ob)?;
+        let dtable  = entropy::decode_table_from_encode(&enc_table);
+        let stream  = &payload[bytes_consumed..];
+        let tokens  = entropy::read_tokens_joint(stream, &dtable, final_ob)?;
         let recovered = reconstruct(&tokens);
-        println!("Joint entropy unfold: {} bytes recovered", recovered.len());
+        println!("Joint entropy v1 unfold: {} bytes recovered", recovered.len());
         (recovered, fold_count.saturating_sub(1))
+
+    } else if entropy_flag == 2 {
+        // v2: [lit_table][offset_table][bitstream]
+        let payload = &input[payload_start..];
+        let (lit_enc, lit_consumed) = entropy::deserialize_table(payload)?;
+        let (off_enc, off_consumed) = entropy::deserialize_table(&payload[lit_consumed..])?;
+        let lit_dtable = entropy::decode_table_from_encode(&lit_enc);
+        let off_dtable = entropy::decode_table_from_encode(&off_enc);
+        let stream     = &payload[lit_consumed + off_consumed..];
+        let tokens     = entropy::read_tokens_joint_v2(stream, &lit_dtable, &off_dtable)?;
+        let recovered  = reconstruct(&tokens);
+        println!("Joint entropy v2 unfold: {} bytes recovered", recovered.len());
+        (recovered, fold_count.saturating_sub(1))
+
     } else {
         (input[payload_start..].to_vec(), fold_count)
     };
@@ -54,6 +71,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         return Ok(current);
     }
 
+    // ── Undo remaining LZ / PAIR folds in reverse order ──────────────────────
     for pass in (1..=folds_to_undo).rev() {
         let ob = ob_for_fold(pass);
 

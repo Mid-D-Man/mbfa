@@ -15,11 +15,15 @@ use std::io;
 /// File header layout:
 ///   Byte 0:              fold_count
 ///   Byte 1:              pair_flag    (1 = fold 2 used pair encoding)
-///   Byte 2:              entropy_flag (0 = raw bitstream, 1 = joint Huffman)
+///   Byte 2:              entropy_flag
+///                          0 = raw bitstream
+///                          1 = joint Huffman v1 (lit+length coded, offsets raw)
+///                          2 = joint Huffman v2 (lit+length coded, offsets bucketed)
 ///   Bytes 3..3+N:        offset_bits[0..N] where N = fold_count
-///                        One byte per accepted fold, in fold order (fold 1 first).
-///                        PAIR folds store 0 as a sentinel.
 ///   Byte 3+N onward:     compressed payload
+///
+/// entropy_flag=1 payload: [lit_table][bitstream]
+/// entropy_flag=2 payload: [lit_table][offset_table][bitstream]
 pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     let (compressed, folds_done, used_pairing, offset_bits_per_fold) =
         fold::fold(input, max_folds)?;
@@ -29,53 +33,48 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     let final_ob = offset_bits_per_fold.last().copied()
         .unwrap_or(opcode::OFFSET_BITS_MIN);
 
-    // ── Standard entropy path: no pairing, fold N output → Huffman ───────────
     let try_entropy_standard = !used_pairing
         && folds_done >= 1
         && compressed.len() >= entropy::ENTROPY_MIN_BYTES;
 
-    // Returns (payload, entropy_flag, pair_flag, folds_done, ob_per_fold)
     let (final_payload, entropy_flag, out_pair_flag, out_folds_done, out_ob_per_fold) =
         if try_entropy_standard {
             let tokens = bitreader::read_tokens(&compressed, final_ob)?;
-            match entropy::build_encode_table(&tokens) {
-                Some(enc_table) => {
-                    let coded       = entropy::write_tokens_joint(&tokens, &enc_table, final_ob)?;
-                    let table_bytes = entropy::serialize_table(&enc_table);
-                    let total       = coded.len() + table_bytes.len();
-                    if total < compressed.len() {
-                        println!(
-                            "Joint entropy applied: {} → {} bytes (table {} B, stream {} B)",
-                            compressed.len(), total, table_bytes.len(), coded.len()
-                        );
-                        let mut payload = table_bytes;
-                        payload.extend_from_slice(&coded);
-                        (payload, 1u8, false, folds_done, offset_bits_per_fold)
-                    } else {
-                        println!(
-                            "Joint entropy skipped (no gain: {} vs {} raw)",
-                            total, compressed.len()
-                        );
-                        (compressed, 0u8, false, folds_done, offset_bits_per_fold)
-                    }
-                }
-                None => (compressed, 0u8, false, folds_done, offset_bits_per_fold),
+            let raw_size = compressed.len();
+
+            let v1 = try_entropy_v1(&tokens, final_ob);
+            let v2 = try_entropy_v2(&tokens);
+
+            let v1_size = v1.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
+            let v2_size = v2.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
+
+            if v2_size < v1_size && v2_size < raw_size {
+                println!(
+                    "Joint entropy v2 applied: {} → {} bytes (v1 would be {} B)",
+                    raw_size, v2_size, v1_size
+                );
+                (v2.unwrap(), 2u8, false, folds_done, offset_bits_per_fold)
+            } else if v1_size < raw_size {
+                println!(
+                    "Joint entropy v1 applied: {} → {} bytes (v2 would be {} B)",
+                    raw_size, v1_size, v2_size
+                );
+                (v1.unwrap(), 1u8, false, folds_done, offset_bits_per_fold)
+            } else {
+                println!(
+                    "Joint entropy skipped (no gain: v1={} v2={} vs raw={})",
+                    v1_size, v2_size, raw_size
+                );
+                (compressed, 0u8, false, folds_done, offset_bits_per_fold)
             }
 
         } else if used_pairing {
-            // ── PAIR vs entropy competition ───────────────────────────────────
-            // PAIR was used for fold 2. Try entropy on fold 1 tokens as an
-            // alternative. Re-deriving fold 1 tokens is safe: scan_adaptive is
-            // deterministic and produces the same result as fold.rs did.
-            // Decoder already handles fold_count=1,entropy_flag=1 correctly.
             pair_vs_entropy(input, ob1, &compressed, folds_done, &offset_bits_per_fold)?
 
         } else {
-            // ── No entropy, no pairing (size too small or folds=0) ───────────
             (compressed, 0u8, false, folds_done, offset_bits_per_fold)
         };
 
-    // ── Write header + payload ────────────────────────────────────────────────
     let mut output = Vec::new();
     output.push(out_folds_done);
     output.push(out_pair_flag as u8);
@@ -87,15 +86,31 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
-/// Compete PAIR output against entropy on fold 1.
-///
-/// Returns (payload, entropy_flag, pair_flag, folds_done, ob_per_fold).
-///
-/// If entropy on fold 1 produces fewer bytes than the PAIR output, we switch to
-/// that path. The decoder path for entropy-wins is:
-///   fold_count=1, pair_flag=0, entropy_flag=1, offset_bits=[ob1]
-/// which `unfold.rs` already handles correctly — entropy decodes → reconstruct
-/// → original input, folds_to_undo=0, return immediately.
+/// Try entropy v1: [lit_table][bitstream]. Returns None if no gain vs raw.
+fn try_entropy_v1(tokens: &[crate::opcode::Token], ob: u32) -> Option<Vec<u8>> {
+    let enc_table = entropy::build_encode_table(tokens)?;
+    let coded = entropy::write_tokens_joint(tokens, &enc_table, ob).ok()?;
+    let table_bytes = entropy::serialize_table(&enc_table);
+    let mut payload = table_bytes;
+    payload.extend_from_slice(&coded);
+    Some(payload)
+}
+
+/// Try entropy v2: [lit_table][offset_table][bitstream].
+/// Returns None if no BACKREFs present (offset table would be empty).
+fn try_entropy_v2(tokens: &[crate::opcode::Token]) -> Option<Vec<u8>> {
+    let lit_table    = entropy::build_encode_table(tokens)?;
+    let offset_table = entropy::build_offset_encode_table(tokens)?;
+    let coded = entropy::write_tokens_joint_v2(tokens, &lit_table, &offset_table).ok()?;
+    let lit_table_bytes    = entropy::serialize_table(&lit_table);
+    let offset_table_bytes = entropy::serialize_table(&offset_table);
+    let mut payload = lit_table_bytes;
+    payload.extend_from_slice(&offset_table_bytes);
+    payload.extend_from_slice(&coded);
+    Some(payload)
+}
+
+/// Compete PAIR output against both entropy variants on fold 1.
 fn pair_vs_entropy(
     input: &[u8],
     ob1: u32,
@@ -103,12 +118,8 @@ fn pair_vs_entropy(
     pair_folds_done: u8,
     pair_ob_per_fold: &[u32],
 ) -> io::Result<(Vec<u8>, u8, bool, u8, Vec<u32>)> {
-    // Re-derive fold 1 tokens. scan_adaptive(input) is deterministic and
-    // produces exactly the same tokens fold.rs used for fold 1.
-    let (fold1_tokens, _recomputed_ob) = encoder::scan_adaptive(input);
+    let (fold1_tokens, _) = encoder::scan_adaptive(input);
 
-    // Estimate fold 1 raw byte size from per-token bit costs.
-    // This avoids materialising the full bitstream just for the size check.
     let fold1_bits: u32 = fold1_tokens
         .iter()
         .map(|t| opcode::token_bit_cost(t, ob1))
@@ -116,7 +127,6 @@ fn pair_vs_entropy(
     let fold1_bytes_est = ((fold1_bits + 7) / 8) as usize;
 
     if fold1_bytes_est < entropy::ENTROPY_MIN_BYTES {
-        // Fold 1 output is too small for entropy to be worthwhile — keep PAIR.
         println!(
             "PAIR kept (fold 1 est. {} B < entropy threshold {} B)",
             fold1_bytes_est, entropy::ENTROPY_MIN_BYTES
@@ -127,39 +137,40 @@ fn pair_vs_entropy(
         ));
     }
 
-    match entropy::build_encode_table(&fold1_tokens) {
-        Some(enc_table) => {
-            let coded       = entropy::write_tokens_joint(&fold1_tokens, &enc_table, ob1)?;
-            let table_bytes = entropy::serialize_table(&enc_table);
-            let entropy_total = coded.len() + table_bytes.len();
+    let v1 = try_entropy_v1(&fold1_tokens, ob1);
+    let v2 = try_entropy_v2(&fold1_tokens);
 
-            if entropy_total < pair_output.len() {
-                println!(
-                    "Entropy on fold 1 beats PAIR: {} B < {} B — switching path",
-                    entropy_total, pair_output.len()
-                );
-                let mut payload = table_bytes;
-                payload.extend_from_slice(&coded);
-                // Entropy wins: emit as fold_count=1, pair_flag=0, entropy_flag=1
-                Ok((payload, 1u8, false, 1u8, vec![ob1]))
-            } else {
-                println!(
-                    "PAIR wins over entropy on fold 1: {} B <= {} B",
-                    pair_output.len(), entropy_total
-                );
-                Ok((
-                    pair_output.to_vec(), 0u8, true,
-                    pair_folds_done, pair_ob_per_fold.to_vec(),
-                ))
-            }
-        }
-        None => Ok((
+    let v1_size = v1.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
+    let v2_size = v2.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
+    let best_entropy_size = v1_size.min(v2_size);
+
+    if best_entropy_size < pair_output.len() {
+        let (best_payload, best_flag) = if v2_size < v1_size {
+            println!(
+                "Entropy v2 on fold 1 beats PAIR: {} B < {} B — switching path",
+                v2_size, pair_output.len()
+            );
+            (v2.unwrap(), 2u8)
+        } else {
+            println!(
+                "Entropy v1 on fold 1 beats PAIR: {} B < {} B — switching path",
+                v1_size, pair_output.len()
+            );
+            (v1.unwrap(), 1u8)
+        };
+        Ok((best_payload, best_flag, false, 1u8, vec![ob1]))
+    } else {
+        println!(
+            "PAIR wins over entropy: {} B <= best entropy {} B",
+            pair_output.len(), best_entropy_size
+        );
+        Ok((
             pair_output.to_vec(), 0u8, true,
             pair_folds_done, pair_ob_per_fold.to_vec(),
-        )),
+        ))
     }
 }
 
 pub fn decompress(input: &[u8]) -> io::Result<Vec<u8>> {
     unfold::unfold(input)
-                }
+        }

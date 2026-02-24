@@ -9,7 +9,7 @@ const MAX_LENGTH: usize = (1 << LENGTH_BITS) as usize - 1;   // 255
 
 const HASH_SIZE:  usize = 1 << 16;
 const HASH_MASK:  usize = HASH_SIZE - 1;
-const CHAIN_LIMIT: usize = 256;
+const CHAIN_LIMIT: usize = 1024;
 
 #[inline]
 fn hash3(input: &[u8], pos: usize) -> usize {

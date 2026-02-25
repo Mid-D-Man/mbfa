@@ -8,6 +8,7 @@
 //! entropy_flag=0: raw bitstream
 //! entropy_flag=1: [lit_table][bitstream]  — offsets raw
 //! entropy_flag=2: [lit_table][offset_table][bitstream]  — offsets bucketed
+//! entropy_flag=3: [lit_table_ctx0][lit_table_ctx1][offset_table][bitstream]
 
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
@@ -61,6 +62,23 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         let tokens     = entropy::read_tokens_joint_v2(stream, &lit_dtable, &off_dtable)?;
         let recovered  = reconstruct(&tokens);
         println!("Joint entropy v2 unfold: {} bytes recovered", recovered.len());
+        (recovered, fold_count.saturating_sub(1))
+
+    } else if entropy_flag == 3 {
+        // v3: [lit_table_ctx0][lit_table_ctx1][offset_table][bitstream]
+        let payload = &input[payload_start..];
+        let (lit_enc0, consumed0) = entropy::deserialize_table(payload)?;
+        let (lit_enc1, consumed1) = entropy::deserialize_table(&payload[consumed0..])?;
+        let (off_enc,  consumed2) = entropy::deserialize_table(&payload[consumed0 + consumed1..])?;
+        let lit_dtable0 = entropy::decode_table_from_encode(&lit_enc0);
+        let lit_dtable1 = entropy::decode_table_from_encode(&lit_enc1);
+        let off_dtable  = entropy::decode_table_from_encode(&off_enc);
+        let stream      = &payload[consumed0 + consumed1 + consumed2..];
+        let tokens      = entropy::read_tokens_joint_v3(
+            stream, &lit_dtable0, &lit_dtable1, &off_dtable
+        )?;
+        let recovered = reconstruct(&tokens);
+        println!("Joint entropy v3 unfold: {} bytes recovered", recovered.len());
         (recovered, fold_count.saturating_sub(1))
 
     } else {

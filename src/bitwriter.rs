@@ -1,11 +1,11 @@
 // src/bitwriter.rs
 //! Writes a Token stream to a compact bitstream using the fixed opcode vocabulary.
-//! offset_bits is passed at runtime and must match what the decoder will use.
+//! Both offset_bits and length_bits are passed at runtime.
 
 use bitstream_io::{BitWriter, BigEndian, BitWrite};
 use crate::opcode::*;
 
-pub fn write_tokens(tokens: &[Token], offset_bits: u32) -> std::io::Result<Vec<u8>> {
+pub fn write_tokens(tokens: &[Token], offset_bits: u32, length_bits: u32) -> std::io::Result<Vec<u8>> {
     let mut output = Vec::new();
     {
         let mut writer = BitWriter::endian(&mut output, BigEndian);
@@ -19,7 +19,7 @@ pub fn write_tokens(tokens: &[Token], offset_bits: u32) -> std::io::Result<Vec<u
                 Token::Backref { offset, length } => {
                     writer.write(OPCODE_BACKREF_BITS, OPCODE_BACKREF_VAL)?;
                     writer.write(offset_bits, *offset)?;
-                    writer.write(LENGTH_BITS, *length)?;
+                    writer.write(length_bits, *length)?;
                 }
                 Token::End => {
                     writer.write(OPCODE_END_BITS, OPCODE_END_VAL)?;

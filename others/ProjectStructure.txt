@@ -1,3 +1,5 @@
+
+
 Project Structure — MidMans Bit Folding Algorithm (MBFA)
 MidManStudio
 Generated: Wed Feb 25 10:30:43 UTC 2026

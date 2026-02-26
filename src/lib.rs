@@ -1,5 +1,4 @@
-// src/lib.rs
-//! MBFA — Mid Bit Folding Algorithm — MidManStudio
+// src/lib.rs — reverted to pre-slot baseline.
 pub mod opcode;
 pub mod encoder;
 pub mod bitwriter;
@@ -12,10 +11,14 @@ pub mod entropy;
 
 use std::io;
 
-/// File header layout (v2):
+/// File header layout:
 ///   Byte 0:              fold_count
 ///   Byte 1:              pair_flag    (1 = fold 2 used pair encoding)
-///   Byte 2:              entropy_flag (0=raw, 1=v1, 2=v2, 3=v3)
+///   Byte 2:              entropy_flag
+///                          0 = raw (no entropy)
+///                          1 = v1 joint Huffman, raw offsets
+///                          2 = v2 joint Huffman + offset bucket Huffman
+///                          3 = v3 two-context Huffman + shared offset buckets
 ///   Bytes 3..3+N:        offset_bits[0..N]  where N = fold_count
 ///   Bytes 3+N..3+2N:     length_bits[0..N]
 ///   Byte 3+2N onward:    compressed payload
@@ -41,30 +44,27 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let v2 = try_entropy_v2(&tokens);
             let v3 = if raw_size >= entropy::ENTROPY_V3_MIN_BYTES {
                 try_entropy_v3(&tokens)
-            } else {
-                None
-            };
+            } else { None };
 
-            let v1_size   = v1.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
-            let v2_size   = v2.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
-            let v3_size   = v3.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
-            let best_size = v1_size.min(v2_size).min(v3_size);
+            let sz = |o: &Option<Vec<u8>>| o.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
+            let best_size = sz(&v1).min(sz(&v2)).min(sz(&v3));
 
             if best_size >= raw_size {
                 println!(
                     "Joint entropy skipped (no gain: v1={} v2={} v3={} vs raw={})",
-                    v1_size, v2_size, v3_size, raw_size
+                    sz(&v1), sz(&v2), sz(&v3), raw_size
                 );
                 (compressed, 0u8, false, folds_done, offset_bits_per_fold, length_bits_per_fold)
-            } else if v3_size == best_size {
-                println!("Joint entropy v3: {} → {} B", raw_size, v3_size);
-                (v3.unwrap(), 3u8, false, folds_done, offset_bits_per_fold, length_bits_per_fold)
-            } else if v2_size == best_size {
-                println!("Joint entropy v2: {} → {} B", raw_size, v2_size);
-                (v2.unwrap(), 2u8, false, folds_done, offset_bits_per_fold, length_bits_per_fold)
             } else {
-                println!("Joint entropy v1: {} → {} B", raw_size, v1_size);
-                (v1.unwrap(), 1u8, false, folds_done, offset_bits_per_fold, length_bits_per_fold)
+                let (flag, payload) = [
+                    (1u8, &v1), (2u8, &v2), (3u8, &v3),
+                ].iter()
+                    .filter_map(|(f, opt)| opt.as_ref().map(|p| (*f, p)))
+                    .min_by_key(|(_, p)| p.len())
+                    .unwrap();
+                println!("Joint entropy flag={}: {} → {} B", flag, raw_size, payload.len());
+                (payload.clone(), flag, false, folds_done,
+                 offset_bits_per_fold, length_bits_per_fold)
             }
 
         } else if used_pairing {
@@ -106,7 +106,7 @@ fn try_entropy_v2(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
 }
 
 fn try_entropy_v3(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
-    let (t0, t1)    = entropy::build_encode_tables_by_context(tokens)?;
+    let (t0, t1)     = entropy::build_encode_tables_by_context(tokens)?;
     let offset_table = entropy::build_offset_encode_table(tokens)?;
     let coded        = entropy::write_tokens_joint_v3(tokens, &t0, &t1, &offset_table).ok()?;
     let mut payload  = entropy::serialize_table(&t0);
@@ -150,38 +150,32 @@ fn pair_vs_entropy(
     let v2 = try_entropy_v2(&fold1_tokens);
     let v3 = if fold1_bytes_est >= entropy::ENTROPY_V3_MIN_BYTES {
         try_entropy_v3(&fold1_tokens)
-    } else {
-        None
-    };
+    } else { None };
 
-    let v1_size           = v1.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
-    let v2_size           = v2.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
-    let v3_size           = v3.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
-    let best_entropy_size = v1_size.min(v2_size).min(v3_size);
+    let sz = |o: &Option<Vec<u8>>| o.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
+    let best_entropy = [
+        (1u8, &v1), (2u8, &v2), (3u8, &v3),
+    ].iter()
+        .filter_map(|(f, opt)| opt.as_ref().map(|p| (*f, p)))
+        .min_by_key(|(_, p)| p.len());
 
-    if best_entropy_size < pair_output.len() {
-        let (best_payload, best_flag) = if v3_size == best_entropy_size {
-            println!("Entropy v3 beats PAIR: {} B < {} B", v3_size, pair_output.len());
-            (v3.unwrap(), 3u8)
-        } else if v2_size == best_entropy_size {
-            println!("Entropy v2 beats PAIR: {} B < {} B", v2_size, pair_output.len());
-            (v2.unwrap(), 2u8)
-        } else {
-            println!("Entropy v1 beats PAIR: {} B < {} B", v1_size, pair_output.len());
-            (v1.unwrap(), 1u8)
-        };
-        Ok((best_payload, best_flag, false, 1u8, vec![ob1], vec![lb1]))
-    } else {
-        println!("PAIR wins over entropy: {} B <= {} B", pair_output.len(), best_entropy_size);
-        Ok((
-            pair_output.to_vec(), 0u8, true,
-            pair_folds_done,
-            pair_ob_per_fold.to_vec(),
-            pair_lb_per_fold.to_vec(),
-        ))
+    match best_entropy {
+        Some((flag, payload)) if payload.len() < pair_output.len() => {
+            println!("Entropy flag={} beats PAIR: {} B < {} B", flag, payload.len(), pair_output.len());
+            Ok((payload.clone(), flag, false, 1u8, vec![ob1], vec![lb1]))
+        }
+        _ => {
+            println!("PAIR wins over entropy: {} B", pair_output.len());
+            Ok((
+                pair_output.to_vec(), 0u8, true,
+                pair_folds_done,
+                pair_ob_per_fold.to_vec(),
+                pair_lb_per_fold.to_vec(),
+            ))
+        }
     }
 }
 
 pub fn decompress(input: &[u8]) -> io::Result<Vec<u8>> {
     unfold::unfold(input)
-            }
+                }

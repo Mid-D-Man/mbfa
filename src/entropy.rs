@@ -1,4 +1,4 @@
-// src/entropy.rs — reverted to pre-slot baseline, no changes from this session.
+// src/entropy.rs — pre-slot baseline + v4 byte-category literal contexts
 
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
@@ -608,6 +608,231 @@ pub fn read_tokens_joint_v3(
     Ok(tokens)
 }
 
+// ── v4 byte-category literal contexts ────────────────────────────────────────
+//
+// 8 literal/length Huffman tables indexed by:
+//   ctx = (after_br as usize) * 4 + byte_category(prev_byte)
+//
+// byte_category:
+//   0 = lowercase vowel  (a e i o u)
+//   1 = alphabetic other (A-Z uppercase, b-z consonants)
+//   2 = whitespace / common punctuation
+//   3 = everything else
+//
+// prev_byte sentinel at stream start: b' ' (space → category 2)
+// after_br initial: false
+//
+// Shared offset bucket table identical to v2/v3 — no raw bits.
+
+/// Maps a byte to one of 4 categories used for v4 context selection.
+#[inline]
+pub fn byte_category(b: u8) -> usize {
+    match b {
+        // lowercase vowels — category 0
+        b'a' | b'e' | b'i' | b'o' | b'u' => 0,
+        // uppercase A-Z — category 1
+        b'A'..=b'Z' => 1,
+        // lowercase consonants (b-z minus vowels) — category 1
+        // note: vowels already matched above, so this range only hits consonants
+        b'b'..=b'z' => 1,
+        // whitespace and common punctuation — category 2
+        9 | 10 | 13 | 32        => 2,   // tab, LF, CR, space
+        33 | 44 | 46 | 58 | 59  => 2,   // ! , . : ;
+        39 | 40 | 41 | 63 | 45  => 2,   // ' ( ) ? -
+        34 | 91 | 93 | 123 | 125 => 2,  // " [ ] { }
+        // everything else — category 3
+        _ => 3,
+    }
+}
+
+/// Computes the 3-bit context index (0–7) for the v4 literal Huffman table.
+///
+/// `after_br` — true if the preceding token was a BACKREF.
+/// `prev_byte` — the most recent LIT byte seen; b' ' at stream start.
+#[inline]
+pub fn context_idx(after_br: bool, prev_byte: u8) -> usize {
+    (after_br as usize) * 4 + byte_category(prev_byte)
+}
+
+/// Count per-context literal/length frequencies and offset bucket frequencies
+/// for v4. Returns ([lit_freq; 8], offset_freq).
+fn count_joint_freq_v4(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32, u64>) {
+    let mut lit_freqs: [HashMap<u32, u64>; 8] = std::array::from_fn(|_| HashMap::new());
+    let mut offset_freq: HashMap<u32, u64> = HashMap::new();
+
+    let mut prev_byte: u8 = b' ';
+    let mut after_br      = false;
+
+    for t in tokens {
+        let ctx = context_idx(after_br, prev_byte);
+        match t {
+            Token::Lit { byte } => {
+                *lit_freqs[ctx].entry(*byte as u32).or_insert(0) += 1;
+                prev_byte = *byte;
+                after_br  = false;
+            }
+            Token::Backref { offset, length } => {
+                *lit_freqs[ctx].entry(sym_from_length(*length)).or_insert(0) += 1;
+                let (bucket, _, _) = offset_to_bucket(*offset);
+                *offset_freq.entry(bucket).or_insert(0) += 1;
+                // prev_byte unchanged — stays as last literal seen
+                after_br = true;
+            }
+            Token::End => {
+                *lit_freqs[ctx].entry(SYM_END).or_insert(0) += 1;
+            }
+        }
+    }
+    (lit_freqs, offset_freq)
+}
+
+/// Build 8 literal/length encode tables + 1 shared offset bucket table for v4.
+/// Returns None if there are no BACKREF tokens (offset table would be empty
+/// and we can't guarantee all 8 lit tables are populated).
+/// An empty lit table for an unused context is valid — that context never fires.
+pub fn build_encode_tables_v4(tokens: &[Token]) -> Option<([EncodeTable; 8], EncodeTable)> {
+    let (lit_freqs, offset_freq) = count_joint_freq_v4(tokens);
+
+    // Need at least one lit token in some context
+    let has_lits = lit_freqs.iter().any(|f| !f.is_empty());
+    if !has_lits { return None; }
+
+    let lit_tables: [EncodeTable; 8] = std::array::from_fn(|i| {
+        if lit_freqs[i].is_empty() {
+            EncodeTable::new()
+        } else {
+            canonical_codes_from_lengths(&assign_code_lengths(&lit_freqs[i]))
+        }
+    });
+
+    // Offset table: if no backrefs, build a trivial empty table (v4 still works
+    // as pure-literal — offset table serialises as 3 bytes of fmt0 with 0 entries).
+    let offset_table = if offset_freq.is_empty() {
+        EncodeTable::new()
+    } else {
+        canonical_codes_from_lengths(&assign_code_lengths(&offset_freq))
+    };
+
+    Some((lit_tables, offset_table))
+}
+
+/// Encode a token stream using 8 context-selected literal/length tables
+/// and a shared offset bucket table. No raw offset bits — all offsets go
+/// through bucket coding identical to v2/v3.
+pub fn write_tokens_joint_v4(
+    tokens:       &[Token],
+    tables:       &[EncodeTable],   // length 8, indexed by context_idx(after_br, prev_byte)
+    offset_table: &EncodeTable,
+) -> std::io::Result<Vec<u8>> {
+    assert!(tables.len() == 8, "v4 requires exactly 8 literal tables");
+    let mut output = Vec::new();
+    {
+        let mut w         = BitWriter::endian(&mut output, BigEndian);
+        let mut prev_byte: u8 = b' ';
+        let mut after_br      = false;
+
+        for token in tokens {
+            let ctx   = context_idx(after_br, prev_byte);
+            let table = &tables[ctx];
+
+            match token {
+                Token::Lit { byte } => {
+                    let &(code, len) = table.get(&(*byte as u32)).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v4 lit byte {} missing in ctx {}", byte, ctx))
+                    })?;
+                    w.write(len, code)?;
+                    prev_byte = *byte;
+                    after_br  = false;
+                }
+                Token::Backref { offset, length } => {
+                    let sym = sym_from_length(*length);
+                    let &(code, len) = table.get(&sym).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v4 length sym {} missing in ctx {}", sym, ctx))
+                    })?;
+                    w.write(len, code)?;
+
+                    if !offset_table.is_empty() {
+                        let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
+                        let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData,
+                                format!("v4 offset bucket {} missing", bucket))
+                        })?;
+                        w.write(blen, bcode)?;
+                        if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
+                    }
+
+                    // prev_byte unchanged — stays as last LIT byte seen
+                    after_br = true;
+                }
+                Token::End => {
+                    let &(code, len) = table.get(&SYM_END).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v4 END sym missing in ctx {}", ctx))
+                    })?;
+                    w.write(len, code)?;
+                }
+            }
+        }
+        w.byte_align()?;
+    }
+    Ok(output)
+}
+
+/// Decode a v4-encoded bitstream. The 8 decode tables and offset decode table
+/// must come from deserialising the tables written by write_tokens_joint_v4.
+/// State (prev_byte, after_br) is maintained identically to the encoder.
+pub fn read_tokens_joint_v4(
+    input:         &[u8],
+    dtables:       &[DecodeTable],   // length 8
+    offset_dtable: &DecodeTable,
+) -> std::io::Result<Vec<Token>> {
+    assert!(dtables.len() == 8, "v4 requires exactly 8 decode tables");
+
+    let max_lens: [u32; 8] = std::array::from_fn(|i| {
+        dtables[i].keys().map(|&(_, l)| l).max().unwrap_or(1)
+    });
+    let offset_max = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
+
+    let mut tokens    = Vec::new();
+    let mut r         = BitReader::endian(std::io::Cursor::new(input), BigEndian);
+    let mut prev_byte: u8 = b' ';
+    let mut after_br      = false;
+
+    loop {
+        let ctx = context_idx(after_br, prev_byte);
+        let sym = match read_huffman_sym(&mut r, &dtables[ctx], max_lens[ctx]) {
+            Ok(s)  => s,
+            Err(_) => break,
+        };
+
+        if sym < 256 {
+            let byte = sym as u8;
+            tokens.push(Token::Lit { byte });
+            prev_byte = byte;
+            after_br  = false;
+        } else if sym == SYM_END {
+            tokens.push(Token::End);
+            break;
+        } else {
+            let length = length_from_sym(sym);
+            let offset = if offset_dtable.is_empty() {
+                1  // degenerate: no backrefs were encoded
+            } else {
+                let bucket    = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
+                let extra_cnt = bucket_extra_bits(bucket);
+                let extra_val = if extra_cnt > 0 { r.read::<u32>(extra_cnt)? } else { 0 };
+                bucket_to_offset(bucket, extra_val)
+            };
+            tokens.push(Token::Backref { offset, length });
+            after_br = true;
+            // prev_byte unchanged
+        }
+    }
+    Ok(tokens)
+}
+
 // ── Shared Huffman reader ─────────────────────────────────────────────────────
 
 fn read_huffman_sym<R: std::io::Read>(
@@ -625,4 +850,4 @@ fn read_huffman_sym<R: std::io::Read>(
         std::io::ErrorKind::InvalidData,
         format!("invalid huffman symbol after {} bits", max_len),
     ))
-                }
+                 }

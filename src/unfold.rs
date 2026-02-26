@@ -6,6 +6,13 @@
 //!   [offset_bits[0..N]: u8*N]
 //!   [length_bits[0..N]: u8*N]
 //!   [payload...]
+//!
+//! entropy_flag values:
+//!   0 = raw (no entropy)
+//!   1 = v1 joint Huffman, raw offsets
+//!   2 = v2 joint Huffman + offset bucket Huffman
+//!   3 = v3 two-context Huffman + shared offset buckets
+//!   4 = v4 eight-context (byte-category) Huffman + shared offset buckets
 
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
@@ -80,6 +87,41 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         println!("Entropy v3 unfold: {} bytes", rec.len());
         (rec, fold_count.saturating_sub(1))
 
+    } else if entropy_flag == 4 {
+        // v4: 8 literal/length tables (contexts 0–7) + 1 shared offset table.
+        // Tables are serialised in order: table[0] .. table[7], then offset_table.
+        let payload = &input[payload_start..];
+        let mut cursor = 0usize;
+
+        // Deserialise the 8 literal/length decode tables
+        let mut lit_dtables: Vec<entropy::DecodeTable> = Vec::with_capacity(8);
+        for i in 0..8usize {
+            let (enc, consumed) = entropy::deserialize_table(&payload[cursor..])
+                .map_err(|e| std::io::Error::new(e.kind(),
+                    format!("v4 unfold: lit table {} deserialise failed: {}", i, e)))?;
+            lit_dtables.push(entropy::decode_table_from_encode(&enc));
+            cursor += consumed;
+        }
+
+        // Deserialise the shared offset bucket decode table
+        let (off_enc, off_c) = entropy::deserialize_table(&payload[cursor..])
+            .map_err(|e| std::io::Error::new(e.kind(),
+                format!("v4 unfold: offset table deserialise failed: {}", e)))?;
+        let off_dt = entropy::decode_table_from_encode(&off_enc);
+        cursor += off_c;
+
+        // Convert Vec to [DecodeTable; 8] for the read function
+        let arr: [entropy::DecodeTable; 8] = lit_dtables.try_into()
+            .map_err(|_| std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "v4 unfold: expected exactly 8 literal tables",
+            ))?;
+
+        let tokens = entropy::read_tokens_joint_v4(&payload[cursor..], &arr, &off_dt)?;
+        let rec    = reconstruct(&tokens);
+        println!("Entropy v4 unfold: {} bytes", rec.len());
+        (rec, fold_count.saturating_sub(1))
+
     } else {
         (input[payload_start..].to_vec(), fold_count)
     };
@@ -145,4 +187,4 @@ fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) 
         vec![LENGTH_BITS_DEFAULT; fold_count.max(1)],
         3,
     )
-                         }
+          }

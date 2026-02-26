@@ -1,4 +1,4 @@
-
+o
 
 Project Structure — MidMans Bit Folding Algorithm (MBFA)
 MidManStudio

@@ -1,0 +1,61 @@
+File                       BACKREFs     Hit@1     Hit@2     Hit@3       Pct@1       Pct@2       Pct@3
+---------------------------------------------------------------------------------------------------------
+Original size: 1216712 bits (152089 bytes)
+Window diagnostics: 18696/25342 tokens BACKREF (73.8%) | offset: 0.0% at max (131071) | 8.8% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 552560 bits (69070 bytes)
+alice29.txt                   18696         6        16        25       0.03%       0.09%       0.13%   est saving ~0.1% of offset bits
+Original size: 1001432 bits (125179 bytes)
+Window diagnostics: 17255/24238 tokens BACKREF (71.2%) | offset: 0.0% at max (131071) | 6.6% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 518464 bits (64808 bytes)
+asyoulik.txt                  17255         4        14        16       0.02%       0.08%       0.09%   est saving ~0.1% of offset bits
+Original size: 196824 bits (24603 bytes)
+Window diagnostics: 2356/5453 tokens BACKREF (43.2%) | offset: 0.0% at max (131071) | 0.0% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 92232 bits (11529 bytes)
+cp.html                        2356        13        19        20       0.55%       0.81%       0.85%   est saving ~0.7% of offset bits
+Original size: 89200 bits (11150 bytes)
+  Wide scan wins: ob=14 lb=8 cost=36597 < baseline cost=37560 (ob=17 lb=8)
+Window diagnostics: 785/2639 tokens BACKREF (29.7%) | offset: 0.0% at max (16383) | 0.5% upper half | length: 0.0% at max (255) | offset_bits=14 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=14 (window=16383 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 36600 bits (4575 bytes)
+fields.c                        785        38        44        46       4.84%       5.61%       5.86%   est saving ~5.0% of offset bits
+Original size: 29768 bits (3721 bytes)
+  Wide scan wins: ob=12 lb=8 cost=15093 < baseline cost=15650 (ob=17 lb=8)
+Window diagnostics: 241/1244 tokens BACKREF (19.4%) | offset: 0.0% at max (4095) | 1.2% upper half | length: 0.0% at max (255) | offset_bits=12 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 15096 bits (1887 bytes)
+grammar.lsp                     241         5         7         8       2.07%       2.90%       3.32%   est saving ~2.8% of offset bits
+Original size: 8237952 bits (1029744 bytes)
+Window diagnostics: 81147/161269 tokens BACKREF (50.3%) | offset: 0.0% at max (131071) | 1.3% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 2911048 bits (363881 bytes)
+kennedy.xls                   81147     56433     61792     64416      69.54%      76.15%      79.38%   est saving ~70.0% of offset bits
+Original size: 3414032 bits (426754 bytes)
+Window diagnostics: 47838/61917 tokens BACKREF (77.3%) | offset: 0.0% at max (131071) | 18.1% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 1384584 bits (173073 bytes)
+lcet10.txt                    47838        41        80       106       0.09%       0.17%       0.22%   est saving ~0.2% of offset bits
+Original size: 3854888 bits (481861 bytes)
+Window diagnostics: 64779/88068 tokens BACKREF (73.6%) | offset: 0.0% at max (131071) | 21.8% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 1917152 bits (239644 bytes)
+plrabn12.txt                  64779        17        25        26       0.03%       0.04%       0.04%   est saving ~0.0% of offset bits
+Original size: 4105728 bits (513216 bytes)
+Window diagnostics: 16402/32774 tokens BACKREF (50.0%) | offset: 0.0% at max (131071) | 13.3% upper half | length: 3.1% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 590176 bits (73772 bytes)
+ptt5                          16402      1191      1960      2520       7.26%      11.95%      15.36%   est saving ~13.6% of offset bits
+Original size: 305920 bits (38240 bytes)
+Window diagnostics: 3752/8852 tokens BACKREF (42.4%) | offset: 0.0% at max (131071) | 0.0% upper half | length: 0.4% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 148560 bits (18570 bytes)
+sum                            3752       527       739       818      14.05%      19.70%      21.80%   est saving ~19.2% of offset bits
+Original size: 33816 bits (4227 bytes)
+Window diagnostics: 514/1383 tokens BACKREF (37.2%) | offset: 0.0% at max (131071) | 0.0% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 22056 bits (2757 bytes)
+xargs.1                         514        15        18        18       2.92%       3.50%       3.50%   est saving ~3.1% of offset bits
+---------------------------------------------------------------------------------------------------------
+TOTAL                        253765     58290     64714     68019      22.97%      25.50%      26.80%

@@ -1,0 +1,12 @@
+Original size: 8693168 bits (1086646 bytes)
+  Wide scan wins: ob=17 lb=15 cost=197369 < baseline cost=283964 (ob=17 lb=8)
+Window diagnostics: 3989/10562 tokens BACKREF (37.8%) | offset: 0.0% at max (131071) | 1.0% upper half | length: 0.8% at max (32767) | offset_bits=17 length_bits=15 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=15 (max_len=32767)
+Fold 1 (LZ): 197376 bits (24672 bytes)
+Fold 2 pairing pre-scan: Cantor fallback rate = 70.7% (threshold 77%)
+Fold 2 (PAIR): 181368 bits (22671 bytes)
+Fold 3 (LZ): 222960 bits (27870 bytes)
+Fold 3 not worth it (ratio 1.229), stopping at fold 2
+  Wide scan wins: ob=17 lb=15 cost=197369 < baseline cost=283964 (ob=17 lb=8)
+Entropy flag=2 beats PAIR: 15907 B < 22671 B
+Done. 1086646 bytes → 15912 bytes

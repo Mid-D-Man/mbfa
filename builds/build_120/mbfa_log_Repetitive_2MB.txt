@@ -1,0 +1,9 @@
+Original size: 16777216 bits (2097152 bytes)
+  Wide scan wins: ob=10 lb=15 cost=2584 < baseline cost=214714 (ob=17 lb=8)
+Window diagnostics: 72/143 tokens BACKREF (50.3%) | offset: 0.0% at max (1023) | 88.9% upper half | length: 87.5% at max (32767) | offset_bits=10 length_bits=15 — ⚠ LENGTH SATURATED — length field too small
+Fold 1 adaptive: offset_bits=10 (window=1023 bytes) length_bits=15 (max_len=32767)
+Fold 1 (LZ): 2584 bits (323 bytes)
+Fold 2 (LZ): 1288 bits (161 bytes)
+Fold 3 (LZ): 1608 bits (201 bytes)
+Fold 3 not worth it (ratio 1.248), stopping at fold 2
+Done. 2097152 bytes → 168 bytes

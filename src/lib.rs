@@ -1,4 +1,4 @@
-// src/lib.rs — reverted to pre-slot baseline.
+// src/lib.rs — pre-slot baseline + v4 byte-category entropy.
 pub mod opcode;
 pub mod encoder;
 pub mod bitwriter;
@@ -19,6 +19,7 @@ use std::io;
 ///                          1 = v1 joint Huffman, raw offsets
 ///                          2 = v2 joint Huffman + offset bucket Huffman
 ///                          3 = v3 two-context Huffman + shared offset buckets
+///                          4 = v4 eight-context (byte-category) + shared offset buckets
 ///   Bytes 3..3+N:        offset_bits[0..N]  where N = fold_count
 ///   Bytes 3+N..3+2N:     length_bits[0..N]
 ///   Byte 3+2N onward:    compressed payload
@@ -45,19 +46,22 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let v3 = if raw_size >= entropy::ENTROPY_V3_MIN_BYTES {
                 try_entropy_v3(&tokens)
             } else { None };
+            let v4 = if raw_size >= entropy::ENTROPY_V3_MIN_BYTES {
+                try_entropy_v4(&tokens)
+            } else { None };
 
             let sz = |o: &Option<Vec<u8>>| o.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
-            let best_size = sz(&v1).min(sz(&v2)).min(sz(&v3));
+            let best_size = sz(&v1).min(sz(&v2)).min(sz(&v3)).min(sz(&v4));
 
             if best_size >= raw_size {
                 println!(
-                    "Joint entropy skipped (no gain: v1={} v2={} v3={} vs raw={})",
-                    sz(&v1), sz(&v2), sz(&v3), raw_size
+                    "Joint entropy skipped (no gain: v1={} v2={} v3={} v4={} vs raw={})",
+                    sz(&v1), sz(&v2), sz(&v3), sz(&v4), raw_size
                 );
                 (compressed, 0u8, false, folds_done, offset_bits_per_fold, length_bits_per_fold)
             } else {
                 let (flag, payload) = [
-                    (1u8, &v1), (2u8, &v2), (3u8, &v3),
+                    (1u8, &v1), (2u8, &v2), (3u8, &v3), (4u8, &v4),
                 ].iter()
                     .filter_map(|(f, opt)| opt.as_ref().map(|p| (*f, p)))
                     .min_by_key(|(_, p)| p.len())
@@ -116,6 +120,21 @@ fn try_entropy_v3(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     Some(payload)
 }
 
+/// v4: 8 literal/length tables (indexed by byte-category context) + shared
+/// offset bucket table. Serialised as table[0]..table[7] then offset_table.
+fn try_entropy_v4(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
+    let (lit_tables, offset_table) = entropy::build_encode_tables_v4(tokens)?;
+    let coded = entropy::write_tokens_joint_v4(tokens, &lit_tables, &offset_table).ok()?;
+
+    let mut payload = Vec::new();
+    for t in &lit_tables {
+        payload.extend_from_slice(&entropy::serialize_table(t));
+    }
+    payload.extend_from_slice(&entropy::serialize_table(&offset_table));
+    payload.extend_from_slice(&coded);
+    Some(payload)
+}
+
 fn pair_vs_entropy(
     input:            &[u8],
     ob1:              u32,
@@ -151,10 +170,13 @@ fn pair_vs_entropy(
     let v3 = if fold1_bytes_est >= entropy::ENTROPY_V3_MIN_BYTES {
         try_entropy_v3(&fold1_tokens)
     } else { None };
+    let v4 = if fold1_bytes_est >= entropy::ENTROPY_V3_MIN_BYTES {
+        try_entropy_v4(&fold1_tokens)
+    } else { None };
 
     let sz = |o: &Option<Vec<u8>>| o.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
     let best_entropy = [
-        (1u8, &v1), (2u8, &v2), (3u8, &v3),
+        (1u8, &v1), (2u8, &v2), (3u8, &v3), (4u8, &v4),
     ].iter()
         .filter_map(|(f, opt)| opt.as_ref().map(|p| (*f, p)))
         .min_by_key(|(_, p)| p.len());
@@ -178,4 +200,4 @@ fn pair_vs_entropy(
 
 pub fn decompress(input: &[u8]) -> io::Result<Vec<u8>> {
     unfold::unfold(input)
-                }
+                    }

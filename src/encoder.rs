@@ -9,6 +9,15 @@
 //!      that cover actual values used, costs the stream
 //!  Whichever scan produces lower total bit cost wins.
 //!  This guarantees zero regression vs prior builds on any file.
+//!
+//!  Length cap for entropy safety:
+//!  Entropy table serialisation uses u16 for symbol values (sym = 255 + length).
+//!  Max safe length = 65535 - 255 = 65280, requiring length_bits <= 15.
+//!  When the wide scan selects lb > 15 AND the fold-1 output is large enough
+//!  that entropy would fire (>= ENTROPY_MIN_BYTES), a third scan is run with
+//!  lb capped at ENTROPY_SAFE_LENGTH_BITS. This recovers the entropy path for
+//!  files like Source_1MB without affecting files like Repetitive_2MB whose
+//!  fold-1 output is far too small to hit the entropy threshold.
 
 use crate::opcode::{
     Token, LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits,
@@ -18,9 +27,17 @@ use crate::opcode::{
 };
 
 // Baseline widths — proven safe across all Canterbury + extended benchmarks.
-// The wide scan only wins when it demonstrably beats these.
 const BASELINE_OFFSET_BITS: u32 = 17;
 const BASELINE_LENGTH_BITS: u32 = LENGTH_BITS_MIN; // 8
+
+// Maximum length_bits that keeps entropy symbol values within u16.
+// sym = 255 + length; max u16 = 65535; so max safe length = 65280 = 2^15 + 32512... 
+// In practice length_bits=15 gives max_len=32767, sym_max=33022 — safely within u16.
+const ENTROPY_SAFE_LENGTH_BITS: u32 = 15;
+
+// Mirrors entropy::ENTROPY_MIN_BYTES — minimum fold-1 output bytes for entropy
+// to fire. Defined here to avoid a circular module dependency.
+const ENTROPY_MIN_BYTES_FOR_SCAN: usize = 400;
 
 const HASH_SIZE:   usize = 1 << 16;
 const HASH_MASK:   usize = HASH_SIZE - 1;
@@ -126,7 +143,6 @@ fn find_match(
     let mut cur = head[h];
     while cur != u32::MAX && steps < CHAIN_LIMIT {
         let j = cur as usize;
-        // Must be strictly before i and within the lookback window.
         if i <= j || i - j > max_off { break; }
 
         let span = i - j;
@@ -165,17 +181,22 @@ fn stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Two-scan adaptive selection:
+/// Two-scan adaptive selection with entropy-safety cap:
 ///
 /// 1. Baseline scan at (BASELINE_OFFSET_BITS=17, BASELINE_LENGTH_BITS=8).
-///    This matches the previously proven behaviour — guaranteed no regression.
 ///
 /// 2. Wide scan at (OFFSET_BITS_MAX, LENGTH_BITS_MAX). Computes the minimum
-///    (offset_bits, length_bits) that covers all values actually used, then
-///    costs the stream at those minimum widths.
+///    (offset_bits, length_bits) that covers all values actually used.
 ///
-/// Returns whichever scan produces lower total token stream bit cost.
-/// If costs are equal, prefer baseline (cheaper to encode header, proven safe).
+/// 3. If wide scan selects lb > ENTROPY_SAFE_LENGTH_BITS (15) AND the
+///    fold-1 output would be large enough for entropy to fire, run a third
+///    scan with lb capped at ENTROPY_SAFE_LENGTH_BITS. This recovers the
+///    entropy path for repetitive-but-large files (Source_1MB) without
+///    affecting truly tiny outputs (Repetitive_2MB at 125B which is well
+///    below the 400B entropy threshold).
+///
+/// Returns whichever scan produces the lowest raw token stream bit cost
+/// among the eligible candidates. Ties go to baseline (proven safe).
 pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     // ── Baseline scan ─────────────────────────────────────────────────────────
     let baseline_tokens = scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS);
@@ -187,8 +208,42 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     let wide_lb     = compute_optimal_length_bits(&wide_tokens);
     let wide_cost   = stream_bit_cost(&wide_tokens, wide_ob, wide_lb);
 
-    // ── Pick winner ───────────────────────────────────────────────────────────
-    // Strict less-than: baseline wins ties to avoid unnecessary field widening.
+    // ── Entropy-safety cap ────────────────────────────────────────────────────
+    // If the wide scan wants lb > 15 (entropy-safe limit), check whether
+    // the fold-1 output would be large enough for entropy to fire.
+    // If entropy WOULD fire on the uncapped stream, the uncapped tokens
+    // cannot be entropy-coded, costing us the ~25-35% entropy saving.
+    // In that case, re-scan with lb capped at ENTROPY_SAFE_LENGTH_BITS.
+    //
+    // Files where lb > 15 is genuinely beneficial (Repetitive_2MB) produce
+    // tiny fold-1 outputs (125B) that never reach the entropy threshold,
+    // so they are unaffected by this branch.
+    if wide_lb > ENTROPY_SAFE_LENGTH_BITS {
+        let wide_output_bytes = (wide_cost as usize + 7) / 8;
+        if wide_output_bytes >= ENTROPY_MIN_BYTES_FOR_SCAN {
+            // Entropy would fire on this stream, but lb > 15 blocks it.
+            // Re-scan with entropy-safe lb and same ob.
+            let capped_tokens = scan(input, wide_ob, ENTROPY_SAFE_LENGTH_BITS);
+            let capped_cost   = stream_bit_cost(&capped_tokens, wide_ob, ENTROPY_SAFE_LENGTH_BITS);
+
+            println!(
+                "  lb cap applied: wide lb={} output={}B >= entropy threshold {}B \
+                 — re-scanned at lb={} (cost {} vs wide cost {})",
+                wide_lb, wide_output_bytes, ENTROPY_MIN_BYTES_FOR_SCAN,
+                ENTROPY_SAFE_LENGTH_BITS, capped_cost, wide_cost
+            );
+
+            // Pick between capped and baseline; wide (uncapped) is excluded
+            // because entropy won't fire on it.
+            return if capped_cost < baseline_cost {
+                (capped_tokens, wide_ob, ENTROPY_SAFE_LENGTH_BITS)
+            } else {
+                (baseline_tokens, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS)
+            };
+        }
+    }
+
+    // ── Normal wide vs baseline pick ──────────────────────────────────────────
     if wide_cost < baseline_cost {
         println!(
             "  Wide scan wins: ob={} lb={} cost={} < baseline cost={} (ob={} lb={})",
@@ -199,4 +254,4 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     } else {
         (baseline_tokens, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS)
     }
-}
+    }

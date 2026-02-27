@@ -30,11 +30,16 @@ pub const OFFSET_BITS_MAX:     u32 = 24;
 pub const OFFSET_BITS_DEFAULT: u32 = 15;
 
 // ── Adaptive length configuration ─────────────────────────────────────────────
-/// Minimum length bits — 255 byte max copy (matches old fixed behaviour).
+/// Minimum length bits — 255 byte max copy.
 pub const LENGTH_BITS_MIN:     u32 = 8;
-/// Maximum length bits — 32767 byte max copy.
-/// Capped at 15 so length symbols (255+len) stay within u16 for table serialisation.
-pub const LENGTH_BITS_MAX:     u32 = 15;
+/// Maximum length bits — 16MB max copy for highly repetitive data.
+///
+/// NOTE: entropy coding (Huffman) uses sym = 255 + length, serialised as u16.
+/// The maximum safe length for entropy is 65535 - 255 = 65280, which needs
+/// length_bits = 16. Files that actually use lb > 15 are highly repetitive and
+/// fold-1 output is tiny — well below ENTROPY_MIN_BYTES. The entropy helpers
+/// guard against this explicitly via tokens_safe_for_entropy().
+pub const LENGTH_BITS_MAX:     u32 = 24;
 /// Default fallback.
 pub const LENGTH_BITS_DEFAULT: u32 = 8;
 
@@ -81,3 +86,8 @@ pub fn compute_optimal_length_bits(tokens: &[Token]) -> u32 {
     let bits_needed = 32 - max_used.leading_zeros();
     bits_needed.clamp(LENGTH_BITS_MIN, LENGTH_BITS_MAX)
 }
+
+/// Maximum length value that can safely pass through entropy coding.
+/// Entropy uses sym = 255 + length, serialised as u16 (max 65535).
+/// So max safe length = 65535 - 255 = 65280.
+pub const ENTROPY_SAFE_MAX_LENGTH: u32 = 65280;

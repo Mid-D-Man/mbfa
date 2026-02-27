@@ -1,0 +1,66 @@
+File                       BACKREFs     Hit@1     Hit@2     Hit@3       Pct@1       Pct@2       Pct@3
+---------------------------------------------------------------------------------------------------------
+Original size: 160000 bits (20000 bytes)
+Window diagnostics: 3022/5203 tokens BACKREF (58.1%) | offset: 0.0% at max (131071) | 0.0% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 100384 bits (12548 bytes)
+alice_small.txt                3022        10        18        20       0.33%       0.60%       0.66%   est saving ~0.6% of offset bits
+Original size: 800000 bits (100000 bytes)
+Window diagnostics: 12825/18011 tokens BACKREF (71.2%) | offset: 0.0% at max (131071) | 2.8% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 385312 bits (48164 bytes)
+alice_100k.txt                12825        32        44        48       0.25%       0.34%       0.37%   est saving ~0.3% of offset bits
+Original size: 26875240 bits (3359405 bytes)
+Window diagnostics: 404606/506904 tokens BACKREF (79.8%) | offset: 0.0% at max (131071) | 25.2% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 11542744 bits (1442843 bytes)
+prose_3mb.txt                404606        98       198       245       0.02%       0.05%       0.06%   est saving ~0.1% of offset bits
+Original size: 96008 bits (12001 bytes)
+  Wide scan wins: ob=7 lb=14 cost=148 < baseline cost=1356 (ob=17 lb=8)
+Window diagnostics: 3/11 tokens BACKREF (27.3%) | offset: 0.0% at max (127) | 0.0% upper half | length: 0.0% at max (16383) | offset_bits=7 length_bits=14 — OK
+Fold 1 adaptive: offset_bits=7 (window=127 bytes) length_bits=14 (max_len=16383)
+Fold 1 (LZ): 152 bits (19 bytes)
+repetitive.txt                    3         0         0         0       0.00%       0.00%       0.00%   est saving ~0.0% of offset bits
+Original size: 16777216 bits (2097152 bytes)
+  Wide scan wins: ob=10 lb=21 cost=1000 < baseline cost=214714 (ob=17 lb=8)
+Window diagnostics: 9/80 tokens BACKREF (11.2%) | offset: 0.0% at max (1023) | 11.1% upper half | length: 0.0% at max (2097151) | offset_bits=10 length_bits=21 — OK
+Fold 1 adaptive: offset_bits=10 (window=1023 bytes) length_bits=21 (max_len=2097151)
+Fold 1 (LZ): 1000 bits (125 bytes)
+repetitive_2mb.txt                9         0         0         0       0.00%       0.00%       0.00%   est saving ~0.0% of offset bits
+Original size: 89200 bits (11150 bytes)
+  Wide scan wins: ob=14 lb=8 cost=41256 < baseline cost=41284 (ob=17 lb=8)
+Window diagnostics: 678/3244 tokens BACKREF (20.9%) | offset: 0.0% at max (16383) | 1.5% upper half | length: 0.0% at max (255) | offset_bits=14 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=14 (window=16383 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 41256 bits (5157 bytes)
+source_code.rs                  678        12        16        19       1.77%       2.36%       2.80%   est saving ~2.4% of offset bits
+Original size: 8652224 bits (1081528 bytes)
+  lb cap applied: wide lb=20 output=33122B >= entropy threshold 400B — re-scanned at lb=15 (cost 239641 vs wide cost 264976)
+Window diagnostics: 5593/11100 tokens BACKREF (50.4%) | offset: 0.0% at max (131071) | 2.0% upper half | length: 0.5% at max (32767) | offset_bits=17 length_bits=15 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=15 (max_len=32767)
+Fold 1 (LZ): 239648 bits (29956 bytes)
+source_1mb.rs                  5593       154       226       245       2.75%       4.04%       4.38%   est saving ~3.9% of offset bits
+Original size: 852728 bits (106591 bytes)
+Window diagnostics: 1928/3870 tokens BACKREF (49.8%) | offset: 0.0% at max (131071) | 4.2% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 69552 bits (8694 bytes)
+data.json                      1928        47        57        70       2.44%       2.96%       3.63%   est saving ~3.2% of offset bits
+Original size: 25154240 bits (3144280 bytes)
+  Wide scan wins: ob=22 lb=8 cost=1993868 < baseline cost=2014786 (ob=17 lb=8)
+Window diagnostics: 51426/91392 tokens BACKREF (56.3%) | offset: 0.0% at max (4194303) | 3.2% upper half | length: 0.0% at max (255) | offset_bits=22 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=22 (window=4194303 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 1993872 bits (249234 bytes)
+data_2mb.json                 51426       716       885       901       1.39%       1.72%       1.75%   est saving ~1.6% of offset bits
+Original size: 353152 bits (44144 bytes)
+  lb cap applied: wide lb=16 output=5572B >= entropy threshold 400B — re-scanned at lb=15 (cost 44567 vs wide cost 44572)
+Window diagnostics: 25/4409 tokens BACKREF (0.6%) | offset: 0.0% at max (8191) | 8.0% upper half | length: 4.0% at max (32767) | offset_bits=13 length_bits=15 — OK
+Fold 1 adaptive: offset_bits=13 (window=8191 bytes) length_bits=15 (max_len=32767)
+Fold 1 (LZ): 44568 bits (5571 bytes)
+audio.wav                        25         6         6         7      24.00%      24.00%      28.00%   est saving ~23.7% of offset bits
+Original size: 240432 bits (30054 bytes)
+Window diagnostics: 107/29823 tokens BACKREF (0.4%) | offset: 0.0% at max (131071) | 0.0% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 299944 bits (37493 bytes)
+Fold 1 not worth it (ratio 1.248), stopping at fold 0
+image.bmp                        69         3         6         8       4.35%       8.70%      11.59%   est saving ~10.0% of offset bits
+---------------------------------------------------------------------------------------------------------
+TOTAL                        480184      1078      1456      1563       0.22%       0.30%       0.33%

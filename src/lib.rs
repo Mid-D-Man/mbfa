@@ -1,4 +1,4 @@
-// src/lib.rs — pre-slot baseline + v4 byte-category entropy.
+// src/lib.rs — pre-slot baseline + v4 byte-category entropy + length saturation fix.
 pub mod opcode;
 pub mod encoder;
 pub mod bitwriter;
@@ -41,12 +41,18 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let tokens   = bitreader::read_tokens(&compressed, final_ob, final_lb)?;
             let raw_size = compressed.len();
 
-            let v1 = try_entropy_v1(&tokens, final_ob, final_lb);
-            let v2 = try_entropy_v2(&tokens);
-            let v3 = if raw_size >= entropy::ENTROPY_V3_MIN_BYTES {
+            // Guard: entropy table serialisation uses u16 for symbol values.
+            // sym = 255 + length, so lengths > ENTROPY_SAFE_MAX_LENGTH cannot
+            // be entropy-coded. In practice these files never reach the entropy
+            // threshold anyway, but we check explicitly for safety.
+            let entropy_ok = tokens_safe_for_entropy(&tokens);
+
+            let v1 = if entropy_ok { try_entropy_v1(&tokens, final_ob, final_lb) } else { None };
+            let v2 = if entropy_ok { try_entropy_v2(&tokens) } else { None };
+            let v3 = if entropy_ok && raw_size >= entropy::ENTROPY_V3_MIN_BYTES {
                 try_entropy_v3(&tokens)
             } else { None };
-            let v4 = if raw_size >= entropy::ENTROPY_V3_MIN_BYTES {
+            let v4 = if entropy_ok && raw_size >= entropy::ENTROPY_V3_MIN_BYTES {
                 try_entropy_v4(&tokens)
             } else { None };
 
@@ -91,6 +97,16 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
+/// Returns false if any Backref length exceeds the entropy-safe maximum.
+/// Entropy symbol = 255 + length, serialised as u16 — max safe length = 65280.
+#[inline]
+fn tokens_safe_for_entropy(tokens: &[opcode::Token]) -> bool {
+    tokens.iter().all(|t| match t {
+        opcode::Token::Backref { length, .. } => *length <= opcode::ENTROPY_SAFE_MAX_LENGTH,
+        _ => true,
+    })
+}
+
 fn try_entropy_v1(tokens: &[opcode::Token], ob: u32, lb: u32) -> Option<Vec<u8>> {
     let enc_table = entropy::build_encode_table(tokens)?;
     let coded     = entropy::write_tokens_joint(tokens, &enc_table, ob, lb).ok()?;
@@ -120,8 +136,6 @@ fn try_entropy_v3(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     Some(payload)
 }
 
-/// v4: 8 literal/length tables (indexed by byte-category context) + shared
-/// offset bucket table. Serialised as table[0]..table[7] then offset_table.
 fn try_entropy_v4(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     let (lit_tables, offset_table) = entropy::build_encode_tables_v4(tokens)?;
     let coded = entropy::write_tokens_joint_v4(tokens, &lit_tables, &offset_table).ok()?;
@@ -165,12 +179,15 @@ fn pair_vs_entropy(
         ));
     }
 
-    let v1 = try_entropy_v1(&fold1_tokens, ob1, lb1);
-    let v2 = try_entropy_v2(&fold1_tokens);
-    let v3 = if fold1_bytes_est >= entropy::ENTROPY_V3_MIN_BYTES {
+    // Guard entropy for large-length tokens
+    let entropy_ok = tokens_safe_for_entropy(&fold1_tokens);
+
+    let v1 = if entropy_ok { try_entropy_v1(&fold1_tokens, ob1, lb1) } else { None };
+    let v2 = if entropy_ok { try_entropy_v2(&fold1_tokens) } else { None };
+    let v3 = if entropy_ok && fold1_bytes_est >= entropy::ENTROPY_V3_MIN_BYTES {
         try_entropy_v3(&fold1_tokens)
     } else { None };
-    let v4 = if fold1_bytes_est >= entropy::ENTROPY_V3_MIN_BYTES {
+    let v4 = if entropy_ok && fold1_bytes_est >= entropy::ENTROPY_V3_MIN_BYTES {
         try_entropy_v4(&fold1_tokens)
     } else { None };
 
@@ -200,4 +217,4 @@ fn pair_vs_entropy(
 
 pub fn decompress(input: &[u8]) -> io::Result<Vec<u8>> {
     unfold::unfold(input)
-                    }
+                                    }

@@ -1,0 +1,8 @@
+Original size: 16777216 bits (2097152 bytes)
+  Wide scan wins: ob=10 lb=21 cost=1000 < baseline cost=214714 (ob=17 lb=8)
+Window diagnostics: 9/80 tokens BACKREF (11.2%) | offset: 0.0% at max (1023) | 11.1% upper half | length: 0.0% at max (2097151) | offset_bits=10 length_bits=21 — OK
+Fold 1 adaptive: offset_bits=10 (window=1023 bytes) length_bits=21 (max_len=2097151)
+Fold 1 (LZ): 1000 bits (125 bytes)
+Fold 2 (LZ): 1208 bits (151 bytes)
+Fold 2 not worth it (ratio 1.208), stopping at fold 1
+Done. 2097152 bytes → 130 bytes

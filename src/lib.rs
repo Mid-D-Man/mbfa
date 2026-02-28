@@ -1,4 +1,4 @@
-// src/lib.rs — pre-slot baseline + v4 byte-category entropy + length saturation fix.
+// src/lib.rs — pre-slot baseline + v4 byte-category entropy + delta filter support
 pub mod opcode;
 pub mod encoder;
 pub mod bitwriter;
@@ -8,10 +8,11 @@ pub mod pairing;
 pub mod fold;
 pub mod unfold;
 pub mod entropy;
+pub mod filters;
 
 use std::io;
 
-/// File header layout:
+/// File header layout (v3):
 ///   Byte 0:              fold_count
 ///   Byte 1:              pair_flag    (1 = fold 2 used pair encoding)
 ///   Byte 2:              entropy_flag
@@ -20,12 +21,33 @@ use std::io;
 ///                          2 = v2 joint Huffman + offset bucket Huffman
 ///                          3 = v3 two-context Huffman + shared offset buckets
 ///                          4 = v4 eight-context (byte-category) + shared offset buckets
-///   Bytes 3..3+N:        offset_bits[0..N]  where N = fold_count
-///   Bytes 3+N..3+2N:     length_bits[0..N]
-///   Byte 3+2N onward:    compressed payload
+///   Byte 3:              filter_flag
+///                          0 = none
+///                          1 = delta stride 1
+///                          2 = delta stride 2  (16-bit PCM / mono WAV)
+///                          3 = delta stride 3  (24-bit BMP)
+///                          4 = delta stride 4  (32-bit RGBA / stereo 16-bit PCM)
+///   Bytes 4..4+N:        offset_bits[0..N]  where N = fold_count
+///   Bytes 4+N..4+2N:     length_bits[0..N]
+///   Byte 4+2N onward:    compressed payload
 pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
+    // ── Pre-filter ────────────────────────────────────────────────────────────
+    let filter_flag = filters::detect_filter(input);
+    let filtered: std::borrow::Cow<[u8]> = if filter_flag != filters::FILTER_NONE {
+        let f = filters::apply_filter(input, filter_flag);
+        println!(
+            "Filter delta{}: {} bytes in, {} bytes filtered (same size — pre-LZ transform)",
+            filter_flag, input.len(), f.len()
+        );
+        std::borrow::Cow::Owned(f)
+    } else {
+        std::borrow::Cow::Borrowed(input)
+    };
+    let to_fold: &[u8] = &filtered;
+
+    // ── Fold passes ───────────────────────────────────────────────────────────
     let (compressed, folds_done, used_pairing, offset_bits_per_fold, length_bits_per_fold) =
-        fold::fold(input, max_folds)?;
+        fold::fold(to_fold, max_folds)?;
 
     let ob1      = offset_bits_per_fold.first().copied().unwrap_or(opcode::OFFSET_BITS_MIN);
     let lb1      = length_bits_per_fold.first().copied().unwrap_or(opcode::LENGTH_BITS_MIN);
@@ -41,10 +63,6 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let tokens   = bitreader::read_tokens(&compressed, final_ob, final_lb)?;
             let raw_size = compressed.len();
 
-            // Guard: entropy table serialisation uses u16 for symbol values.
-            // sym = 255 + length, so lengths > ENTROPY_SAFE_MAX_LENGTH cannot
-            // be entropy-coded. In practice these files never reach the entropy
-            // threshold anyway, but we check explicitly for safety.
             let entropy_ok = tokens_safe_for_entropy(&tokens);
 
             let v1 = if entropy_ok { try_entropy_v1(&tokens, final_ob, final_lb) } else { None };
@@ -78,19 +96,21 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             }
 
         } else if used_pairing {
+            // Pass filtered input to pair_vs_entropy so it re-scans correctly
             pair_vs_entropy(
-                input, ob1, lb1, &compressed,
+                to_fold, ob1, lb1, &compressed,
                 folds_done, &offset_bits_per_fold, &length_bits_per_fold,
             )?
         } else {
             (compressed, 0u8, false, folds_done, offset_bits_per_fold, length_bits_per_fold)
         };
 
-    // ── Serialise header ──────────────────────────────────────────────────────
+    // ── Serialise header (v3: 4 fixed bytes) ─────────────────────────────────
     let mut output = Vec::new();
     output.push(out_folds);
     output.push(out_pair_flag as u8);
     output.push(entropy_flag);
+    output.push(filter_flag);           // byte 3 — NEW
     for &ob in &out_ob { output.push(ob as u8); }
     for &lb in &out_lb { output.push(lb as u8); }
     output.extend_from_slice(&final_payload);
@@ -98,7 +118,6 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
 }
 
 /// Returns false if any Backref length exceeds the entropy-safe maximum.
-/// Entropy symbol = 255 + length, serialised as u16 — max safe length = 65280.
 #[inline]
 fn tokens_safe_for_entropy(tokens: &[opcode::Token]) -> bool {
     tokens.iter().all(|t| match t {
@@ -139,7 +158,6 @@ fn try_entropy_v3(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
 fn try_entropy_v4(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     let (lit_tables, offset_table) = entropy::build_encode_tables_v4(tokens)?;
     let coded = entropy::write_tokens_joint_v4(tokens, &lit_tables, &offset_table).ok()?;
-
     let mut payload = Vec::new();
     for t in &lit_tables {
         payload.extend_from_slice(&entropy::serialize_table(t));
@@ -150,7 +168,7 @@ fn try_entropy_v4(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
 }
 
 fn pair_vs_entropy(
-    input:            &[u8],
+    filtered_input:   &[u8],
     ob1:              u32,
     lb1:              u32,
     pair_output:      &[u8],
@@ -158,7 +176,8 @@ fn pair_vs_entropy(
     pair_ob_per_fold: &[u32],
     pair_lb_per_fold: &[u32],
 ) -> io::Result<(Vec<u8>, u8, bool, u8, Vec<u32>, Vec<u32>)> {
-    let (fold1_tokens, _, _) = encoder::scan_adaptive(input);
+    // Re-scan the filtered input (not original) so tokens match what was folded
+    let (fold1_tokens, _, _) = encoder::scan_adaptive(filtered_input);
 
     let fold1_bits: u32 = fold1_tokens
         .iter()
@@ -179,7 +198,6 @@ fn pair_vs_entropy(
         ));
     }
 
-    // Guard entropy for large-length tokens
     let entropy_ok = tokens_safe_for_entropy(&fold1_tokens);
 
     let v1 = if entropy_ok { try_entropy_v1(&fold1_tokens, ob1, lb1) } else { None };
@@ -217,4 +235,4 @@ fn pair_vs_entropy(
 
 pub fn decompress(input: &[u8]) -> io::Result<Vec<u8>> {
     unfold::unfold(input)
-                                    }
+                               }

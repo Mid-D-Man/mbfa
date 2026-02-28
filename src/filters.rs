@@ -135,18 +135,28 @@ mod tests {
         }
     }
 
-    #[test]
+#[test]
     fn smooth_gradient_compresses_well() {
-        // Simulate a smooth 24-bit BMP gradient — without delta, almost no LZ matches.
-        let pixels: Vec<u8> = (0..300usize).map(|i| {
-            (i % 256) as u8
-        }).collect();
+        // Simulate a smooth 24-bit BMP gradient (linear ramp across all bytes).
+        // With delta stride=3, each residual = input[i] - input[i-3].
+        // For a linear ramp, every residual is the same constant value.
+        // That IS the property we want — a constant residual field is one giant
+        // LZ back-reference chain. Not near-zero, but near-constant.
+        let pixels: Vec<u8> = (0..300usize).map(|i| (i % 256) as u8).collect();
         let enc = delta_encode(&pixels, 3);
-        // After delta, most values should be small constants.
-        let nonzero: usize = enc[3..].iter().filter(|&&b| b != 0).count();
-        let total = enc.len() - 3;
-        // Expect <10% non-zero residuals for a smooth gradient
-        assert!(nonzero < total / 10,
-            "too many non-zero residuals: {}/{}", nonzero, total);
-    }
+        let residuals = &enc[3..];
+
+        // Count how many residuals share the dominant value
+        let mut counts = [0u32; 256];
+        for &b in residuals { counts[b as usize] += 1; }
+        let max_count = *counts.iter().max().unwrap();
+        let dominant_pct = max_count as f64 / residuals.len() as f64;
+
+        // A constant-delta gradient should produce >80% identical residuals
+        assert!(
+            dominant_pct > 0.8,
+            "residuals not constant enough: dominant value covers only {:.1}%",
+            dominant_pct * 100.0
+        );
+                             }
 }

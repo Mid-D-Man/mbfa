@@ -3,153 +3,153 @@
   "file": "alice29.txt",
   "type": "Text",
   "original_bytes": 152089,
-  "mbfa_bytes": 52820,   "mbfa_pct": 34.72,   "mbfa_ms": 171,
+  "mbfa_bytes": 52821,   "mbfa_pct": 34.73,   "mbfa_ms": 160,
   "gzip_bytes": 54435,     "gzip_pct": 35.79,     "gzip_ms": 11,
-  "zstd_bytes": 56974,    "zstd_pct": 37.46,    "zstd_ms": 9,
-  "xz_bytes": 48492,       "xz_pct": 31.88,       "xz_ms": 51,
-  "brotli_bytes": 46487,   "brotli_pct": 30.56,   "brotli_ms": 254,
+  "zstd_bytes": 56974,    "zstd_pct": 37.46,    "zstd_ms": 5,
+  "xz_bytes": 48492,       "xz_pct": 31.88,       "xz_ms": 61,
+  "brotli_bytes": 46487,   "brotli_pct": 30.56,   "brotli_ms": 262,
   "zpaq_bytes": 59926,   "zpaq_pct": 39.40,   "zpaq_ms": 25,
   "mbfa_rank": 3,
-  "fold_detail": "Original size: 1216712 bits (152089 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 552560 bits (69070 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 90.9% (threshold 77%)|Fold 2 pairing skipped — high fallback rate|Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.454, threshold 0.10)|Joint entropy flag=2: 69070 → 52815 B|Done. 152089 bytes → 52820 bytes|"
+  "fold_detail": "Original size: 1216712 bits (152089 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 552560 bits (69070 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 90.9% (threshold 77%)|Fold 2 pairing skipped — high fallback rate|Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.454, threshold 0.10)|Joint entropy flag=2: 69070 → 52815 B|Done. 152089 bytes → 52821 bytes|"
 }
 ,
 {
   "file": "asyoulik.txt",
   "type": "Text",
   "original_bytes": 125179,
-  "mbfa_bytes": 48337,   "mbfa_pct": 38.61,   "mbfa_ms": 117,
+  "mbfa_bytes": 48338,   "mbfa_pct": 38.61,   "mbfa_ms": 107,
   "gzip_bytes": 48951,     "gzip_pct": 39.10,     "gzip_ms": 10,
   "zstd_bytes": 50328,    "zstd_pct": 40.20,    "zstd_ms": 4,
-  "xz_bytes": 44536,       "xz_pct": 35.57,       "xz_ms": 35,
-  "brotli_bytes": 42713,   "brotli_pct": 34.12,   "brotli_ms": 176,
+  "xz_bytes": 44536,       "xz_pct": 35.57,       "xz_ms": 36,
+  "brotli_bytes": 42713,   "brotli_pct": 34.12,   "brotli_ms": 174,
   "zpaq_bytes": 55566,   "zpaq_pct": 44.38,   "zpaq_ms": 22,
   "mbfa_rank": 3,
-  "fold_detail": "Original size: 1001432 bits (125179 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 518464 bits (64808 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 89.1% (threshold 77%)|Fold 2 pairing skipped — high fallback rate|Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.518, threshold 0.10)|Joint entropy flag=2: 64808 → 48332 B|Done. 125179 bytes → 48337 bytes|"
+  "fold_detail": "Original size: 1001432 bits (125179 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 518464 bits (64808 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 89.1% (threshold 77%)|Fold 2 pairing skipped — high fallback rate|Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.518, threshold 0.10)|Joint entropy flag=2: 64808 → 48332 B|Done. 125179 bytes → 48338 bytes|"
 }
 ,
 {
   "file": "cp.html",
   "type": "HTML",
   "original_bytes": 24603,
-  "mbfa_bytes": 8296,   "mbfa_pct": 33.71,   "mbfa_ms": 14,
+  "mbfa_bytes": 8297,   "mbfa_pct": 33.72,   "mbfa_ms": 14,
   "gzip_bytes": 7999,     "gzip_pct": 32.51,     "gzip_ms": 3,
   "zstd_bytes": 8468,    "zstd_pct": 34.41,    "zstd_ms": 3,
   "xz_bytes": 7644,       "xz_pct": 31.06,       "xz_ms": 10,
   "brotli_bytes": 6895,   "brotli_pct": 28.02,   "brotli_ms": 31,
   "zpaq_bytes": 10913,   "zpaq_pct": 44.35,   "zpaq_ms": 7,
   "mbfa_rank": 4,
-  "fold_detail": "Original size: 196824 bits (24603 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 92232 bits (11529 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 76.0% (threshold 77%)|Fold 2 (PAIR): 89136 bits (11142 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.453, threshold 0.10)|Entropy flag=2 beats PAIR: 8291 B < 11142 B|Done. 24603 bytes → 8296 bytes|"
+  "fold_detail": "Original size: 196824 bits (24603 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 92232 bits (11529 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 76.0% (threshold 77%)|Fold 2 (PAIR): 89136 bits (11142 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.453, threshold 0.10)|Entropy flag=2 beats PAIR: 8291 B < 11142 B|Done. 24603 bytes → 8297 bytes|"
 }
 ,
 {
   "file": "fields.c",
   "type": "Source",
   "original_bytes": 11150,
-  "mbfa_bytes": 3432,   "mbfa_pct": 30.78,   "mbfa_ms": 8,
+  "mbfa_bytes": 3433,   "mbfa_pct": 30.78,   "mbfa_ms": 7,
   "gzip_bytes": 3143,     "gzip_pct": 28.18,     "gzip_ms": 2,
   "zstd_bytes": 3384,    "zstd_pct": 30.34,    "zstd_ms": 3,
-  "xz_bytes": 3028,       "xz_pct": 27.15,       "xz_ms": 6,
-  "brotli_bytes": 2717,   "brotli_pct": 24.36,   "brotli_ms": 16,
+  "xz_bytes": 3028,       "xz_pct": 27.15,       "xz_ms": 7,
+  "brotli_bytes": 2717,   "brotli_pct": 24.36,   "brotli_ms": 17,
   "zpaq_bytes": 4725,   "zpaq_pct": 42.37,   "zpaq_ms": 6,
   "mbfa_rank": 5,
-  "fold_detail": "Original size: 89200 bits (11150 bytes)|Fold 1 adaptive: offset_bits=14 (window=16383 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 36600 bits (4575 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 51.8% (threshold 77%)|Fold 2 (PAIR): 34584 bits (4323 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.388, threshold 0.10)|Entropy flag=2 beats PAIR: 3427 B < 4323 B|Done. 11150 bytes → 3432 bytes|"
+  "fold_detail": "Original size: 89200 bits (11150 bytes)|Fold 1 adaptive: offset_bits=14 (window=16383 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 36600 bits (4575 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 51.8% (threshold 77%)|Fold 2 (PAIR): 34584 bits (4323 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.388, threshold 0.10)|Entropy flag=2 beats PAIR: 3427 B < 4323 B|Done. 11150 bytes → 3433 bytes|"
 }
 ,
 {
   "file": "grammar.lsp",
   "type": "Lisp",
   "original_bytes": 3721,
-  "mbfa_bytes": 1364,   "mbfa_pct": 36.65,   "mbfa_ms": 4,
+  "mbfa_bytes": 1365,   "mbfa_pct": 36.68,   "mbfa_ms": 4,
   "gzip_bytes": 1246,     "gzip_pct": 33.48,     "gzip_ms": 2,
-  "zstd_bytes": 1295,    "zstd_pct": 34.80,    "zstd_ms": 2,
+  "zstd_bytes": 1295,    "zstd_pct": 34.80,    "zstd_ms": 3,
   "xz_bytes": 1292,       "xz_pct": 34.72,       "xz_ms": 4,
   "brotli_bytes": 1125,   "brotli_pct": 30.23,   "brotli_ms": 8,
   "zpaq_bytes": 2615,   "zpaq_pct": 70.27,   "zpaq_ms": 5,
   "mbfa_rank": 5,
-  "fold_detail": "Original size: 29768 bits (3721 bytes)|Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 15096 bits (1887 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 27.4% (threshold 77%)|Fold 2 (PAIR): 14256 bits (1782 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.479, threshold 0.10)|Entropy flag=2 beats PAIR: 1359 B < 1782 B|Done. 3721 bytes → 1364 bytes|"
+  "fold_detail": "Original size: 29768 bits (3721 bytes)|Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 15096 bits (1887 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 27.4% (threshold 77%)|Fold 2 (PAIR): 14256 bits (1782 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.479, threshold 0.10)|Entropy flag=2 beats PAIR: 1359 B < 1782 B|Done. 3721 bytes → 1365 bytes|"
 }
 ,
 {
   "file": "kennedy.xls",
   "type": "Spreadsheet",
   "original_bytes": 1029744,
-  "mbfa_bytes": 198999,   "mbfa_pct": 19.32,   "mbfa_ms": 2322,
-  "gzip_bytes": 206779,     "gzip_pct": 20.08,     "gzip_ms": 37,
+  "mbfa_bytes": 199000,   "mbfa_pct": 19.32,   "mbfa_ms": 2365,
+  "gzip_bytes": 206779,     "gzip_pct": 20.08,     "gzip_ms": 36,
   "zstd_bytes": 111831,    "zstd_pct": 10.86,    "zstd_ms": 8,
-  "xz_bytes": 49116,       "xz_pct": 4.76,       "xz_ms": 302,
-  "brotli_bytes": 61498,   "brotli_pct": 5.97,   "brotli_ms": 2038,
-  "zpaq_bytes": 327795,   "zpaq_pct": 31.83,   "zpaq_ms": 234,
+  "xz_bytes": 49116,       "xz_pct": 4.76,       "xz_ms": 301,
+  "brotli_bytes": 61498,   "brotli_pct": 5.97,   "brotli_ms": 2098,
+  "zpaq_bytes": 327795,   "zpaq_pct": 31.83,   "zpaq_ms": 235,
   "mbfa_rank": 4,
-  "fold_detail": "Original size: 8237952 bits (1029744 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 2911048 bits (363881 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 79.2% (threshold 77%)|Fold 2 pairing skipped — high fallback rate|Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.353, threshold 0.10)|Joint entropy flag=4: 363881 → 198994 B|Done. 1029744 bytes → 198999 bytes|"
+  "fold_detail": "Original size: 8237952 bits (1029744 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 2911048 bits (363881 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 79.2% (threshold 77%)|Fold 2 pairing skipped — high fallback rate|Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.353, threshold 0.10)|Joint entropy flag=4: 363881 → 198994 B|Done. 1029744 bytes → 199000 bytes|"
 }
 ,
 {
   "file": "lcet10.txt",
   "type": "Text",
   "original_bytes": 426754,
-  "mbfa_bytes": 135707,   "mbfa_pct": 31.79,   "mbfa_ms": 661,
+  "mbfa_bytes": 135708,   "mbfa_pct": 31.80,   "mbfa_ms": 682,
   "gzip_bytes": 144885,     "gzip_pct": 33.95,     "gzip_ms": 25,
   "zstd_bytes": 141028,    "zstd_pct": 33.04,    "zstd_ms": 6,
-  "xz_bytes": 119500,       "xz_pct": 28.00,       "xz_ms": 116,
-  "brotli_bytes": 113416,   "brotli_pct": 26.57,   "brotli_ms": 658,
+  "xz_bytes": 119500,       "xz_pct": 28.00,       "xz_ms": 117,
+  "brotli_bytes": 113416,   "brotli_pct": 26.57,   "brotli_ms": 657,
   "zpaq_bytes": 145252,   "zpaq_pct": 34.03,   "zpaq_ms": 63,
   "mbfa_rank": 3,
-  "fold_detail": "Original size: 3414032 bits (426754 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 1384584 bits (173073 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 92.3% (threshold 77%)|Fold 2 pairing skipped — high fallback rate|Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.406, threshold 0.10)|Joint entropy flag=2: 173073 → 135702 B|Done. 426754 bytes → 135707 bytes|"
+  "fold_detail": "Original size: 3414032 bits (426754 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 1384584 bits (173073 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 92.3% (threshold 77%)|Fold 2 pairing skipped — high fallback rate|Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.406, threshold 0.10)|Joint entropy flag=2: 173073 → 135702 B|Done. 426754 bytes → 135708 bytes|"
 }
 ,
 {
   "file": "plrabn12.txt",
   "type": "Text",
   "original_bytes": 481861,
-  "mbfa_bytes": 184798,   "mbfa_pct": 38.35,   "mbfa_ms": 1093,
+  "mbfa_bytes": 184799,   "mbfa_pct": 38.35,   "mbfa_ms": 1131,
   "gzip_bytes": 195208,     "gzip_pct": 40.51,     "gzip_ms": 37,
   "zstd_bytes": 191688,    "zstd_pct": 39.78,    "zstd_ms": 7,
-  "xz_bytes": 165412,       "xz_pct": 34.32,       "xz_ms": 142,
-  "brotli_bytes": 163267,   "brotli_pct": 33.88,   "brotli_ms": 699,
-  "zpaq_bytes": 203596,   "zpaq_pct": 42.25,   "zpaq_ms": 82,
+  "xz_bytes": 165412,       "xz_pct": 34.32,       "xz_ms": 143,
+  "brotli_bytes": 163267,   "brotli_pct": 33.88,   "brotli_ms": 701,
+  "zpaq_bytes": 203596,   "zpaq_pct": 42.25,   "zpaq_ms": 83,
   "mbfa_rank": 3,
-  "fold_detail": "Original size: 3854888 bits (481861 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 1917152 bits (239644 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 95.9% (threshold 77%)|Fold 2 pairing skipped — high fallback rate|Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.497, threshold 0.10)|Joint entropy flag=3: 239644 → 184793 B|Done. 481861 bytes → 184798 bytes|"
+  "fold_detail": "Original size: 3854888 bits (481861 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 1917152 bits (239644 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 95.9% (threshold 77%)|Fold 2 pairing skipped — high fallback rate|Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.497, threshold 0.10)|Joint entropy flag=3: 239644 → 184793 B|Done. 481861 bytes → 184799 bytes|"
 }
 ,
 {
   "file": "ptt5",
   "type": "Binary",
   "original_bytes": 513216,
-  "mbfa_bytes": 55092,   "mbfa_pct": 10.73,   "mbfa_ms": 3162,
+  "mbfa_bytes": 55093,   "mbfa_pct": 10.73,   "mbfa_ms": 3223,
   "gzip_bytes": 56443,     "gzip_pct": 10.99,     "gzip_ms": 13,
   "zstd_bytes": 54424,    "zstd_pct": 10.60,    "zstd_ms": 5,
-  "xz_bytes": 41992,       "xz_pct": 8.18,       "xz_ms": 89,
-  "brotli_bytes": 40939,   "brotli_pct": 7.97,   "brotli_ms": 957,
+  "xz_bytes": 41992,       "xz_pct": 8.18,       "xz_ms": 92,
+  "brotli_bytes": 40939,   "brotli_pct": 7.97,   "brotli_ms": 970,
   "zpaq_bytes": 65477,   "zpaq_pct": 12.75,   "zpaq_ms": 38,
   "mbfa_rank": 4,
-  "fold_detail": "Original size: 4105728 bits (513216 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 590176 bits (73772 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 76.7% (threshold 77%)|Fold 2 (PAIR): 572168 bits (71521 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.139, threshold 0.10)|Entropy flag=2 beats PAIR: 55087 B < 71521 B|Done. 513216 bytes → 55092 bytes|"
+  "fold_detail": "Original size: 4105728 bits (513216 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 590176 bits (73772 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 76.7% (threshold 77%)|Fold 2 (PAIR): 572168 bits (71521 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.139, threshold 0.10)|Entropy flag=2 beats PAIR: 55087 B < 71521 B|Done. 513216 bytes → 55093 bytes|"
 }
 ,
 {
   "file": "sum",
   "type": "Executable",
   "original_bytes": 38240,
-  "mbfa_bytes": 13267,   "mbfa_pct": 34.69,   "mbfa_ms": 74,
+  "mbfa_bytes": 13268,   "mbfa_pct": 34.69,   "mbfa_ms": 72,
   "gzip_bytes": 12924,     "gzip_pct": 33.79,     "gzip_ms": 4,
   "zstd_bytes": 13379,    "zstd_pct": 34.98,    "zstd_ms": 3,
   "xz_bytes": 9452,       "xz_pct": 24.71,       "xz_ms": 12,
   "brotli_bytes": 10143,   "brotli_pct": 26.52,   "brotli_ms": 50,
   "zpaq_bytes": 16269,   "zpaq_pct": 42.54,   "zpaq_ms": 9,
   "mbfa_rank": 4,
-  "fold_detail": "Original size: 305920 bits (38240 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 148560 bits (18570 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 50.2% (threshold 77%)|Fold 2 (PAIR): 134824 bits (16853 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.441, threshold 0.10)|Entropy flag=2 beats PAIR: 13262 B < 16853 B|Done. 38240 bytes → 13267 bytes|"
+  "fold_detail": "Original size: 305920 bits (38240 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 148560 bits (18570 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 50.2% (threshold 77%)|Fold 2 (PAIR): 134824 bits (16853 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.441, threshold 0.10)|Entropy flag=2 beats PAIR: 13262 B < 16853 B|Done. 38240 bytes → 13268 bytes|"
 }
 ,
 {
   "file": "xargs.1",
   "type": "Binary",
   "original_bytes": 4227,
-  "mbfa_bytes": 1848,   "mbfa_pct": 43.71,   "mbfa_ms": 4,
+  "mbfa_bytes": 1849,   "mbfa_pct": 43.74,   "mbfa_ms": 4,
   "gzip_bytes": 1756,     "gzip_pct": 41.54,     "gzip_ms": 2,
   "zstd_bytes": 1803,    "zstd_pct": 42.65,    "zstd_ms": 3,
   "xz_bytes": 1812,       "xz_pct": 42.86,       "xz_ms": 5,
   "brotli_bytes": 1464,   "brotli_pct": 34.63,   "brotli_ms": 8,
   "zpaq_bytes": 3299,   "zpaq_pct": 78.04,   "zpaq_ms": 5,
   "mbfa_rank": 5,
-  "fold_detail": "Original size: 33816 bits (4227 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 22056 bits (2757 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 51.6% (threshold 77%)|Fold 2 (PAIR): 20160 bits (2520 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.596, threshold 0.10)|Entropy flag=2 beats PAIR: 1843 B < 2520 B|Done. 4227 bytes → 1848 bytes|"
+  "fold_detail": "Original size: 33816 bits (4227 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 22056 bits (2757 bytes)|Fold 2 pairing pre-scan: Cantor fallback rate = 51.6% (threshold 77%)|Fold 2 (PAIR): 20160 bits (2520 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.596, threshold 0.10)|Entropy flag=2 beats PAIR: 1843 B < 2520 B|Done. 4227 bytes → 1849 bytes|"
 }
 ]

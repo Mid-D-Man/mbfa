@@ -1,8 +1,8 @@
 // src/unfold.rs
-//! Reverses N fold passes.
+//! Reverses N fold passes then undoes any pre-compression filter.
 //!
-//! Header v2:
-//!   [fold_count: u8][pair_flag: u8][entropy_flag: u8]
+//! Header v3 layout:
+//!   [fold_count: u8][pair_flag: u8][entropy_flag: u8][filter_flag: u8]
 //!   [offset_bits[0..N]: u8*N]
 //!   [length_bits[0..N]: u8*N]
 //!   [payload...]
@@ -13,29 +13,35 @@
 //!   2 = v2 joint Huffman + offset bucket Huffman
 //!   3 = v3 two-context Huffman + shared offset buckets
 //!   4 = v4 eight-context (byte-category) Huffman + shared offset buckets
+//!
+//! filter_flag values:
+//!   0 = none
+//!   1-4 = delta stride 1-4 (applied before fold, reversed after unfold)
 
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
 use crate::pairing::pair_decode;
 use crate::entropy;
+use crate::filters;
 use crate::opcode::{OFFSET_BITS_DEFAULT, OFFSET_BITS_MIN, OFFSET_BITS_MAX,
                     LENGTH_BITS_DEFAULT, LENGTH_BITS_MIN, LENGTH_BITS_MAX};
 
 pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     if input.is_empty() { return Ok(Vec::new()); }
-    if input.len() < 3  { return Ok(input.to_vec()); }
+    if input.len() < 4  { return Ok(input.to_vec()); }
 
     let fold_count   = input[0] as usize;
     let pair_flag    = input[1];
     let entropy_flag = input[2];
+    let filter_flag  = input[3];
 
     let (offset_bits_per_fold, length_bits_per_fold, payload_start) =
         parse_header(input, fold_count);
 
     println!(
-        "Unfolding {} pass(es) | pair_flag={} | entropy_flag={} | \
+        "Unfolding {} pass(es) | pair_flag={} | entropy_flag={} | filter_flag={} | \
          offset_bits={:?} | length_bits={:?}",
-        fold_count, pair_flag, entropy_flag,
+        fold_count, pair_flag, entropy_flag, filter_flag,
         offset_bits_per_fold, length_bits_per_fold
     );
 
@@ -88,12 +94,9 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         (rec, fold_count.saturating_sub(1))
 
     } else if entropy_flag == 4 {
-        // v4: 8 literal/length tables (contexts 0–7) + 1 shared offset table.
-        // Tables are serialised in order: table[0] .. table[7], then offset_table.
         let payload = &input[payload_start..];
         let mut cursor = 0usize;
 
-        // Deserialise the 8 literal/length decode tables
         let mut lit_dtables: Vec<entropy::DecodeTable> = Vec::with_capacity(8);
         for i in 0..8usize {
             let (enc, consumed) = entropy::deserialize_table(&payload[cursor..])
@@ -103,14 +106,12 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             cursor += consumed;
         }
 
-        // Deserialise the shared offset bucket decode table
         let (off_enc, off_c) = entropy::deserialize_table(&payload[cursor..])
             .map_err(|e| std::io::Error::new(e.kind(),
                 format!("v4 unfold: offset table deserialise failed: {}", e)))?;
         let off_dt = entropy::decode_table_from_encode(&off_enc);
         cursor += off_c;
 
-        // Convert Vec to [DecodeTable; 8] for the read function
         let arr: [entropy::DecodeTable; 8] = lit_dtables.try_into()
             .map_err(|_| std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -123,10 +124,9 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         (rec, fold_count.saturating_sub(1))
 
     } else {
+        // No entropy — payload is raw fold output (or raw filtered bytes if fold_count=0)
         (input[payload_start..].to_vec(), fold_count)
     };
-
-    if folds_to_undo == 0 { return Ok(current); }
 
     // ── Undo remaining LZ / PAIR folds in reverse ────────────────────────────
     for pass in (1..=folds_to_undo).rev() {
@@ -139,7 +139,8 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let tokens = pair_decode(&current, ob1, lb1)?;
             current = reconstruct(&tokens);
             println!("Unfold pass 2 (PAIR) + pass 1 (LZ): {} bytes", current.len());
-            return Ok(current);
+            // pair handling already consumed both passes — break out of loop
+            break;
         } else {
             let tokens = read_tokens(&current, ob, lb)?;
             current = reconstruct(&tokens);
@@ -147,15 +148,34 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         }
     }
 
+    // ── Reverse pre-compression filter ───────────────────────────────────────
+    if filter_flag != filters::FILTER_NONE {
+        let before = current.len();
+        current = filters::undo_filter(&current, filter_flag);
+        println!(
+            "Filter delta{} reversed: {} bytes → {} bytes",
+            filter_flag, before, current.len()
+        );
+    }
+
     Ok(current)
 }
 
+/// Parse ob/lb arrays from the v3 header (4 fixed bytes + N ob + N lb).
+/// Returns (offset_bits_per_fold, length_bits_per_fold, payload_start).
 fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) {
-    // v2 layout: 3 fixed bytes + N offset_bits + N length_bits
-    let v2_end = 3 + 2 * fold_count;
-    if fold_count > 0 && input.len() >= v2_end {
-        let ob_slice = &input[3..3 + fold_count];
-        let lb_slice = &input[3 + fold_count..v2_end];
+    // v3 header: 4 fixed bytes (fold_count, pair_flag, entropy_flag, filter_flag)
+    //            + fold_count ob bytes + fold_count lb bytes
+    let payload_start = 4 + 2 * fold_count;
+
+    if fold_count == 0 {
+        // No fold fields — payload starts immediately after 4 fixed bytes
+        return (vec![], vec![], 4);
+    }
+
+    if input.len() >= payload_start {
+        let ob_slice = &input[4..4 + fold_count];
+        let lb_slice = &input[4 + fold_count..payload_start];
 
         let ob_valid = ob_slice.iter().all(|&b| {
             let v = b as u32;
@@ -169,22 +189,18 @@ fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) 
         if ob_valid && lb_valid {
             let ob: Vec<u32> = ob_slice.iter().map(|&b| b as u32).collect();
             let lb: Vec<u32> = lb_slice.iter().map(|&b| b as u32).collect();
-            return (ob, lb, v2_end);
+            return (ob, lb, payload_start);
         }
     }
 
-    // Fallback: v1 header (offset_bits only, no length_bits)
-    let v1_end = 3 + fold_count;
-    if fold_count > 0 && input.len() >= v1_end {
-        let ob: Vec<u32> = input[3..v1_end].iter().map(|&b| b as u32).collect();
-        let lb: Vec<u32> = vec![LENGTH_BITS_DEFAULT; fold_count];
-        return (ob, lb, v1_end);
-    }
-
-    // Last resort defaults
+    // Fallback defaults — header too short or values out of range
+    println!(
+        "parse_header: fallback to defaults (input.len()={}, fold_count={})",
+        input.len(), fold_count
+    );
     (
-        vec![OFFSET_BITS_DEFAULT; fold_count.max(1)],
-        vec![LENGTH_BITS_DEFAULT; fold_count.max(1)],
-        3,
+        vec![OFFSET_BITS_DEFAULT; fold_count],
+        vec![LENGTH_BITS_DEFAULT; fold_count],
+        payload_start,
     )
           }

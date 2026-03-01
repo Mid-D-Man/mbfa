@@ -55,7 +55,7 @@ const CHAIN_LIMIT: usize = 1024;
 // Only attempt the 2-step lookahead for matches shorter than or equal to this.
 // Long matches are almost always the right greedy choice, and the extra
 // find_match calls are wasteful when best_len is already high.
-const LAZY_SHORT_LEN: u32 = 6;
+const LAZY_SHORT_LEN: usize = 6;
 
 #[inline]
 fn hash3(input: &[u8], pos: usize) -> usize {

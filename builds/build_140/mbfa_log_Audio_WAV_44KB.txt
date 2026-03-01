@@ -1,0 +1,12 @@
+WAV fmt: 1 ch, 16 bps → delta stride 2
+Filter delta2: 44144 bytes in, 44144 bytes filtered (same size — pre-LZ transform)
+Original size: 353152 bits (44144 bytes)
+  lb cap applied: wide lb=16 output=5562B >= entropy threshold 400B — re-scanned at lb=15 (cost 44094 vs wide cost 44492)
+Window diagnostics: 358/3729 tokens BACKREF (9.6%) | offset: 0.0% at max (8191) | 4.7% upper half | length: 0.3% at max (32767) | offset_bits=13 length_bits=15 — OK
+Fold 1 adaptive: offset_bits=13 (window=8191 bytes) length_bits=15 (max_len=32767)
+Fold 1 (LZ): 44096 bits (5512 bytes)
+Fold 2 pairing pre-scan: Cantor fallback rate = 84.6% (threshold 77%)
+Fold 2 pairing skipped — high fallback rate
+Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.125, threshold 0.10)
+Joint entropy flag=2: 5512 → 4507 B
+Done. 44144 bytes → 4513 bytes

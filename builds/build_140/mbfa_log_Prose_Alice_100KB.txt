@@ -1,0 +1,9 @@
+Original size: 800000 bits (100000 bytes)
+Window diagnostics: 12825/18011 tokens BACKREF (71.2%) | offset: 0.0% at max (131071) | 2.8% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 385312 bits (48164 bytes)
+Fold 2 pairing pre-scan: Cantor fallback rate = 89.2% (threshold 77%)
+Fold 2 pairing skipped — high fallback rate
+Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.482, threshold 0.10)
+Joint entropy flag=2: 48164 → 35885 B
+Done. 100000 bytes → 35891 bytes

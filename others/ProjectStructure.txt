@@ -1,4 +1,4 @@
-Project Structure — MidMans Bit Folding Algorithm (MBFA)
+...Project Structure — MidMans Bit Folding Algorithm (MBFA)
 MidManStudio
 Generated: Sun Mar  1 08:35:34 UTC 2026
 Repository: Mid-D-Man/mbfa

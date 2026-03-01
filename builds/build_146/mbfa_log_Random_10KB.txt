@@ -1,0 +1,6 @@
+Original size: 80000 bits (10000 bytes)
+Window diagnostics: 0/10000 tokens BACKREF (0.0%) | offset: 0.0% at max (131071) | 0.0% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 100008 bits (12501 bytes)
+Fold 1 not worth it (ratio 1.250), stopping at fold 0
+Done. 10000 bytes → 10004 bytes

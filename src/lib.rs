@@ -1,5 +1,5 @@
 // src/lib.rs — pre-slot baseline + v4 byte-category entropy + delta filter support
-//              + v2/v3 slotted offset reuse (entropy_flag 5/6)
+// + v5/v6 recent-offset slot reuse
 pub mod opcode;
 pub mod encoder;
 pub mod bitwriter;
@@ -22,11 +22,10 @@ use std::io;
 ///                          2 = v2 joint Huffman + offset bucket Huffman
 ///                          3 = v3 two-context Huffman + shared offset buckets
 ///                          4 = v4 eight-context (byte-category) + shared offset buckets
-///                          5 = v2-slotted: v2 + 4-slot LRU offset reuse
-///                          6 = v3-slotted: v3 + 4-slot LRU offset reuse
+///                          5 = v5 v2 + recent-offset slot reuse (4-slot LRU)
+///                          6 = v6 v3 + recent-offset slot reuse (4-slot LRU)
 ///   Byte 3:              filter_flag
-///                          0 = none
-///                          1-4 = delta stride 1-4
+///                          0 = none  1-4 = delta stride 1-4
 ///   Bytes 4..4+N:        offset_bits[0..N]  where N = fold_count
 ///   Bytes 4+N..4+2N:     length_bits[0..N]
 ///   Byte 4+2N onward:    compressed payload
@@ -84,7 +83,7 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
 
             if best_size >= raw_size {
                 println!(
-                    "Joint entropy skipped (no gain: v1={} v2={} v3={} v4={} v2s={} v3s={} vs raw={})",
+                    "Joint entropy skipped (no gain: v1={} v2={} v3={} v4={} v5={} v6={} vs raw={})",
                     sz(&v1), sz(&v2), sz(&v3), sz(&v4), sz(&v2s), sz(&v3s), raw_size
                 );
                 (compressed, 0u8, false, folds_done, offset_bits_per_fold, length_bits_per_fold)
@@ -122,7 +121,6 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
-/// Returns false if any Backref length exceeds the entropy-safe maximum.
 #[inline]
 fn tokens_safe_for_entropy(tokens: &[opcode::Token]) -> bool {
     tokens.iter().all(|t| match t {
@@ -172,23 +170,28 @@ fn try_entropy_v4(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     Some(payload)
 }
 
-/// v2 with 4-slot LRU offset reuse (entropy_flag = 5).
+/// v5: v2 layout + 4-slot LRU offset reuse.
+/// offset_table contains bucket symbols AND slot symbols (1000–1003).
 fn try_entropy_v2_slotted(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     let lit_table    = entropy::build_encode_table(tokens)?;
     let offset_table = entropy::build_offset_encode_table_slotted(tokens)?;
-    let coded        = entropy::write_tokens_joint_v2_slotted(tokens, &lit_table, &offset_table).ok()?;
-    let mut payload  = entropy::serialize_table(&lit_table);
+    let coded        = entropy::write_tokens_joint_v2_slotted(
+        tokens, &lit_table, &offset_table
+    ).ok()?;
+    let mut payload = entropy::serialize_table(&lit_table);
     payload.extend_from_slice(&entropy::serialize_table(&offset_table));
     payload.extend_from_slice(&coded);
     Some(payload)
 }
 
-/// v3 with 4-slot LRU offset reuse (entropy_flag = 6).
+/// v6: v3 layout (two-context lit) + 4-slot LRU offset reuse.
 fn try_entropy_v3_slotted(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     let (t0, t1)     = entropy::build_encode_tables_by_context(tokens)?;
     let offset_table = entropy::build_offset_encode_table_slotted(tokens)?;
-    let coded        = entropy::write_tokens_joint_v3_slotted(tokens, &t0, &t1, &offset_table).ok()?;
-    let mut payload  = entropy::serialize_table(&t0);
+    let coded        = entropy::write_tokens_joint_v3_slotted(
+        tokens, &t0, &t1, &offset_table
+    ).ok()?;
+    let mut payload = entropy::serialize_table(&t0);
     payload.extend_from_slice(&entropy::serialize_table(&t1));
     payload.extend_from_slice(&entropy::serialize_table(&offset_table));
     payload.extend_from_slice(&coded);

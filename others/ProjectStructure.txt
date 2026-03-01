@@ -1,10 +1,10 @@
-...mProject Structure — MidMans Bit Folding Algorithm (MBFA)
+Project Structure — MidMans Bit Folding Algorithm (MBFA)
 MidManStudio
-Generated: Sun Mar  1 16:51:22 UTC 2026
+Generated: Sun Mar  1 17:21:56 UTC 2026
 Repository: Mid-D-Man/mbfa
-Commit: a20776a696d1bb18792f8a783a11f254f4ba34fd
+Commit: 1093ba26c83dfac51a7d984dea81004964102607
 Branch: master
-Build: #149
+Build: #151
 ==================================
 
 Source Files:

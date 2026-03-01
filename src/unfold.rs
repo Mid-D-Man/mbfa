@@ -13,6 +13,8 @@
 //!   2 = v2 joint Huffman + offset bucket Huffman
 //!   3 = v3 two-context Huffman + shared offset buckets
 //!   4 = v4 eight-context (byte-category) Huffman + shared offset buckets
+//!   5 = v2-slotted: v2 + 4-slot LRU offset reuse
+//!   6 = v3-slotted: v3 + 4-slot LRU offset reuse
 //!
 //! filter_flag values:
 //!   0 = none
@@ -123,8 +125,38 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         println!("Entropy v4 unfold: {} bytes", rec.len());
         (rec, fold_count.saturating_sub(1))
 
+    } else if entropy_flag == 5 {
+        // v2-slotted: joint lit/length table + slot-aware offset table
+        let payload = &input[payload_start..];
+        let (lit_enc, lit_c) = entropy::deserialize_table(payload)?;
+        let (off_enc, off_c) = entropy::deserialize_table(&payload[lit_c..])?;
+        let lit_dt  = entropy::decode_table_from_encode(&lit_enc);
+        let off_dt  = entropy::decode_table_from_encode(&off_enc);
+        let tokens  = entropy::read_tokens_joint_v2_slotted(
+            &payload[lit_c + off_c..], &lit_dt, &off_dt
+        )?;
+        let rec = reconstruct(&tokens);
+        println!("Entropy v2-slotted unfold: {} bytes", rec.len());
+        (rec, fold_count.saturating_sub(1))
+
+    } else if entropy_flag == 6 {
+        // v3-slotted: two-context lit/length tables + slot-aware offset table
+        let payload = &input[payload_start..];
+        let (enc0, c0) = entropy::deserialize_table(payload)?;
+        let (enc1, c1) = entropy::deserialize_table(&payload[c0..])?;
+        let (off_enc, c2) = entropy::deserialize_table(&payload[c0 + c1..])?;
+        let dt0    = entropy::decode_table_from_encode(&enc0);
+        let dt1    = entropy::decode_table_from_encode(&enc1);
+        let off_dt = entropy::decode_table_from_encode(&off_enc);
+        let tokens = entropy::read_tokens_joint_v3_slotted(
+            &payload[c0 + c1 + c2..], &dt0, &dt1, &off_dt
+        )?;
+        let rec = reconstruct(&tokens);
+        println!("Entropy v3-slotted unfold: {} bytes", rec.len());
+        (rec, fold_count.saturating_sub(1))
+
     } else {
-        // No entropy — payload is raw fold output (or raw filtered bytes if fold_count=0)
+        // No entropy — payload is raw fold output
         (input[payload_start..].to_vec(), fold_count)
     };
 
@@ -139,7 +171,6 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let tokens = pair_decode(&current, ob1, lb1)?;
             current = reconstruct(&tokens);
             println!("Unfold pass 2 (PAIR) + pass 1 (LZ): {} bytes", current.len());
-            // pair handling already consumed both passes — break out of loop
             break;
         } else {
             let tokens = read_tokens(&current, ob, lb)?;
@@ -161,15 +192,10 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(current)
 }
 
-/// Parse ob/lb arrays from the v3 header (4 fixed bytes + N ob + N lb).
-/// Returns (offset_bits_per_fold, length_bits_per_fold, payload_start).
 fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) {
-    // v3 header: 4 fixed bytes (fold_count, pair_flag, entropy_flag, filter_flag)
-    //            + fold_count ob bytes + fold_count lb bytes
     let payload_start = 4 + 2 * fold_count;
 
     if fold_count == 0 {
-        // No fold fields — payload starts immediately after 4 fixed bytes
         return (vec![], vec![], 4);
     }
 
@@ -193,7 +219,6 @@ fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) 
         }
     }
 
-    // Fallback defaults — header too short or values out of range
     println!(
         "parse_header: fallback to defaults (input.len()={}, fold_count={})",
         input.len(), fold_count
@@ -203,4 +228,4 @@ fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) 
         vec![LENGTH_BITS_DEFAULT; fold_count],
         payload_start,
     )
-          }
+      }

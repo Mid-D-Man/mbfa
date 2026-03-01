@@ -2,19 +2,12 @@
 //! Pre/post compression delta filters.
 //!
 //! Applied to the raw input BEFORE folding, reversed AFTER unfolding.
-//! Converts smooth-varying binary data (PCM audio, BMP pixels, fax bitmaps)
-//! into near-zero residuals that LZ can match at dramatically higher density.
-//!
-//! Detection strategy:
-//!   1. Known magic bytes (WAV, BMP) → structured header parse for exact stride.
-//!   2. Unknown files → empirical trial: apply each stride 1–4, estimate byte
-//!      entropy of the result, pick the winner if it beats passthrough by at
-//!      least EMPIRICAL_MIN_GAIN bits/byte. Text and already-random data never
-//!      pass this threshold so the filter naturally stays off for them.
+//! Converts smooth-varying binary data (PCM audio, BMP pixels) into
+//! near-zero residuals that LZ can match at dramatically higher density.
 //!
 //! Filter flags stored in header byte 3:
 //!   0 = none
-//!   1 = delta stride 1  (generic 8-bit binary / fax bitmap)
+//!   1 = delta stride 1  (generic 8-bit binary)
 //!   2 = delta stride 2  (16-bit mono PCM / 16-bit pixels)
 //!   3 = delta stride 3  (24-bit RGB pixels)
 //!   4 = delta stride 4  (32-bit RGBA / stereo 16-bit PCM)
@@ -25,55 +18,28 @@ pub const FILTER_DELTA2: u8 = 2;
 pub const FILTER_DELTA3: u8 = 3;
 pub const FILTER_DELTA4: u8 = 4;
 
-/// Minimum file size for empirical detection — avoid overhead on tiny inputs.
-const EMPIRICAL_MIN_BYTES: usize = 512;
-
-/// Minimum entropy reduction (bits/byte) required for empirical filter to fire.
-/// 0.30 is conservative — avoids false positives on text and structured data
-/// while reliably catching fax bitmaps (expected reduction ~2–4 bits/byte).
-const EMPIRICAL_MIN_GAIN: f64 = 0.30;
-
-// ── Public API ────────────────────────────────────────────────────────────────
-
 /// Inspect magic bytes and file headers to determine the best delta stride.
-/// Falls back to empirical entropy trial for unknown binary formats.
-/// Returns FILTER_NONE when no beneficial stride is found.
+/// Returns FILTER_NONE for unknown or uncompressible formats.
 pub fn detect_filter(input: &[u8]) -> u8 {
-    if input.len() < 4 { return FILTER_NONE; }
+    if input.len() < 12 { return FILTER_NONE; }
 
-    // ── Known magic: structured header parse ─────────────────────────────────
+    // WAV / RIFF audio
     if &input[0..4] == b"RIFF" && input.len() >= 12 && &input[8..12] == b"WAVE" {
         return detect_wav_stride(input);
     }
+
+    // BMP image
     if &input[0..2] == b"BM" && input.len() >= 30 {
         return detect_bmp_stride(input);
-    }
-
-    // ── Unknown format: empirical entropy trial ───────────────────────────────
-    if input.len() >= EMPIRICAL_MIN_BYTES {
-        return empirical_best_stride(input);
     }
 
     FILTER_NONE
 }
 
-/// Transform input bytes with the chosen filter before compression.
-pub fn apply_filter(input: &[u8], filter: u8) -> Vec<u8> {
-    let stride = filter as usize;
-    if stride == 0 || stride > 4 { return input.to_vec(); }
-    delta_encode(input, stride)
-}
-
-/// Reverse the filter applied during compression.
-pub fn undo_filter(input: &[u8], filter: u8) -> Vec<u8> {
-    let stride = filter as usize;
-    if stride == 0 || stride > 4 { return input.to_vec(); }
-    delta_decode(input, stride)
-}
-
-// ── Known-format detection ────────────────────────────────────────────────────
-
 fn detect_wav_stride(input: &[u8]) -> u8 {
+    // Walk RIFF chunks to find the fmt sub-chunk.
+    // fmt layout (PCM): AudioFormat(2) NumChannels(2) SampleRate(4)
+    //                   ByteRate(4) BlockAlign(2) BitsPerSample(2)
     let mut pos = 12usize;
     while pos + 8 <= input.len() {
         let id        = &input[pos..pos + 4];
@@ -91,18 +57,21 @@ fn detect_wav_stride(input: &[u8]) -> u8 {
                 2 => FILTER_DELTA2,
                 3 => FILTER_DELTA3,
                 4 => FILTER_DELTA4,
-                _ => FILTER_DELTA2,
+                _ => FILTER_DELTA2,   // safe fallback
             };
         }
 
         pos += 8 + chunk_len;
-        if chunk_len % 2 != 0 { pos += 1; }
+        if chunk_len % 2 != 0 { pos += 1; }   // RIFF word-align padding
     }
+
     println!("WAV: fmt chunk not found, falling back to delta2");
     FILTER_DELTA2
 }
 
 fn detect_bmp_stride(input: &[u8]) -> u8 {
+    // BITMAPINFOHEADER: biSize(4) biWidth(4) biHeight(4) biPlanes(2) biBitCount(2) ...
+    // biBitCount is at offset 28 from file start.
     let bpp = u16::from_le_bytes([input[28], input[29]]);
     println!("BMP: {} bpp → delta stride {}", bpp, (bpp as usize / 8).max(1));
     match bpp {
@@ -110,85 +79,39 @@ fn detect_bmp_stride(input: &[u8]) -> u8 {
         16 => FILTER_DELTA2,
         24 => FILTER_DELTA3,
         32 => FILTER_DELTA4,
-        _  => FILTER_DELTA3,
+        _  => FILTER_DELTA3,   // 24-bit is the common fallback
     }
 }
 
-// ── Empirical detection ───────────────────────────────────────────────────────
-
-/// Try delta strides 1–4 on the input, pick the one with lowest byte entropy.
-/// Only returns a non-zero filter if the winner beats passthrough by at least
-/// EMPIRICAL_MIN_GAIN bits/byte. Returns FILTER_NONE otherwise.
-///
-/// Uses Shannon entropy of the byte frequency distribution as a proxy for
-/// compressibility — lower entropy means better Huffman and LZ density.
-/// The full delta is applied to the entire input for accuracy; this is O(4n)
-/// which is fast relative to the LZ scan that follows.
-fn empirical_best_stride(input: &[u8]) -> u8 {
-    let base_entropy = byte_entropy(input);
-
-    let mut best_stride: u8  = FILTER_NONE;
-    let mut best_entropy: f64 = base_entropy;
-
-    for stride in 1u8..=4 {
-        let filtered = delta_encode(input, stride as usize);
-        let h        = byte_entropy(&filtered);
-        if h < best_entropy {
-            best_entropy  = h;
-            best_stride   = stride;
-        }
-    }
-
-    let gain = base_entropy - best_entropy;
-    if gain >= EMPIRICAL_MIN_GAIN {
-        println!(
-            "Empirical filter: stride {} wins (entropy {:.4} → {:.4}, gain {:.4} bits/byte)",
-            best_stride, base_entropy, best_entropy, gain
-        );
-        best_stride
-    } else {
-        if best_stride != FILTER_NONE {
-            println!(
-                "Empirical filter: best stride {} gain {:.4} bits/byte < threshold {:.2} — skipped",
-                best_stride, gain, EMPIRICAL_MIN_GAIN
-            );
-        }
-        FILTER_NONE
-    }
+/// Transform input bytes with the chosen filter before compression.
+pub fn apply_filter(input: &[u8], filter: u8) -> Vec<u8> {
+    let stride = filter as usize;
+    if stride == 0 || stride > 4 { return input.to_vec(); }
+    delta_encode(input, stride)
 }
 
-/// Shannon entropy of the byte frequency distribution, in bits per byte.
-/// H = -sum(p_i * log2(p_i)) over all byte values with non-zero frequency.
-/// Range: 0.0 (single repeated byte) to 8.0 (uniform random).
-fn byte_entropy(data: &[u8]) -> f64 {
-    if data.is_empty() { return 0.0; }
-
-    let mut freq = [0u64; 256];
-    for &b in data { freq[b as usize] += 1; }
-
-    let n = data.len() as f64;
-    freq.iter()
-        .filter(|&&f| f > 0)
-        .map(|&f| {
-            let p = f as f64 / n;
-            -p * p.log2()
-        })
-        .sum()
+/// Reverse the filter applied during compression.
+pub fn undo_filter(input: &[u8], filter: u8) -> Vec<u8> {
+    let stride = filter as usize;
+    if stride == 0 || stride > 4 { return input.to_vec(); }
+    delta_decode(input, stride)
 }
 
 // ── Core delta routines ───────────────────────────────────────────────────────
 
-/// Delta encode: out[i] = input[i].wrapping_sub(input[i - stride]).
+/// Delta encode: out[i] = input[i] - input[i - stride]  (wrapping).
 /// First `stride` bytes are copied unchanged (no prior context).
 fn delta_encode(input: &[u8], stride: usize) -> Vec<u8> {
     let mut out = input.to_vec();
+    // Iterate forwards, reading from `input` (original) so we take plain deltas,
+    // not the accumulated-decoded values — this is the correct LZMA-style delta.
     for i in stride..input.len() {
         out[i] = input[i].wrapping_sub(input[i - stride]);
     }
     out
 }
 
-/// Delta decode: out[i] = encoded[i].wrapping_add(out[i - stride]).
+/// Delta decode: out[i] = encoded[i] + out[i - stride]  (wrapping).
 /// Inverse of delta_encode — iterates forwards, accumulating context.
 fn delta_decode(input: &[u8], stride: usize) -> Vec<u8> {
     let mut out = input.to_vec();
@@ -198,14 +121,12 @@ fn delta_decode(input: &[u8], stride: usize) -> Vec<u8> {
     out
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_all_strides() {
+    fn roundtrip_delta2() {
         let orig: Vec<u8> = (0u8..=255).cycle().take(512).collect();
         for stride in 1u8..=4 {
             let enc = apply_filter(&orig, stride);
@@ -214,60 +135,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empirical_fires_on_binary_runs() {
-        // Simulate fax-like data: long runs of 0x00 and 0xFF.
-        let mut data = Vec::with_capacity(1024);
-        for _ in 0..16 {
-            data.extend_from_slice(&[0x00u8; 32]);
-            data.extend_from_slice(&[0xFFu8; 32]);
-        }
-        // Original entropy: 2 values at 50% each = 1.0 bits/byte.
-        // Delta stride 1: runs become 0x00, transitions become 0xFF or 0x01.
-        // 0x00 dominates heavily → entropy drops well below 1.0.
-        let filter = empirical_best_stride(&data);
-        assert_eq!(filter, FILTER_DELTA1,
-            "expected stride 1 for fax-like data, got {}", filter);
-    }
-
-    #[test]
-    fn empirical_skips_text() {
-        // English-like ASCII text — delta residuals are scattered, entropy stays high.
-        let text = b"the quick brown fox jumps over the lazy dog. \
-                     pack my box with five dozen liquor jugs. \
-                     how vexingly quick daft zebras jump. ";
-        let data: Vec<u8> = text.iter().cycle().take(1024).copied().collect();
-        let filter = empirical_best_stride(&data);
-        assert_eq!(filter, FILTER_NONE,
-            "expected no filter for text, got {}", filter);
-    }
-
-    #[test]
-    fn empirical_skips_random() {
-        // Random bytes — no delta stride helps, entropy stays near 8.0.
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let data: Vec<u8> = (0u64..1024)
-            .map(|i| { let mut h = DefaultHasher::new(); i.hash(&mut h); h.finish() as u8 })
-            .collect();
-        let filter = empirical_best_stride(&data);
-        assert_eq!(filter, FILTER_NONE,
-            "expected no filter for random data, got {}", filter);
-    }
-
-    #[test]
+#[test]
     fn smooth_gradient_compresses_well() {
+        // Simulate a smooth 24-bit BMP gradient (linear ramp across all bytes).
+        // With delta stride=3, each residual = input[i] - input[i-3].
+        // For a linear ramp, every residual is the same constant value.
+        // That IS the property we want — a constant residual field is one giant
+        // LZ back-reference chain. Not near-zero, but near-constant.
         let pixels: Vec<u8> = (0..300usize).map(|i| (i % 256) as u8).collect();
         let enc = delta_encode(&pixels, 3);
         let residuals = &enc[3..];
+
+        // Count how many residuals share the dominant value
         let mut counts = [0u32; 256];
         for &b in residuals { counts[b as usize] += 1; }
-        let max_count    = *counts.iter().max().unwrap();
+        let max_count = *counts.iter().max().unwrap();
         let dominant_pct = max_count as f64 / residuals.len() as f64;
+
+        // A constant-delta gradient should produce >80% identical residuals
         assert!(
             dominant_pct > 0.8,
             "residuals not constant enough: dominant value covers only {:.1}%",
             dominant_pct * 100.0
         );
-    }
-            }
+                             }
+                }

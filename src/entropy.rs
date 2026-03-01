@@ -29,7 +29,7 @@ pub type DecodeTable = HashMap<(u32, u32), u32>;
 //
 // Table overhead: 4 extra fmt0 entries = 12 bytes. Break-even < 0.1% hit rate.
 
-pub const NUM_SLOTS:         usize = 4;
+pub const NUM_SLOTS:         usize = 8;
 pub const SLOT_SYMBOL_BASE:  u32   = 1000;
 
 /// Fixed-capacity LRU cache of recently-used BACKREF offsets. MRU at index 0.

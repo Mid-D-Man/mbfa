@@ -18,6 +18,16 @@
 //!  lb capped at ENTROPY_SAFE_LENGTH_BITS. This recovers the entropy path for
 //!  files like Source_1MB without affecting files like Repetitive_2MB whose
 //!  fold-1 output is far too small to hit the entropy threshold.
+//!
+//!  Lazy matching (two-step):
+//!  Before committing a BACKREF at position i, the encoder peeks ahead:
+//!    1-step: if i+1 yields a strictly longer match, emit LIT[i] and defer.
+//!    2-step: for short matches (≤ LAZY_SHORT_LEN), also check i+2. If i+2
+//!            yields a substantially longer match (> best_len + 2), defer by
+//!            emitting LIT[i]. The cascade naturally reaches i+2 on the next
+//!            iteration via 1-step lazy at i+1.
+//!  This catches the missed case where i+1's match is shorter than i's but
+//!  i+2's match is much longer — greedy commits at i and never sees i+2.
 
 use crate::opcode::{
     Token, LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits,
@@ -31,8 +41,6 @@ const BASELINE_OFFSET_BITS: u32 = 17;
 const BASELINE_LENGTH_BITS: u32 = LENGTH_BITS_MIN; // 8
 
 // Maximum length_bits that keeps entropy symbol values within u16.
-// sym = 255 + length; max u16 = 65535; so max safe length = 65280 = 2^15 + 32512... 
-// In practice length_bits=15 gives max_len=32767, sym_max=33022 — safely within u16.
 const ENTROPY_SAFE_LENGTH_BITS: u32 = 15;
 
 // Mirrors entropy::ENTROPY_MIN_BYTES — minimum fold-1 output bytes for entropy
@@ -42,6 +50,12 @@ const ENTROPY_MIN_BYTES_FOR_SCAN: usize = 400;
 const HASH_SIZE:   usize = 1 << 16;
 const HASH_MASK:   usize = HASH_SIZE - 1;
 const CHAIN_LIMIT: usize = 1024;
+
+// Two-step lazy matching threshold.
+// Only attempt the 2-step lookahead for matches shorter than or equal to this.
+// Long matches are almost always the right greedy choice, and the extra
+// find_match calls are wasteful when best_len is already high.
+const LAZY_SHORT_LEN: u32 = 6;
 
 #[inline]
 fn hash3(input: &[u8], pos: usize) -> usize {
@@ -55,8 +69,12 @@ fn hash3(input: &[u8], pos: usize) -> usize {
 /// Scan input using a rolling window of `(1 << offset_bits) - 1` bytes.
 /// Memory usage is O(min(window_size, n)) — safe for any input size.
 ///
-/// Uses one-step lazy matching: before committing to a BACKREF at i,
-/// checks if i+1 yields a strictly longer match. Recovers ~2-5pp on text.
+/// Uses two-step lazy matching: before committing to a BACKREF at i,
+/// checks if i+1 yields a strictly longer match (1-step), and for short
+/// matches also checks if i+2 yields a substantially longer match (2-step).
+/// The 2-step check defers via emitting LIT[i]; the cascade at i+1 then
+/// naturally defers again to i+2 via 1-step lazy. Recovers ~2-5pp on text
+/// and source code vs pure greedy.
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     let max_off = max_offset(offset_bits);
     let max_len = max_length(length_bits);
@@ -82,18 +100,45 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
             && backref_bits < (best_len as u32 * LIT_TOTAL_BITS);
 
         if backref_worthwhile {
-            // Lazy matching: peek one position ahead before committing.
-            let lazy_better = if i + 1 < n {
+            // Lazy matching: check ahead before committing.
+            //
+            // 1-step (unchanged): if i+1 has a strictly longer match, defer.
+            //
+            // 2-step (new): for short matches (≤ LAZY_SHORT_LEN), also probe i+2.
+            // If i+2 has a substantially longer match (> best_len + 2), defer by
+            // emitting LIT[i]. On the next iteration (at i+1), the 1-step check
+            // will probe i+2 and defer again if appropriate — naturally cascading
+            // to the better match without requiring explicit 2-literal emission here.
+            //
+            // Threshold best_len + 2: each deferred literal costs LIT_TOTAL_BITS=10
+            // bits. For the cascade to reach i+2, we'll emit 1 extra literal (10 bits
+            // at i) and then possibly another at i+1. Requiring len2 > best_len + 2
+            // ensures the longer match at i+2 covers at least 2 extra bytes (≥20 bits
+            // savings) beyond what we'd have gotten committing at i.
+            let lazy = if i + 1 < n {
                 let h1 = hash3(input, i + 1);
-                let (_, lazy_len) =
+                let (_, len1) =
                     find_match(input, i + 1, h1, &head, &prev, max_off, max_len, window_size);
-                lazy_len > best_len
+
+                if len1 > best_len {
+                    // Standard 1-step lazy: i+1 is strictly better.
+                    true
+                } else if best_len <= LAZY_SHORT_LEN && i + 2 < n {
+                    // 2-step lazy: i+1 isn't better, but maybe i+2 is much better.
+                    let h2 = hash3(input, i + 2);
+                    let (_, len2) =
+                        find_match(input, i + 2, h2, &head, &prev, max_off, max_len, window_size);
+                    len2 > best_len + 2
+                } else {
+                    false
+                }
             } else {
                 false
             };
 
-            if lazy_better {
-                // Emit literal, insert i into chain, let next iter find longer match.
+            if lazy {
+                // Emit literal at i, insert into chain, advance.
+                // The cascade will re-evaluate i+1 on the next iteration.
                 prev[i % window_size] = head[h];
                 head[h] = i as u32;
                 tokens.push(Token::Lit { byte: input[i] });
@@ -190,10 +235,7 @@ fn stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
 ///
 /// 3. If wide scan selects lb > ENTROPY_SAFE_LENGTH_BITS (15) AND the
 ///    fold-1 output would be large enough for entropy to fire, run a third
-///    scan with lb capped at ENTROPY_SAFE_LENGTH_BITS. This recovers the
-///    entropy path for repetitive-but-large files (Source_1MB) without
-///    affecting truly tiny outputs (Repetitive_2MB at 125B which is well
-///    below the 400B entropy threshold).
+///    scan with lb capped at ENTROPY_SAFE_LENGTH_BITS.
 ///
 /// Returns whichever scan produces the lowest raw token stream bit cost
 /// among the eligible candidates. Ties go to baseline (proven safe).
@@ -209,20 +251,9 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     let wide_cost   = stream_bit_cost(&wide_tokens, wide_ob, wide_lb);
 
     // ── Entropy-safety cap ────────────────────────────────────────────────────
-    // If the wide scan wants lb > 15 (entropy-safe limit), check whether
-    // the fold-1 output would be large enough for entropy to fire.
-    // If entropy WOULD fire on the uncapped stream, the uncapped tokens
-    // cannot be entropy-coded, costing us the ~25-35% entropy saving.
-    // In that case, re-scan with lb capped at ENTROPY_SAFE_LENGTH_BITS.
-    //
-    // Files where lb > 15 is genuinely beneficial (Repetitive_2MB) produce
-    // tiny fold-1 outputs (125B) that never reach the entropy threshold,
-    // so they are unaffected by this branch.
     if wide_lb > ENTROPY_SAFE_LENGTH_BITS {
         let wide_output_bytes = (wide_cost as usize + 7) / 8;
         if wide_output_bytes >= ENTROPY_MIN_BYTES_FOR_SCAN {
-            // Entropy would fire on this stream, but lb > 15 blocks it.
-            // Re-scan with entropy-safe lb and same ob.
             let capped_tokens = scan(input, wide_ob, ENTROPY_SAFE_LENGTH_BITS);
             let capped_cost   = stream_bit_cost(&capped_tokens, wide_ob, ENTROPY_SAFE_LENGTH_BITS);
 
@@ -233,8 +264,6 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
                 ENTROPY_SAFE_LENGTH_BITS, capped_cost, wide_cost
             );
 
-            // Pick between capped and baseline; wide (uncapped) is excluded
-            // because entropy won't fire on it.
             return if capped_cost < baseline_cost {
                 (capped_tokens, wide_ob, ENTROPY_SAFE_LENGTH_BITS)
             } else {
@@ -254,4 +283,4 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     } else {
         (baseline_tokens, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS)
     }
-    }
+        }

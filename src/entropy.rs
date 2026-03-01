@@ -1,7 +1,7 @@
 // src/entropy.rs — pre-slot baseline + v4 byte-category literal contexts
-//                + v2/v3 slotted (recent-offset LRU cache, entropy_flag 5/6)
+// + v5 (v2+slots) / v6 (v3+slots) recent-offset slot reuse
 
-use std::collections::{HashMap, BinaryHeap, VecDeque};
+use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
 use bitstream_io::{BitWriter, BitReader, BigEndian, BitWrite, BitRead};
 use crate::opcode::Token;
@@ -9,19 +9,68 @@ use crate::opcode::Token;
 pub const ENTROPY_MIN_BYTES:    usize = 400;
 pub const ENTROPY_V3_MIN_BYTES: usize = 1000;
 
-// ── Slot-reuse constants ──────────────────────────────────────────────────────
-/// Number of recent-offset slots in the LRU cache.
-pub const NUM_SLOTS: usize = 4;
-/// Offset Huffman symbol base for slot references — must exceed max bucket (43).
-/// 1000 is unambiguous: no collision with buckets (0-43) or lit/length syms.
-pub const SLOT_SYMBOL_BASE: u32 = 1000;
-
 const SYM_END: u32 = 256;
 #[inline] fn sym_from_length(len: u32) -> u32 { 255 + len }
 #[inline] fn length_from_sym(sym: u32)  -> u32 { sym - 255 }
 
 pub type EncodeTable = HashMap<u32, (u32, u32)>;
 pub type DecodeTable = HashMap<(u32, u32), u32>;
+
+// ── Recent-offset slot reuse ──────────────────────────────────────────────────
+//
+// Maintains an LRU cache of the 4 most recently used BACKREF offsets.
+// On a cache hit the offset symbol emitted into the *offset* Huffman table is
+// SLOT_SYMBOL_BASE + pre_move_slot_index (0–3), which costs only the short
+// Huffman code (≈2–3 bits) with zero extra raw bits.
+// On a miss the normal bucket + extra_bits path is used, exactly as in v2/v3.
+//
+// Slot symbols are unambiguously distinct from bucket symbols:
+//   max bucket value = 47  (ob=24)   SLOT_SYMBOL_BASE = 1000  →  no collision.
+//
+// Table overhead: 4 extra fmt0 entries = 12 bytes. Break-even < 0.1% hit rate.
+
+pub const NUM_SLOTS:         usize = 4;
+pub const SLOT_SYMBOL_BASE:  u32   = 1000;
+
+/// Fixed-capacity LRU cache of recently-used BACKREF offsets. MRU at index 0.
+pub struct OffsetSlots {
+    slots: [u32; NUM_SLOTS],
+    count: usize,
+}
+
+impl OffsetSlots {
+    pub fn new() -> Self { Self { slots: [0; NUM_SLOTS], count: 0 } }
+
+    /// Access `offset`.
+    /// Returns `Some(pre_move_index)` on cache hit (moves offset to front).
+    /// Returns `None`              on cache miss  (inserts offset at front).
+    /// Both paths update cache state identically to the decode path.
+    pub fn access(&mut self, offset: u32) -> Option<usize> {
+        let found = (0..self.count).find(|&i| self.slots[i] == offset);
+        if let Some(idx) = found {
+            // Move to front — preserve the pre-move index for the caller.
+            for j in (1..=idx).rev() { self.slots[j] = self.slots[j - 1]; }
+            self.slots[0] = offset;
+            Some(idx)
+        } else {
+            let new_count = (self.count + 1).min(NUM_SLOTS);
+            for j in (1..new_count).rev() { self.slots[j] = self.slots[j - 1]; }
+            self.slots[0] = offset;
+            self.count     = new_count;
+            None
+        }
+    }
+
+    /// Decoder path: read the offset stored in `slot_idx`, then move it to front.
+    /// Mirrors exactly what `access(slots[slot_idx])` would do on the encoder side.
+    pub fn access_by_slot(&mut self, slot_idx: usize) -> Option<u32> {
+        if slot_idx >= self.count { return None; }
+        let offset = self.slots[slot_idx];
+        for j in (1..=slot_idx).rev() { self.slots[j] = self.slots[j - 1]; }
+        self.slots[0] = offset;
+        Some(offset)
+    }
+}
 
 // ── Offset bucket scheme ──────────────────────────────────────────────────────
 
@@ -51,19 +100,6 @@ pub fn bucket_extra_bits(bucket: u32) -> u32 {
     if bucket < 4 { 0 } else { (bucket - 2) >> 1 }
 }
 
-// ── Slot cache helper (shared by all slotted encode/decode paths) ─────────────
-
-/// LRU update: move `offset` to front of cache.
-/// Called on every BACKREF (hit or miss) — must be identical in encoder and decoder.
-fn update_slot_cache(cache: &mut VecDeque<u32>, offset: u32) {
-    if cache.front() == Some(&offset) { return; }
-    cache.retain(|&o| o != offset);
-    cache.push_front(offset);
-    if cache.len() > NUM_SLOTS {
-        cache.pop_back();
-    }
-}
-
 // ── Frequency counting ────────────────────────────────────────────────────────
 
 fn count_joint_freq(tokens: &[Token]) -> HashMap<u32, u64> {
@@ -90,21 +126,20 @@ pub fn count_offset_bucket_freq(tokens: &[Token]) -> HashMap<u32, u64> {
     freq
 }
 
-/// Like count_offset_bucket_freq but includes SLOT_SYMBOL_BASE+k symbols
-/// for offsets that would hit the LRU cache at slot k.
+/// Like `count_offset_bucket_freq` but intercepts slot hits.
+/// Simulates the exact same LRU cache traversal that the encoder will perform,
+/// so the resulting frequencies are accurate for Huffman table construction.
 pub fn count_offset_bucket_freq_slotted(tokens: &[Token]) -> HashMap<u32, u64> {
-    let mut freq: HashMap<u32, u64> = HashMap::new();
-    let mut cache: VecDeque<u32> = VecDeque::with_capacity(NUM_SLOTS + 1);
-
+    let mut freq  = HashMap::new();
+    let mut slots = OffsetSlots::new();
     for t in tokens {
         if let Token::Backref { offset, .. } = t {
-            if let Some(slot) = cache.iter().position(|&o| o == *offset) {
-                *freq.entry(SLOT_SYMBOL_BASE + slot as u32).or_insert(0) += 1;
+            if let Some(slot_idx) = slots.access(*offset) {
+                *freq.entry(SLOT_SYMBOL_BASE + slot_idx as u32).or_insert(0) += 1;
             } else {
                 let (bucket, _, _) = offset_to_bucket(*offset);
                 *freq.entry(bucket).or_insert(0) += 1;
             }
-            update_slot_cache(&mut cache, *offset);
         }
     }
     freq
@@ -223,7 +258,8 @@ pub fn build_offset_encode_table(tokens: &[Token]) -> Option<EncodeTable> {
     Some(canonical_codes_from_lengths(&assign_code_lengths(&freq)))
 }
 
-/// Build offset Huffman table that includes slot symbols (SLOT_SYMBOL_BASE+k).
+/// Build offset Huffman table that includes slot symbols (1000–1003).
+/// Slot symbols only appear if the file has BACKREFs; returns None otherwise.
 pub fn build_offset_encode_table_slotted(tokens: &[Token]) -> Option<EncodeTable> {
     let freq = count_offset_bucket_freq_slotted(tokens);
     if freq.is_empty() { return None; }
@@ -251,12 +287,11 @@ pub fn serialize_table(table: &EncodeTable) -> Vec<u8> {
     let f1 = fmt1_range(table);
 
     let has_bytes   = table.keys().any(|&s| s <= 255);
-    let has_lengths = table.keys().any(|&s| s >= 257 && s < SLOT_SYMBOL_BASE);
+    let has_lengths = table.keys().any(|&s| s >= 257);
 
     let mut best = if f1.len() < f0.len() { f1 } else { f0 };
 
-    // fmt2 only makes sense for tables without slot symbols (lit/length tables)
-    if has_bytes && has_lengths && !table.keys().any(|&s| s >= SLOT_SYMBOL_BASE) {
+    if has_bytes && has_lengths {
         let max_len_val = table.keys()
             .filter(|&&s| s >= 257)
             .map(|&s| s - 255)
@@ -288,12 +323,6 @@ fn fmt0_explicit(table: &EncodeTable) -> Vec<u8> {
 fn fmt1_range(table: &EncodeTable) -> Vec<u8> {
     let min_sym = *table.keys().min().unwrap();
     let max_sym = *table.keys().max().unwrap();
-    // Don't use fmt1 if the range would be huge (e.g. slot symbols at 1000+)
-    let range = (max_sym - min_sym + 1) as usize;
-    if range > 512 {
-        // Return something big so fmt0 wins
-        return vec![0xFF; range + 5];
-    }
     let mut out = vec![0x01u8];
     out.extend_from_slice(&(min_sym as u16).to_le_bytes());
     out.extend_from_slice(&(max_sym as u16).to_le_bytes());
@@ -571,114 +600,6 @@ pub fn read_tokens_joint_v2(
     Ok(tokens)
 }
 
-// ── v2-slotted encode/decode (entropy_flag = 5) ───────────────────────────────
-//
-// Identical to v2 except the offset Huffman table also contains slot symbols
-// (SLOT_SYMBOL_BASE + k for k in 0..NUM_SLOTS). Both encoder and decoder
-// maintain an identical LRU cache of the 4 most-recently-used offsets.
-// A cache hit emits just the Huffman code for the slot symbol (no extra bits).
-// A cache miss emits the bucket Huffman code + extra bits as in v2.
-
-pub fn write_tokens_joint_v2_slotted(
-    tokens:       &[Token],
-    lit_table:    &EncodeTable,
-    offset_table: &EncodeTable,
-) -> std::io::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut cache: VecDeque<u32> = VecDeque::with_capacity(NUM_SLOTS + 1);
-    {
-        let mut w = BitWriter::endian(&mut output, BigEndian);
-        for token in tokens {
-            match token {
-                Token::Lit { byte } => {
-                    let &(code, len) = lit_table.get(&(*byte as u32)).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v2s lit sym missing")
-                    })?;
-                    w.write(len, code)?;
-                }
-                Token::Backref { offset, length } => {
-                    let sym = sym_from_length(*length);
-                    let &(code, len) = lit_table.get(&sym).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v2s length sym {} missing", sym))
-                    })?;
-                    w.write(len, code)?;
-
-                    let maybe_slot = cache.iter().position(|&o| o == *offset);
-                    if let Some(slot) = maybe_slot {
-                        let slot_sym = SLOT_SYMBOL_BASE + slot as u32;
-                        let &(bcode, blen) = offset_table.get(&slot_sym).ok_or_else(|| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidData,
-                                format!("v2s slot sym {} missing", slot_sym))
-                        })?;
-                        w.write(blen, bcode)?;
-                        // No extra bits for slot hits
-                    } else {
-                        let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
-                        let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidData,
-                                format!("v2s offset bucket {} missing", bucket))
-                        })?;
-                        w.write(blen, bcode)?;
-                        if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
-                    }
-                    update_slot_cache(&mut cache, *offset);
-                }
-                Token::End => {
-                    let &(code, len) = lit_table.get(&SYM_END).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v2s END sym missing")
-                    })?;
-                    w.write(len, code)?;
-                }
-            }
-        }
-        w.byte_align()?;
-    }
-    Ok(output)
-}
-
-pub fn read_tokens_joint_v2_slotted(
-    input:         &[u8],
-    lit_dtable:    &DecodeTable,
-    offset_dtable: &DecodeTable,
-) -> std::io::Result<Vec<Token>> {
-    let lit_max    = lit_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
-    let offset_max = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
-    let mut tokens = Vec::new();
-    let mut r      = BitReader::endian(std::io::Cursor::new(input), BigEndian);
-    let mut cache: VecDeque<u32> = VecDeque::with_capacity(NUM_SLOTS + 1);
-
-    loop {
-        let sym = match read_huffman_sym(&mut r, lit_dtable, lit_max) {
-            Ok(s)  => s,
-            Err(_) => break,
-        };
-        if sym < 256 {
-            tokens.push(Token::Lit { byte: sym as u8 });
-        } else if sym == SYM_END {
-            tokens.push(Token::End);
-            break;
-        } else {
-            let length = length_from_sym(sym);
-            let offset_sym = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
-            let offset = if offset_sym >= SLOT_SYMBOL_BASE {
-                let slot = (offset_sym - SLOT_SYMBOL_BASE) as usize;
-                *cache.get(slot).ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData,
-                        format!("v2s slot {} out of range (cache len={})", slot, cache.len()))
-                })?
-            } else {
-                let extra_cnt = bucket_extra_bits(offset_sym);
-                let extra_val = if extra_cnt > 0 { r.read::<u32>(extra_cnt)? } else { 0 };
-                bucket_to_offset(offset_sym, extra_val)
-            };
-            tokens.push(Token::Backref { offset, length });
-            update_slot_cache(&mut cache, offset);
-        }
-    }
-    Ok(tokens)
-}
-
 // ── v3 encode/decode ──────────────────────────────────────────────────────────
 
 pub fn write_tokens_joint_v3(
@@ -771,124 +692,6 @@ pub fn read_tokens_joint_v3(
     Ok(tokens)
 }
 
-// ── v3-slotted encode/decode (entropy_flag = 6) ───────────────────────────────
-//
-// Two-context lit/length tables (as in v3) plus slot-aware offset table.
-// The slot cache state is maintained independently of the context selection.
-
-pub fn write_tokens_joint_v3_slotted(
-    tokens:       &[Token],
-    lit_table0:   &EncodeTable,
-    lit_table1:   &EncodeTable,
-    offset_table: &EncodeTable,
-) -> std::io::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut cache: VecDeque<u32> = VecDeque::with_capacity(NUM_SLOTS + 1);
-    {
-        let mut w = BitWriter::endian(&mut output, BigEndian);
-        let mut after_br = false;
-
-        for token in tokens {
-            let lt = if after_br { lit_table1 } else { lit_table0 };
-            match token {
-                Token::Lit { byte } => {
-                    let &(code, len) = lt.get(&(*byte as u32)).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v3s lit byte {} missing ctx={}", byte, after_br as u8))
-                    })?;
-                    w.write(len, code)?;
-                    after_br = false;
-                }
-                Token::Backref { offset, length } => {
-                    let sym = sym_from_length(*length);
-                    let &(code, len) = lt.get(&sym).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v3s length sym {} missing ctx={}", sym, after_br as u8))
-                    })?;
-                    w.write(len, code)?;
-
-                    let maybe_slot = cache.iter().position(|&o| o == *offset);
-                    if let Some(slot) = maybe_slot {
-                        let slot_sym = SLOT_SYMBOL_BASE + slot as u32;
-                        let &(bcode, blen) = offset_table.get(&slot_sym).ok_or_else(|| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidData,
-                                format!("v3s slot sym {} missing", slot_sym))
-                        })?;
-                        w.write(blen, bcode)?;
-                    } else {
-                        let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
-                        let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidData,
-                                format!("v3s offset bucket {} missing", bucket))
-                        })?;
-                        w.write(blen, bcode)?;
-                        if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
-                    }
-                    update_slot_cache(&mut cache, *offset);
-                    after_br = true;
-                }
-                Token::End => {
-                    let &(code, len) = lt.get(&SYM_END).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v3s END sym missing ctx={}", after_br as u8))
-                    })?;
-                    w.write(len, code)?;
-                }
-            }
-        }
-        w.byte_align()?;
-    }
-    Ok(output)
-}
-
-pub fn read_tokens_joint_v3_slotted(
-    input:         &[u8],
-    lit_dtable0:   &DecodeTable,
-    lit_dtable1:   &DecodeTable,
-    offset_dtable: &DecodeTable,
-) -> std::io::Result<Vec<Token>> {
-    let lit_max0   = lit_dtable0.keys().map(|&(_, l)| l).max().unwrap_or(32);
-    let lit_max1   = lit_dtable1.keys().map(|&(_, l)| l).max().unwrap_or(32);
-    let offset_max = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
-    let mut tokens   = Vec::new();
-    let mut r        = BitReader::endian(std::io::Cursor::new(input), BigEndian);
-    let mut cache: VecDeque<u32> = VecDeque::with_capacity(NUM_SLOTS + 1);
-    let mut after_br = false;
-
-    loop {
-        let (dt, ml) = if after_br { (lit_dtable1, lit_max1) } else { (lit_dtable0, lit_max0) };
-        let sym = match read_huffman_sym(&mut r, dt, ml) {
-            Ok(s)  => s,
-            Err(_) => break,
-        };
-        if sym < 256 {
-            tokens.push(Token::Lit { byte: sym as u8 });
-            after_br = false;
-        } else if sym == SYM_END {
-            tokens.push(Token::End);
-            break;
-        } else {
-            let length = length_from_sym(sym);
-            let offset_sym = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
-            let offset = if offset_sym >= SLOT_SYMBOL_BASE {
-                let slot = (offset_sym - SLOT_SYMBOL_BASE) as usize;
-                *cache.get(slot).ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData,
-                        format!("v3s slot {} out of range (cache len={})", slot, cache.len()))
-                })?
-            } else {
-                let extra_cnt = bucket_extra_bits(offset_sym);
-                let extra_val = if extra_cnt > 0 { r.read::<u32>(extra_cnt)? } else { 0 };
-                bucket_to_offset(offset_sym, extra_val)
-            };
-            tokens.push(Token::Backref { offset, length });
-            update_slot_cache(&mut cache, offset);
-            after_br = true;
-        }
-    }
-    Ok(tokens)
-}
-
 // ── v4 byte-category literal contexts ────────────────────────────────────────
 
 #[inline]
@@ -941,7 +744,6 @@ fn count_joint_freq_v4(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32
 
 pub fn build_encode_tables_v4(tokens: &[Token]) -> Option<([EncodeTable; 8], EncodeTable)> {
     let (lit_freqs, offset_freq) = count_joint_freq_v4(tokens);
-
     let has_lits = lit_freqs.iter().any(|f| !f.is_empty());
     if !has_lits { return None; }
 
@@ -1071,6 +873,240 @@ pub fn read_tokens_joint_v4(
     Ok(tokens)
 }
 
+// ── v5: v2 + recent-offset slot reuse ────────────────────────────────────────
+//
+// entropy_flag = 5
+// Header: [lit_table][offset_table_with_slots][bitstream]
+// Offset table contains both bucket symbols (0–47) and slot symbols (1000–1003).
+// On a cache hit: emits slot symbol (Huffman only, no extra raw bits).
+// On a cache miss: emits bucket symbol + extra raw bits (same as v2).
+// LRU cache state is identical on encoder and decoder because they process
+// tokens in the same order and make the same hit/miss decisions.
+
+pub fn write_tokens_joint_v2_slotted(
+    tokens:       &[Token],
+    lit_table:    &EncodeTable,
+    offset_table: &EncodeTable,   // includes slot symbols 1000–1003
+) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    {
+        let mut w     = BitWriter::endian(&mut output, BigEndian);
+        let mut slots = OffsetSlots::new();
+
+        for token in tokens {
+            match token {
+                Token::Lit { byte } => {
+                    let &(code, len) = lit_table.get(&(*byte as u32)).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v5 lit sym missing")
+                    })?;
+                    w.write(len, code)?;
+                }
+                Token::Backref { offset, length } => {
+                    // Length symbol
+                    let sym = sym_from_length(*length);
+                    let &(code, len) = lit_table.get(&sym).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v5 length sym {} missing", sym))
+                    })?;
+                    w.write(len, code)?;
+
+                    // Offset: slot hit or bucket miss
+                    if let Some(slot_idx) = slots.access(*offset) {
+                        let slot_sym = SLOT_SYMBOL_BASE + slot_idx as u32;
+                        let &(scode, slen) = offset_table.get(&slot_sym).ok_or_else(|| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData,
+                                format!("v5 slot sym {} missing", slot_sym))
+                        })?;
+                        w.write(slen, scode)?;
+                        // No extra bits — slot lookup resolves the full offset
+                    } else {
+                        let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
+                        let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData,
+                                format!("v5 offset bucket {} missing", bucket))
+                        })?;
+                        w.write(blen, bcode)?;
+                        if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
+                    }
+                }
+                Token::End => {
+                    let &(code, len) = lit_table.get(&SYM_END).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v5 END sym missing")
+                    })?;
+                    w.write(len, code)?;
+                }
+            }
+        }
+        w.byte_align()?;
+    }
+    Ok(output)
+}
+
+pub fn read_tokens_joint_v2_slotted(
+    input:         &[u8],
+    lit_dtable:    &DecodeTable,
+    offset_dtable: &DecodeTable,
+) -> std::io::Result<Vec<Token>> {
+    let lit_max    = lit_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
+    let offset_max = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
+    let mut tokens = Vec::new();
+    let mut r      = BitReader::endian(std::io::Cursor::new(input), BigEndian);
+    let mut slots  = OffsetSlots::new();
+
+    loop {
+        let sym = match read_huffman_sym(&mut r, lit_dtable, lit_max) {
+            Ok(s)  => s,
+            Err(_) => break,
+        };
+        if sym < 256 {
+            tokens.push(Token::Lit { byte: sym as u8 });
+        } else if sym == SYM_END {
+            tokens.push(Token::End);
+            break;
+        } else {
+            let length = length_from_sym(sym);
+            let off_sym = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
+
+            let offset = if off_sym >= SLOT_SYMBOL_BASE {
+                // Slot hit path
+                let slot_idx = (off_sym - SLOT_SYMBOL_BASE) as usize;
+                slots.access_by_slot(slot_idx).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData,
+                        format!("v5 invalid slot index {}", slot_idx))
+                })?
+            } else {
+                // Bucket miss path
+                let extra_cnt = bucket_extra_bits(off_sym);
+                let extra_val = if extra_cnt > 0 { r.read::<u32>(extra_cnt)? } else { 0 };
+                let off = bucket_to_offset(off_sym, extra_val);
+                slots.access(off);  // insert into cache; return value ignored (always None here)
+                off
+            };
+            tokens.push(Token::Backref { offset, length });
+        }
+    }
+    Ok(tokens)
+}
+
+// ── v6: v3 + recent-offset slot reuse ────────────────────────────────────────
+//
+// entropy_flag = 6
+// Header: [lit_table0][lit_table1][offset_table_with_slots][bitstream]
+// Combines v3's two-context literal Huffman with v5's slot reuse on offsets.
+
+pub fn write_tokens_joint_v3_slotted(
+    tokens:       &[Token],
+    lit_table0:   &EncodeTable,
+    lit_table1:   &EncodeTable,
+    offset_table: &EncodeTable,   // includes slot symbols 1000–1003
+) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    {
+        let mut w        = BitWriter::endian(&mut output, BigEndian);
+        let mut after_br = false;
+        let mut slots    = OffsetSlots::new();
+
+        for token in tokens {
+            let lt = if after_br { lit_table1 } else { lit_table0 };
+            match token {
+                Token::Lit { byte } => {
+                    let &(code, len) = lt.get(&(*byte as u32)).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v6 lit sym missing ctx={}", after_br as u8))
+                    })?;
+                    w.write(len, code)?;
+                    after_br = false;
+                }
+                Token::Backref { offset, length } => {
+                    let sym = sym_from_length(*length);
+                    let &(code, len) = lt.get(&sym).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v6 length sym {} missing ctx={}", sym, after_br as u8))
+                    })?;
+                    w.write(len, code)?;
+
+                    if let Some(slot_idx) = slots.access(*offset) {
+                        let slot_sym = SLOT_SYMBOL_BASE + slot_idx as u32;
+                        let &(scode, slen) = offset_table.get(&slot_sym).ok_or_else(|| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData,
+                                format!("v6 slot sym {} missing", slot_sym))
+                        })?;
+                        w.write(slen, scode)?;
+                    } else {
+                        let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
+                        let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData,
+                                format!("v6 offset bucket {} missing", bucket))
+                        })?;
+                        w.write(blen, bcode)?;
+                        if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
+                    }
+                    after_br = true;
+                }
+                Token::End => {
+                    let &(code, len) = lt.get(&SYM_END).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v6 END sym missing ctx={}", after_br as u8))
+                    })?;
+                    w.write(len, code)?;
+                }
+            }
+        }
+        w.byte_align()?;
+    }
+    Ok(output)
+}
+
+pub fn read_tokens_joint_v3_slotted(
+    input:         &[u8],
+    lit_dtable0:   &DecodeTable,
+    lit_dtable1:   &DecodeTable,
+    offset_dtable: &DecodeTable,
+) -> std::io::Result<Vec<Token>> {
+    let lit_max0   = lit_dtable0.keys().map(|&(_, l)| l).max().unwrap_or(32);
+    let lit_max1   = lit_dtable1.keys().map(|&(_, l)| l).max().unwrap_or(32);
+    let offset_max = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
+    let mut tokens   = Vec::new();
+    let mut r        = BitReader::endian(std::io::Cursor::new(input), BigEndian);
+    let mut after_br = false;
+    let mut slots    = OffsetSlots::new();
+
+    loop {
+        let (dt, ml) = if after_br { (lit_dtable1, lit_max1) } else { (lit_dtable0, lit_max0) };
+        let sym = match read_huffman_sym(&mut r, dt, ml) {
+            Ok(s)  => s,
+            Err(_) => break,
+        };
+        if sym < 256 {
+            tokens.push(Token::Lit { byte: sym as u8 });
+            after_br = false;
+        } else if sym == SYM_END {
+            tokens.push(Token::End);
+            break;
+        } else {
+            let length   = length_from_sym(sym);
+            let off_sym  = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
+
+            let offset = if off_sym >= SLOT_SYMBOL_BASE {
+                let slot_idx = (off_sym - SLOT_SYMBOL_BASE) as usize;
+                slots.access_by_slot(slot_idx).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData,
+                        format!("v6 invalid slot index {}", slot_idx))
+                })?
+            } else {
+                let extra_cnt = bucket_extra_bits(off_sym);
+                let extra_val = if extra_cnt > 0 { r.read::<u32>(extra_cnt)? } else { 0 };
+                let off = bucket_to_offset(off_sym, extra_val);
+                slots.access(off);
+                off
+            };
+            tokens.push(Token::Backref { offset, length });
+            after_br = true;
+        }
+    }
+    Ok(tokens)
+}
+
 // ── Shared Huffman reader ─────────────────────────────────────────────────────
 
 fn read_huffman_sym<R: std::io::Read>(
@@ -1088,4 +1124,4 @@ fn read_huffman_sym<R: std::io::Read>(
         std::io::ErrorKind::InvalidData,
         format!("invalid huffman symbol after {} bits", max_len),
     ))
-            }
+    }

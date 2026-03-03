@@ -13,8 +13,9 @@
 //!   2 = v2 joint Huffman + offset bucket Huffman
 //!   3 = v3 two-context Huffman + shared offset buckets
 //!   4 = v4 eight-context (byte-category) Huffman + shared offset buckets
-//!   5 = v5 v2 + 4-slot LRU offset reuse
-//!   6 = v6 v3 + 4-slot LRU offset reuse
+//!   5 = v5 v2 + 8-slot LRU offset reuse
+//!   6 = v6 v3 + 8-slot LRU offset reuse
+//!   7 = v7 rANS joint lit/length + offset bucket (fractional bits)
 //!
 //! filter_flag values:
 //!   0 = none
@@ -22,20 +23,27 @@
 
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
-use crate::pairing::pair_decode;
 use crate::entropy;
 use crate::filters;
-use crate::opcode::{OFFSET_BITS_DEFAULT, OFFSET_BITS_MIN, OFFSET_BITS_MAX,
-                    LENGTH_BITS_DEFAULT, LENGTH_BITS_MIN, LENGTH_BITS_MAX};
+use crate::opcode::{
+    LENGTH_BITS_DEFAULT, LENGTH_BITS_MAX, LENGTH_BITS_MIN, OFFSET_BITS_DEFAULT, OFFSET_BITS_MAX,
+    OFFSET_BITS_MIN,
+};
+use crate::pairing::pair_decode;
+use crate::rans_entropy;
 
 pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
-    if input.is_empty() { return Ok(Vec::new()); }
-    if input.len() < 4  { return Ok(input.to_vec()); }
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+    if input.len() < 4 {
+        return Ok(input.to_vec());
+    }
 
-    let fold_count   = input[0] as usize;
-    let pair_flag    = input[1];
+    let fold_count = input[0] as usize;
+    let pair_flag = input[1];
     let entropy_flag = input[2];
-    let filter_flag  = input[3];
+    let filter_flag = input[3];
 
     let (offset_bits_per_fold, length_bits_per_fold, payload_start) =
         parse_header(input, fold_count);
@@ -43,17 +51,25 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     println!(
         "Unfolding {} pass(es) | pair_flag={} | entropy_flag={} | filter_flag={} | \
          offset_bits={:?} | length_bits={:?}",
-        fold_count, pair_flag, entropy_flag, filter_flag,
-        offset_bits_per_fold, length_bits_per_fold
+        fold_count,
+        pair_flag,
+        entropy_flag,
+        filter_flag,
+        offset_bits_per_fold,
+        length_bits_per_fold
     );
 
     let ob_for_fold = |n: usize| -> u32 {
-        offset_bits_per_fold.get(n.saturating_sub(1))
-            .copied().unwrap_or(OFFSET_BITS_DEFAULT)
+        offset_bits_per_fold
+            .get(n.saturating_sub(1))
+            .copied()
+            .unwrap_or(OFFSET_BITS_DEFAULT)
     };
     let lb_for_fold = |n: usize| -> u32 {
-        length_bits_per_fold.get(n.saturating_sub(1))
-            .copied().unwrap_or(LENGTH_BITS_DEFAULT)
+        length_bits_per_fold
+            .get(n.saturating_sub(1))
+            .copied()
+            .unwrap_or(LENGTH_BITS_DEFAULT)
     };
 
     let final_ob = ob_for_fold(fold_count);
@@ -61,13 +77,13 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
 
     // ── Undo outermost entropy layer ─────────────────────────────────────────
     let (mut current, folds_to_undo) = match entropy_flag {
-
         1 => {
             let payload = &input[payload_start..];
             let (enc_table, consumed) = entropy::deserialize_table(payload)?;
-            let dtable  = entropy::decode_table_from_encode(&enc_table);
-            let tokens  = entropy::read_tokens_joint(&payload[consumed..], &dtable, final_ob, final_lb)?;
-            let rec     = reconstruct(&tokens);
+            let dtable = entropy::decode_table_from_encode(&enc_table);
+            let tokens =
+                entropy::read_tokens_joint(&payload[consumed..], &dtable, final_ob, final_lb)?;
+            let rec = reconstruct(&tokens);
             println!("Entropy v1 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
@@ -76,10 +92,11 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let payload = &input[payload_start..];
             let (lit_enc, lit_c) = entropy::deserialize_table(payload)?;
             let (off_enc, off_c) = entropy::deserialize_table(&payload[lit_c..])?;
-            let lit_dt  = entropy::decode_table_from_encode(&lit_enc);
-            let off_dt  = entropy::decode_table_from_encode(&off_enc);
-            let tokens  = entropy::read_tokens_joint_v2(&payload[lit_c + off_c..], &lit_dt, &off_dt)?;
-            let rec     = reconstruct(&tokens);
+            let lit_dt = entropy::decode_table_from_encode(&lit_enc);
+            let off_dt = entropy::decode_table_from_encode(&off_enc);
+            let tokens =
+                entropy::read_tokens_joint_v2(&payload[lit_c + off_c..], &lit_dt, &off_dt)?;
+            let rec = reconstruct(&tokens);
             println!("Entropy v2 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
@@ -89,11 +106,14 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let (enc0, c0) = entropy::deserialize_table(payload)?;
             let (enc1, c1) = entropy::deserialize_table(&payload[c0..])?;
             let (off_enc, c2) = entropy::deserialize_table(&payload[c0 + c1..])?;
-            let dt0    = entropy::decode_table_from_encode(&enc0);
-            let dt1    = entropy::decode_table_from_encode(&enc1);
+            let dt0 = entropy::decode_table_from_encode(&enc0);
+            let dt1 = entropy::decode_table_from_encode(&enc1);
             let off_dt = entropy::decode_table_from_encode(&off_enc);
             let tokens = entropy::read_tokens_joint_v3(
-                &payload[c0 + c1 + c2..], &dt0, &dt1, &off_dt
+                &payload[c0 + c1 + c2..],
+                &dt0,
+                &dt1,
+                &off_dt,
             )?;
             let rec = reconstruct(&tokens);
             println!("Entropy v3 unfold: {} bytes", rec.len());
@@ -107,31 +127,38 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let mut lit_dtables: Vec<entropy::DecodeTable> = Vec::with_capacity(8);
             for i in 0..8usize {
                 let (enc, consumed) = entropy::deserialize_table(&payload[cursor..])
-                    .map_err(|e| std::io::Error::new(e.kind(),
-                        format!("v4 unfold: lit table {} deserialise failed: {}", i, e)))?;
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            e.kind(),
+                            format!("v4 unfold: lit table {} deserialise failed: {}", i, e),
+                        )
+                    })?;
                 lit_dtables.push(entropy::decode_table_from_encode(&enc));
                 cursor += consumed;
             }
 
-            let (off_enc, off_c) = entropy::deserialize_table(&payload[cursor..])
-                .map_err(|e| std::io::Error::new(e.kind(),
-                    format!("v4 unfold: offset table deserialise failed: {}", e)))?;
+            let (off_enc, off_c) = entropy::deserialize_table(&payload[cursor..]).map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("v4 unfold: offset table deserialise failed: {}", e),
+                )
+            })?;
             let off_dt = entropy::decode_table_from_encode(&off_enc);
             cursor += off_c;
 
-            let arr: [entropy::DecodeTable; 8] = lit_dtables.try_into()
-                .map_err(|_| std::io::Error::new(
+            let arr: [entropy::DecodeTable; 8] = lit_dtables.try_into().map_err(|_| {
+                std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "v4 unfold: expected exactly 8 literal tables",
-                ))?;
+                )
+            })?;
 
             let tokens = entropy::read_tokens_joint_v4(&payload[cursor..], &arr, &off_dt)?;
-            let rec    = reconstruct(&tokens);
+            let rec = reconstruct(&tokens);
             println!("Entropy v4 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
 
-        // ── v5: v2 + slot reuse ───────────────────────────────────────────────
         5 => {
             let payload = &input[payload_start..];
             let (lit_enc, lit_c) = entropy::deserialize_table(payload)?;
@@ -139,34 +166,56 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let lit_dt = entropy::decode_table_from_encode(&lit_enc);
             let off_dt = entropy::decode_table_from_encode(&off_enc);
             let tokens = entropy::read_tokens_joint_v2_slotted(
-                &payload[lit_c + off_c..], &lit_dt, &off_dt
+                &payload[lit_c + off_c..],
+                &lit_dt,
+                &off_dt,
             )?;
             let rec = reconstruct(&tokens);
             println!("Entropy v5 (v2+slots) unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
 
-        // ── v6: v3 + slot reuse ───────────────────────────────────────────────
         6 => {
             let payload = &input[payload_start..];
             let (enc0, c0) = entropy::deserialize_table(payload)?;
             let (enc1, c1) = entropy::deserialize_table(&payload[c0..])?;
             let (off_enc, c2) = entropy::deserialize_table(&payload[c0 + c1..])?;
-            let dt0    = entropy::decode_table_from_encode(&enc0);
-            let dt1    = entropy::decode_table_from_encode(&enc1);
+            let dt0 = entropy::decode_table_from_encode(&enc0);
+            let dt1 = entropy::decode_table_from_encode(&enc1);
             let off_dt = entropy::decode_table_from_encode(&off_enc);
             let tokens = entropy::read_tokens_joint_v3_slotted(
-                &payload[c0 + c1 + c2..], &dt0, &dt1, &off_dt
+                &payload[c0 + c1 + c2..],
+                &dt0,
+                &dt1,
+                &off_dt,
             )?;
             let rec = reconstruct(&tokens);
             println!("Entropy v6 (v3+slots) unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
 
-        // ── No entropy ────────────────────────────────────────────────────────
-        _ => {
-            (input[payload_start..].to_vec(), fold_count)
+        // ── v7: rANS joint lit/length + offset bucket ─────────────────────────
+        7 => {
+            let payload = &input[payload_start..];
+
+            let (lit_enc, lit_dec, lit_c) = rans_entropy::deserialize_rans_table(payload)?;
+            let (off_enc, off_dec, off_c) =
+                rans_entropy::deserialize_rans_table(&payload[lit_c..])?;
+
+            let tokens = rans_entropy::read_tokens_rans(
+                &payload[lit_c + off_c..],
+                &lit_enc,
+                &lit_dec,
+                &off_enc,
+                &off_dec,
+            )?;
+            let rec = reconstruct(&tokens);
+            println!("Entropy v7 (rANS) unfold: {} bytes", rec.len());
+            (rec, fold_count.saturating_sub(1))
         }
+
+        // ── No entropy ────────────────────────────────────────────────────────
+        _ => (input[payload_start..].to_vec(), fold_count),
     };
 
     // ── Undo remaining LZ / PAIR folds in reverse ────────────────────────────
@@ -230,11 +279,12 @@ fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) 
 
     println!(
         "parse_header: fallback to defaults (input.len()={}, fold_count={})",
-        input.len(), fold_count
+        input.len(),
+        fold_count
     );
     (
         vec![OFFSET_BITS_DEFAULT; fold_count],
         vec![LENGTH_BITS_DEFAULT; fold_count],
         payload_start,
     )
-                 }
+}

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use rans::byte_decoder::{ByteRansDecSymbol, ByteRansDecoder};
 use rans::byte_encoder::{ByteRansEncSymbol, ByteRansEncoder};
-use rans::{RansDecSymbol, RansDecoder, RansEncSymbol, RansEncoder};
+use rans::{RansDecSymbol, RansDecoder, RansEncSymbol, RansEncoder, RansEncoderMulti};
 
 use bitstream_io::{BigEndian, BitRead, BitReader, BitWrite, BitWriter};
 
@@ -243,12 +243,11 @@ pub fn deserialize_rans_table(
 ///
 /// The rANS stream is LIFO: tokens are pushed in reverse so they decode forward.
 /// For each token in reverse:
-///   - BACKREF: push bucket symbol first, then push lit/length symbol (so lit/length
-///     decodes first, then bucket — LIFO inverts the push order within each token)
+///   - BACKREF: push bucket symbol first (decoded second), then lit/length (decoded first)
 ///   - LIT / END: push lit symbol only
 ///
-/// Extra bits (bucket residuals) are written in forward order into a separate byte
-/// stream appended after the rANS bytes.
+/// Extra bits (bucket residuals) are written in forward order into a separate
+/// byte stream appended after the rANS bytes.
 ///
 /// Output: [rans_byte_len: u32 LE][rans_bytes][extra_bit_bytes]
 ///
@@ -302,6 +301,7 @@ pub fn write_tokens_rans(
     }
 
     encoder.flush();
+    // RansEncoderMulti trait must be in scope for .data()
     let rans_bytes = encoder.data().to_owned();
 
     let mut out = Vec::with_capacity(4 + rans_bytes.len() + extra_buf.len());
@@ -318,8 +318,6 @@ pub fn write_tokens_rans(
 ///
 /// Reads rANS symbols forward (which corresponds to reverse push order = forward
 /// encode order). Reads extra bits (bucket residuals) from the appended byte stream.
-///
-/// Both enc tables (for `advance`) and dec tables (for symbol lookup) are required.
 pub fn read_tokens_rans(
     input: &[u8],
     lit_enc: &RansEncTable,
@@ -361,7 +359,6 @@ pub fn read_tokens_rans(
         }
         let sym = lit_dec[cf as usize];
 
-        // Advance decoder past this symbol
         let &(cum, freq) = lit_enc.get(&sym).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -376,7 +373,6 @@ pub fn read_tokens_rans(
         } else if sym < 256 {
             tokens.push(Token::Lit { byte: sym as u8 });
         } else {
-            // BACKREF: decode bucket symbol next
             let length = length_from_sym(sym);
 
             let bcf = decoder.get(SCALE_BITS);
@@ -396,7 +392,6 @@ pub fn read_tokens_rans(
             })?;
             decoder.advance(&ByteRansDecSymbol::new(bcum, bfreq), SCALE_BITS);
 
-            // Read extra bits for this bucket from the appended stream
             let extra_cnt = bucket_extra_bits(bucket);
             let extra_val = if extra_cnt > 0 {
                 extra_r.read::<u32>(extra_cnt).map_err(|e| {
@@ -415,4 +410,4 @@ pub fn read_tokens_rans(
     }
 
     Ok(tokens)
-                     }
+      }

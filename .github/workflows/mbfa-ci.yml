@@ -158,7 +158,9 @@ jobs:
           key: ubuntu-latest-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install tools
-        run: sudo apt-get install -y gzip zstd xz-utils zpaq brotli bc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gzip zstd xz-utils zpaq brotli bc imagemagick python3-pil
 
       - name: Build Release
         run: cargo build --release
@@ -167,7 +169,7 @@ jobs:
         run: |
           mkdir -p bench_files bench_results
 
-          # ── Small / medium ────────────────────────────────────────────────────
+          # ── Small / medium ─────────────────────────────────────────────────
 
           python3 -c "print('the the the and the and ' * 500)" > bench_files/repetitive.txt
           python3 -c "import os; open('bench_files/random.bin','wb').write(os.urandom(10000))"
@@ -224,7 +226,154 @@ jobs:
           open('bench_files/image.bmp','wb').write(hdr + b''.join(reversed(rows)))
           "
 
-          # ── Large (MB scale) ──────────────────────────────────────────────────
+          # ── PNG — 256x256 RGB gradient (uncompressed pixels, then PNG-wrapped) ─
+          # Using imagemagick for a real encoded PNG so it reflects realistic
+          # already-compressed image data that most compressors struggle with.
+          convert -size 256x256 \
+            gradient:'rgb(255,80,0)-rgb(0,80,255)' \
+            -channel RGB \
+            bench_files/image_gradient.png
+          echo "PNG size: $(wc -c < bench_files/image_gradient.png) bytes"
+
+          # ── JPEG — 512x512 photo-like gradient noise ───────────────────────
+          # Generate a noisy gradient image then encode as JPEG quality 85.
+          # JPEG at q85 is already heavily compressed — tests near-incompressible
+          # behaviour.
+          python3 -c "
+          import struct, zlib, math, random
+          random.seed(7)
+          # Write a 512x512 RGB raw PPM first, then convert
+          w, h = 512, 512
+          rows = []
+          for y in range(h):
+              row = bytearray()
+              for x in range(w):
+                  # Smooth gradient + mild noise — representative of real photo data
+                  r = int(x / w * 200 + random.gauss(0, 8)) % 256
+                  g = int(y / h * 200 + random.gauss(0, 8)) % 256
+                  b = int((x + y) / (w + h) * 200 + random.gauss(0, 8)) % 256
+                  row += bytes([max(0,min(255,r)), max(0,min(255,g)), max(0,min(255,b))])
+              rows.append(bytes(row))
+          header = f'P6\n{w} {h}\n255\n'.encode()
+          with open('/tmp/photo_raw.ppm', 'wb') as f:
+              f.write(header)
+              for row in rows:
+                  f.write(row)
+          "
+          convert /tmp/photo_raw.ppm -quality 85 bench_files/photo.jpg
+          echo "JPEG size: $(wc -c < bench_files/photo.jpg) bytes"
+
+          # ── FBX — binary FBX stub (~150KB synthetic mesh data) ────────────
+          # Writes a valid FBX 7.4 binary header followed by realistic mesh
+          # data (vertices, normals, UV coords, indices) as would appear in a
+          # real game asset export. Not a fully spec-compliant scene graph —
+          # just representative binary content for compression benchmarking.
+          python3 -c "
+          import struct, math, random
+
+          random.seed(13)
+
+          def fbx_magic():
+              # 'Kaydara FBX Binary  ' + 0x00 0x1A 0x00 + version u32 LE
+              return b'Kaydara FBX Binary  \x00\x1a\x00' + struct.pack('<I', 7400)
+
+          def fbx_node(name: bytes, props: bytes, children: bytes = b'') -> bytes:
+              # FBX 7.4 node record: end_offset(u64) num_props(u64)
+              #   prop_list_len(u64) name_len(u8) name props children null_record
+              name_bytes = name
+              num_props  = 0  # simplified — properties embedded raw
+              prop_len   = len(props)
+              # end_offset is relative to start of file — we'll use 0 as placeholder
+              # (not a fully valid FBX tree, but fine for binary content benchmarking)
+              header = struct.pack('<QQQ', 0, num_props, prop_len)
+              header += bytes([len(name_bytes)]) + name_bytes
+              return header + props + children
+
+          def pack_float_array(vals):
+              return struct.pack(f'<{len(vals)}f', *vals)
+
+          def pack_int_array(vals):
+              return struct.pack(f'<{len(vals)}i', *vals)
+
+          # Generate a subdivided sphere mesh — ~2000 vertices
+          vertices = []
+          normals  = []
+          uvs      = []
+          indices  = []
+
+          rings = 40
+          segs  = 40
+          for r in range(rings + 1):
+              phi = math.pi * r / rings
+              for s in range(segs):
+                  theta = 2 * math.pi * s / segs
+                  x = math.sin(phi) * math.cos(theta)
+                  y = math.cos(phi)
+                  z = math.sin(phi) * math.sin(theta)
+                  # Slight random jitter for realism
+                  jx = x + random.gauss(0, 0.002)
+                  jy = y + random.gauss(0, 0.002)
+                  jz = z + random.gauss(0, 0.002)
+                  vertices.extend([jx * 100, jy * 100, jz * 100])
+                  normals.extend([x, y, z])
+                  uvs.extend([s / segs, r / rings])
+
+          for r in range(rings):
+              for s in range(segs):
+                  a = r * (segs + 1) + s
+                  b = a + segs + 1
+                  indices.extend([a, b, a + 1, b, b + 1, a + 1])
+
+          # Pack all arrays
+          verts_bytes   = pack_float_array(vertices)
+          normals_bytes = pack_float_array(normals)
+          uvs_bytes     = pack_float_array(uvs)
+          idx_bytes     = pack_int_array(indices)
+
+          # Transform data block: scale, rotation, translation (4x4 matrix x 50 objects)
+          transforms = []
+          for i in range(50):
+              angle = i * 0.2
+              scale = 1.0 + i * 0.01
+              tx, ty, tz = i * 5.0, 0.0, 0.0
+              # Row-major 4x4 transform matrix
+              m = [
+                  scale * math.cos(angle), -math.sin(angle), 0.0, tx,
+                  math.sin(angle),  scale * math.cos(angle), 0.0, ty,
+                  0.0,              0.0,                      scale, tz,
+                  0.0,              0.0,                      0.0,   1.0,
+              ]
+              transforms.extend(m)
+          transforms_bytes = pack_float_array(transforms)
+
+          # Material / property block — string-keyed float properties
+          mat_props = b''
+          prop_names = [b'DiffuseColor', b'SpecularColor', b'EmissiveColor',
+                        b'Roughness', b'Metalness', b'Opacity', b'BumpFactor']
+          for i in range(30):
+              for name in prop_names:
+                  mat_props += struct.pack('B', len(name)) + name
+                  mat_props += struct.pack('<fff',
+                      random.uniform(0, 1),
+                      random.uniform(0, 1),
+                      random.uniform(0, 1))
+
+          # Assemble FBX binary blob
+          magic  = fbx_magic()
+          body   = verts_bytes + normals_bytes + uvs_bytes + idx_bytes
+          body  += transforms_bytes + mat_props
+          # Null record terminator (13 bytes for FBX 7.4)
+          null_record = b'\x00' * 13
+          body += null_record
+
+          with open('bench_files/mesh.fbx', 'wb') as f:
+              f.write(magic + body)
+
+          print(f'FBX size: {len(magic) + len(body)} bytes')
+          "
+          echo "FBX size: $(wc -c < bench_files/mesh.fbx) bytes"
+
+          # ── Large (MB scale) ───────────────────────────────────────────────
 
           echo "Downloading War and Peace..."
           if curl -fsSL --retry 3 --max-time 60 \
@@ -310,7 +459,7 @@ jobs:
             local name=$2
             local orig_size=$(wc -c < "bench_files/$file")
 
-            # ── MBFA ────────────────────────────────────────────────────────────
+            # ── MBFA compress ──────────────────────────────────────────────────
             local mbfa_start=$(date +%s%N)
             ./target/release/mbfa compress "bench_files/$file" "bench_files/$file.mbfa" \
               > bench_results/mbfa_log_${name}.txt 2>&1
@@ -322,49 +471,86 @@ jobs:
               grep -E "^(Original|Fold|Done|Joint|Entropy|Window|Wide)" | \
               tr '\n' '|' | sed 's/"/\\"/g')
 
+            # ── MBFA decompress (timed separately) ────────────────────────────
+            local decomp_start=$(date +%s%N)
             ./target/release/mbfa decompress "bench_files/$file.mbfa" "bench_files/$file.recovered" \
               > /dev/null 2>&1
+            local decomp_end=$(date +%s%N)
+            local mbfa_decomp_ms=$(( (decomp_end - decomp_start) / 1000000 ))
+
+            # Roundtrip verification
             local roundtrip="PASS"
             if ! diff "bench_files/$file" "bench_files/$file.recovered" > /dev/null 2>&1; then
               roundtrip="FAIL"
             fi
 
-            # ── gzip ────────────────────────────────────────────────────────────
+            # ── gzip ───────────────────────────────────────────────────────────
             local gz_start=$(date +%s%N)
             gzip -k -f "bench_files/$file" 2>/dev/null
             local gz_end=$(date +%s%N)
             local gz_ms=$(( (gz_end - gz_start) / 1000000 ))
             local gz_size=$(wc -c < "bench_files/$file.gz" 2>/dev/null || echo 0)
 
-            # ── zstd ────────────────────────────────────────────────────────────
+            # gzip decompress timing
+            local gz_decomp_start=$(date +%s%N)
+            gzip -d -k -f -c "bench_files/$file.gz" > /dev/null 2>/dev/null
+            local gz_decomp_end=$(date +%s%N)
+            local gz_decomp_ms=$(( (gz_decomp_end - gz_decomp_start) / 1000000 ))
+
+            # ── zstd ───────────────────────────────────────────────────────────
             local zst_start=$(date +%s%N)
             zstd -q -f "bench_files/$file" -o "bench_files/$file.zst" 2>/dev/null
             local zst_end=$(date +%s%N)
             local zst_ms=$(( (zst_end - zst_start) / 1000000 ))
             local zst_size=$(wc -c < "bench_files/$file.zst" 2>/dev/null || echo 0)
 
-            # ── xz ──────────────────────────────────────────────────────────────
+            local zst_decomp_start=$(date +%s%N)
+            zstd -d -q -f -c "bench_files/$file.zst" > /dev/null 2>/dev/null
+            local zst_decomp_end=$(date +%s%N)
+            local zst_decomp_ms=$(( (zst_decomp_end - zst_decomp_start) / 1000000 ))
+
+            # ── xz ────────────────────────────────────────────────────────────
             local xz_start=$(date +%s%N)
             xz -k -f "bench_files/$file" 2>/dev/null
             local xz_end=$(date +%s%N)
             local xz_ms=$(( (xz_end - xz_start) / 1000000 ))
             local xz_size=$(wc -c < "bench_files/$file.xz" 2>/dev/null || echo 0)
 
-            # ── brotli ──────────────────────────────────────────────────────────
+            local xz_decomp_start=$(date +%s%N)
+            xz -d -k -f -c "bench_files/$file.xz" > /dev/null 2>/dev/null
+            local xz_decomp_end=$(date +%s%N)
+            local xz_decomp_ms=$(( (xz_decomp_end - xz_decomp_start) / 1000000 ))
+
+            # ── brotli ────────────────────────────────────────────────────────
             local br_start=$(date +%s%N)
             brotli -k -f "bench_files/$file" -o "bench_files/$file.br" 2>/dev/null
             local br_end=$(date +%s%N)
             local br_ms=$(( (br_end - br_start) / 1000000 ))
             local br_size=$(wc -c < "bench_files/$file.br" 2>/dev/null || echo 0)
 
-            # ── zpaq ────────────────────────────────────────────────────────────
+            local br_decomp_start=$(date +%s%N)
+            brotli -d -k -f -c "bench_files/$file.br" > /dev/null 2>/dev/null
+            local br_decomp_end=$(date +%s%N)
+            local br_decomp_ms=$(( (br_decomp_end - br_decomp_start) / 1000000 ))
+
+            # ── zpaq ──────────────────────────────────────────────────────────
             local zpaq_start=$(date +%s%N)
             zpaq a "bench_files/$file.zpaq" "bench_files/$file" -method 2 > /dev/null 2>&1 || true
             local zpaq_end=$(date +%s%N)
             local zpaq_ms=$(( (zpaq_end - zpaq_start) / 1000000 ))
             local zpaq_size=$(wc -c < "bench_files/$file.zpaq" 2>/dev/null || echo 0)
 
-            # ── percentages ─────────────────────────────────────────────────────
+            # zpaq decompress timing
+            local zpaq_decomp_ms=0
+            if [ "$zpaq_size" -gt 0 ]; then
+              local zpaq_decomp_start=$(date +%s%N)
+              zpaq e "bench_files/$file.zpaq" -to /tmp/zpaq_decomp_$$ > /dev/null 2>&1 || true
+              local zpaq_decomp_end=$(date +%s%N)
+              zpaq_decomp_ms=$(( (zpaq_decomp_end - zpaq_decomp_start) / 1000000 ))
+              rm -rf /tmp/zpaq_decomp_$$
+            fi
+
+            # ── percentages ───────────────────────────────────────────────────
             local mbfa_pct=$(fix_pct $(echo "scale=2; $mbfa_size * 100 / $orig_size" | bc))
             local gz_pct=$(fix_pct   $(echo "scale=2; $gz_size   * 100 / $orig_size" | bc))
             local zst_pct=$(fix_pct  $(echo "scale=2; $zst_size  * 100 / $orig_size" | bc))
@@ -372,8 +558,7 @@ jobs:
             local br_pct=$(fix_pct   $(echo "scale=2; $br_size   * 100 / $orig_size" | bc))
             local zpaq_pct=$(fix_pct $(echo "scale=2; $zpaq_size * 100 / $orig_size" | bc))
 
-            # ── rank ─────────────────────────────────────────────────────────────
-            # Sort all algorithm percentages, find position of MBFA (1=best)
+            # ── rank ──────────────────────────────────────────────────────────
             local all_pcts="$mbfa_pct $gz_pct $zst_pct $xz_pct $br_pct $zpaq_pct"
             local rank=$(echo "$all_pcts" | tr ' ' '\n' | sort -n | \
               grep -n "^${mbfa_pct}$" | head -1 | cut -d: -f1)
@@ -392,49 +577,60 @@ jobs:
             "mbfa_bytes": $mbfa_size,
             "mbfa_pct": $mbfa_pct,
             "mbfa_ms": $mbfa_ms,
+            "mbfa_decomp_ms": $mbfa_decomp_ms,
             "mbfa_roundtrip": "$roundtrip",
             "mbfa_rank": $rank,
             "gzip_bytes": $gz_size,
             "gzip_pct": $gz_pct,
             "gzip_ms": $gz_ms,
+            "gzip_decomp_ms": $gz_decomp_ms,
             "zstd_bytes": $zst_size,
             "zstd_pct": $zst_pct,
             "zstd_ms": $zst_ms,
+            "zstd_decomp_ms": $zst_decomp_ms,
             "xz_bytes": $xz_size,
             "xz_pct": $xz_pct,
             "xz_ms": $xz_ms,
+            "xz_decomp_ms": $xz_decomp_ms,
             "brotli_bytes": $br_size,
             "brotli_pct": $br_pct,
             "brotli_ms": $br_ms,
+            "brotli_decomp_ms": $br_decomp_ms,
             "zpaq_bytes": $zpaq_size,
             "zpaq_pct": $zpaq_pct,
             "zpaq_ms": $zpaq_ms,
+            "zpaq_decomp_ms": $zpaq_decomp_ms,
             "fold_detail": "$fold_detail"
           }
           EOJSON
 
             local rank_str="#${rank}"
-            printf "%-26s %9s B | MBFA:%6s%%(%-2s) gz:%6s%% zst:%6s%% xz:%6s%% br:%6s%% zpaq:%6s%% rt:%s\n" \
+            printf "%-26s %9s B | MBFA:%6s%%(%-2s) C:%-4sms D:%-4sms | gz C:%-4sms D:%-4sms | rt:%s\n" \
               "$name" "$orig_size" \
               "$mbfa_pct" "$rank_str" \
-              "$gz_pct" "$zst_pct" "$xz_pct" "$br_pct" "$zpaq_pct" \
+              "$mbfa_ms" "$mbfa_decomp_ms" \
+              "$gz_ms"   "$gz_decomp_ms" \
               "$roundtrip"
           }
 
           echo "================================================================"
           echo "  MidMans Bit Folding Algorithm — Extended Benchmark"
           echo "  Build #${{ github.run_number }} | $(date -u)"
+          echo "  C = compress ms   D = decompress ms"
           echo "================================================================"
           echo ""
           echo "── Small / Medium ───────────────────────────────────────────────"
-          run_bench "repetitive.txt"  "Repetitive_12KB"
-          run_bench "alice_small.txt" "Prose_Alice_20KB"
-          run_bench "alice_100k.txt"  "Prose_Alice_100KB"
-          run_bench "random.bin"      "Random_10KB"
-          run_bench "source_code.rs"  "Source_Code"
-          run_bench "data.json"       "JSON_100KB"
-          run_bench "audio.wav"       "Audio_WAV_44KB"
-          run_bench "image.bmp"       "Image_BMP_29KB"
+          run_bench "repetitive.txt"    "Repetitive_12KB"
+          run_bench "alice_small.txt"   "Prose_Alice_20KB"
+          run_bench "alice_100k.txt"    "Prose_Alice_100KB"
+          run_bench "random.bin"        "Random_10KB"
+          run_bench "source_code.rs"    "Source_Code"
+          run_bench "data.json"         "JSON_100KB"
+          run_bench "audio.wav"         "Audio_WAV_44KB"
+          run_bench "image.bmp"         "Image_BMP_29KB"
+          run_bench "image_gradient.png" "Image_PNG_256"
+          run_bench "photo.jpg"          "Image_JPEG_512"
+          run_bench "mesh.fbx"           "Mesh_FBX"
           echo ""
           echo "── Large (MB scale) ─────────────────────────────────────────────"
           run_bench "prose_3mb.txt"      "Prose_WarAndPeace_3MB"
@@ -446,7 +642,8 @@ jobs:
 
           echo ""
           echo "================================================================"
-          echo "Lower % = better. Rank = MBFA position among all 6 algorithms."
+          echo "Lower % = better. C = compress time, D = decompress time (ms)."
+          echo "Rank = MBFA position among all 6 algorithms."
 
       - name: Run offset profile analysis
         run: |
@@ -458,9 +655,6 @@ jobs:
           echo "Running profile_offsets on all benchmark files..."
           echo ""
 
-          # Run on all files that were successfully compressed
-          # Captures: total backrefs, hit rate at cache sizes 1/2/3,
-          # and estimated bit savings from recent-offset encoding
           ./target/release/profile_offsets \
             bench_files/alice_small.txt \
             bench_files/alice_100k.txt \
@@ -473,6 +667,9 @@ jobs:
             bench_files/data_2mb.json \
             bench_files/audio.wav \
             bench_files/image.bmp \
+            bench_files/image_gradient.png \
+            bench_files/photo.jpg \
+            bench_files/mesh.fbx \
             2>&1 | tee bench_results/offset_profile.txt
 
           echo ""
@@ -486,7 +683,6 @@ jobs:
 
       - name: Run offset profile on Canterbury corpus
         run: |
-          # Download Canterbury corpus for profile analysis if not present
           if [ ! -d corpus_files ] || [ -z "$(ls -A corpus_files 2>/dev/null)" ]; then
             mkdir -p corpus_files
             echo "Downloading Canterbury corpus for profile analysis..."
@@ -586,3 +782,4 @@ jobs:
           echo ""
           echo "Use --publish or --deploy in commit message to run benchmarks."
           echo "Use --corp in commit message to run Canterbury corpus benchmarks."
+          echo "Use --archive in commit message to run archive benchmarks."

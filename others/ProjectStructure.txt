@@ -18,7 +18,7 @@ src/encoder.rs
 src/entropy.rs
 src/filters.rs
 src/fold.rs
-src/lib.rs
+src/lib.rs.
 src/main.rs
 src/opcode.rs
 src/pairing.rs

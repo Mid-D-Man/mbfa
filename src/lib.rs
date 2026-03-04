@@ -1,5 +1,5 @@
 // src/lib.rs — pre-slot baseline + v4 byte-category entropy + delta filter support
-// + v5/v6 recent-offset slot reuse + BCJ x86 filter
+// + v5/v6 recent-offset slot reuse + v7 block-split per-block Huffman
 pub mod opcode;
 pub mod encoder;
 pub mod bitwriter;
@@ -24,10 +24,9 @@ use std::io;
 ///                          4 = v4 eight-context (byte-category) + shared offset buckets
 ///                          5 = v5 v2 + recent-offset slot reuse (8-slot LRU)
 ///                          6 = v6 v3 + recent-offset slot reuse (8-slot LRU)
+///                          7 = v7 block-split per-block v2 Huffman
 ///   Byte 3:              filter_flag
-///                          0 = none
-///                          1-4 = delta stride 1-4
-///                          5 = BCJ x86 (ELF/PE executables)
+///                          0 = none  1-4 = delta stride 1-4
 ///   Bytes 4..4+N:        offset_bits[0..N]  where N = fold_count
 ///   Bytes 4+N..4+2N:     length_bits[0..N]
 ///   Byte 4+2N onward:    compressed payload
@@ -37,10 +36,8 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     let filtered: std::borrow::Cow<[u8]> = if filter_flag != filters::FILTER_NONE {
         let f = filters::apply_filter(input, filter_flag);
         println!(
-            "Filter {}: {} bytes in, {} bytes filtered (same size — pre-LZ transform)",
-            filter_name(filter_flag),
-            input.len(),
-            f.len()
+            "Filter delta{}: {} bytes in, {} bytes filtered (same size — pre-LZ transform)",
+            filter_flag, input.len(), f.len()
         );
         std::borrow::Cow::Owned(f)
     } else {
@@ -53,21 +50,13 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
         fold::fold(to_fold, max_folds)?;
 
     let ob1 = offset_bits_per_fold
-        .first()
-        .copied()
-        .unwrap_or(opcode::OFFSET_BITS_MIN);
+        .first().copied().unwrap_or(opcode::OFFSET_BITS_MIN);
     let lb1 = length_bits_per_fold
-        .first()
-        .copied()
-        .unwrap_or(opcode::LENGTH_BITS_MIN);
+        .first().copied().unwrap_or(opcode::LENGTH_BITS_MIN);
     let final_ob = offset_bits_per_fold
-        .last()
-        .copied()
-        .unwrap_or(opcode::OFFSET_BITS_MIN);
+        .last().copied().unwrap_or(opcode::OFFSET_BITS_MIN);
     let final_lb = length_bits_per_fold
-        .last()
-        .copied()
-        .unwrap_or(opcode::LENGTH_BITS_MIN);
+        .last().copied().unwrap_or(opcode::LENGTH_BITS_MIN);
 
     let try_entropy_standard = !used_pairing
         && folds_done >= 1
@@ -77,46 +66,43 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
         if try_entropy_standard {
             let tokens   = bitreader::read_tokens(&compressed, final_ob, final_lb)?;
             let raw_size = compressed.len();
-
             let entropy_ok = tokens_safe_for_entropy(&tokens);
 
             let v1  = if entropy_ok { try_entropy_v1(&tokens, final_ob, final_lb) } else { None };
             let v2  = if entropy_ok { try_entropy_v2(&tokens) } else { None };
             let v3  = if entropy_ok && raw_size >= entropy::ENTROPY_V3_MIN_BYTES {
-                try_entropy_v3(&tokens)
-            } else { None };
+                try_entropy_v3(&tokens) } else { None };
             let v4  = if entropy_ok && raw_size >= entropy::ENTROPY_V3_MIN_BYTES {
-                try_entropy_v4(&tokens)
-            } else { None };
+                try_entropy_v4(&tokens) } else { None };
             let v2s = if entropy_ok { try_entropy_v2_slotted(&tokens) } else { None };
             let v3s = if entropy_ok && raw_size >= entropy::ENTROPY_V3_MIN_BYTES {
-                try_entropy_v3_slotted(&tokens)
-            } else { None };
+                try_entropy_v3_slotted(&tokens) } else { None };
+            let v7  = if entropy_ok { try_entropy_block_split(&tokens) } else { None };
 
             let sz = |o: &Option<Vec<u8>>| o.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
             let best_size = sz(&v1).min(sz(&v2)).min(sz(&v3)).min(sz(&v4))
-                                   .min(sz(&v2s)).min(sz(&v3s));
+                                   .min(sz(&v2s)).min(sz(&v3s)).min(sz(&v7));
 
             if best_size >= raw_size {
                 println!(
-                    "Joint entropy skipped (no gain: v1={} v2={} v3={} v4={} v5={} v6={} vs raw={})",
-                    sz(&v1), sz(&v2), sz(&v3), sz(&v4), sz(&v2s), sz(&v3s), raw_size
+                    "Joint entropy skipped (no gain: v1={} v2={} v3={} v4={} \
+                     v5={} v6={} v7={} vs raw={})",
+                    sz(&v1), sz(&v2), sz(&v3), sz(&v4),
+                    sz(&v2s), sz(&v3s), sz(&v7), raw_size
                 );
                 (compressed, 0u8, false, folds_done, offset_bits_per_fold, length_bits_per_fold)
             } else {
                 let (flag, payload) = [
                     (1u8, &v1), (2u8, &v2), (3u8, &v3), (4u8, &v4),
-                    (5u8, &v2s), (6u8, &v3s),
+                    (5u8, &v2s), (6u8, &v3s), (7u8, &v7),
                 ]
                 .iter()
                 .filter_map(|(f, opt)| opt.as_ref().map(|p| (*f, p)))
                 .min_by_key(|(_, p)| p.len())
                 .unwrap();
                 println!("Joint entropy flag={}: {} → {} B", flag, raw_size, payload.len());
-                (
-                    payload.clone(), flag, false, folds_done,
-                    offset_bits_per_fold, length_bits_per_fold,
-                )
+                (payload.clone(), flag, false, folds_done,
+                 offset_bits_per_fold, length_bits_per_fold)
             }
         } else if used_pairing {
             pair_vs_entropy(
@@ -137,18 +123,6 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     for &lb in &out_lb { output.push(lb as u8); }
     output.extend_from_slice(&final_payload);
     Ok(output)
-}
-
-#[inline]
-fn filter_name(flag: u8) -> &'static str {
-    match flag {
-        1 => "delta1",
-        2 => "delta2",
-        3 => "delta3",
-        4 => "delta4",
-        5 => "BCJ-x86",
-        _ => "none",
-    }
 }
 
 #[inline]
@@ -204,8 +178,7 @@ fn try_entropy_v2_slotted(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     let lit_table    = entropy::build_encode_table(tokens)?;
     let offset_table = entropy::build_offset_encode_table_slotted(tokens)?;
     let coded        = entropy::write_tokens_joint_v2_slotted(
-        tokens, &lit_table, &offset_table
-    ).ok()?;
+        tokens, &lit_table, &offset_table).ok()?;
     let mut payload = entropy::serialize_table(&lit_table);
     payload.extend_from_slice(&entropy::serialize_table(&offset_table));
     payload.extend_from_slice(&coded);
@@ -216,13 +189,42 @@ fn try_entropy_v3_slotted(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     let (t0, t1)     = entropy::build_encode_tables_by_context(tokens)?;
     let offset_table = entropy::build_offset_encode_table_slotted(tokens)?;
     let coded        = entropy::write_tokens_joint_v3_slotted(
-        tokens, &t0, &t1, &offset_table
-    ).ok()?;
+        tokens, &t0, &t1, &offset_table).ok()?;
     let mut payload = entropy::serialize_table(&t0);
     payload.extend_from_slice(&entropy::serialize_table(&t1));
     payload.extend_from_slice(&entropy::serialize_table(&offset_table));
     payload.extend_from_slice(&coded);
     Some(payload)
+}
+
+/// v7: block-split per-block v2 Huffman.
+/// Tries block sizes 1024, 2048, 4096. Only attempts if we have
+/// at least 3 blocks worth of tokens (overhead must be justified).
+/// Competes against v1-v6 — only fires if it actually wins.
+fn try_entropy_block_split(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
+    let token_count = tokens.iter()
+        .filter(|t| !matches!(t, opcode::Token::End))
+        .count();
+
+    let mut best: Option<Vec<u8>> = None;
+
+    for &block_size in &[1024usize, 2048, 4096] {
+        // Require at least 3 full blocks to justify the per-block overhead
+        if token_count < block_size * 3 { continue; }
+
+        if let Ok(payload) = entropy::write_tokens_block_split(tokens, block_size) {
+            let is_better = best.as_ref().map_or(true, |b| payload.len() < b.len());
+            if is_better {
+                println!(
+                    "  v7 block-split bs={}: {} B",
+                    block_size, payload.len()
+                );
+                best = Some(payload);
+            }
+        }
+    }
+
+    best
 }
 
 fn pair_vs_entropy(
@@ -260,20 +262,18 @@ fn pair_vs_entropy(
     let v1  = if entropy_ok { try_entropy_v1(&fold1_tokens, ob1, lb1) } else { None };
     let v2  = if entropy_ok { try_entropy_v2(&fold1_tokens) } else { None };
     let v3  = if entropy_ok && fold1_bytes_est >= entropy::ENTROPY_V3_MIN_BYTES {
-        try_entropy_v3(&fold1_tokens)
-    } else { None };
+        try_entropy_v3(&fold1_tokens) } else { None };
     let v4  = if entropy_ok && fold1_bytes_est >= entropy::ENTROPY_V3_MIN_BYTES {
-        try_entropy_v4(&fold1_tokens)
-    } else { None };
+        try_entropy_v4(&fold1_tokens) } else { None };
     let v2s = if entropy_ok { try_entropy_v2_slotted(&fold1_tokens) } else { None };
     let v3s = if entropy_ok && fold1_bytes_est >= entropy::ENTROPY_V3_MIN_BYTES {
-        try_entropy_v3_slotted(&fold1_tokens)
-    } else { None };
+        try_entropy_v3_slotted(&fold1_tokens) } else { None };
+    let v7  = if entropy_ok { try_entropy_block_split(&fold1_tokens) } else { None };
 
     let sz = |o: &Option<Vec<u8>>| o.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
     let best_entropy = [
         (1u8, &v1), (2u8, &v2), (3u8, &v3), (4u8, &v4),
-        (5u8, &v2s), (6u8, &v3s),
+        (5u8, &v2s), (6u8, &v3s), (7u8, &v7),
     ]
     .iter()
     .filter_map(|(f, opt)| opt.as_ref().map(|p| (*f, p)))

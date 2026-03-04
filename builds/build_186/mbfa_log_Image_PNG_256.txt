@@ -1,0 +1,7 @@
+Original size: 6592 bits (824 bytes)
+  Wide scan wins: ob=7 lb=10 cost=1810 < baseline cost=1822 (ob=17 lb=8)
+Window diagnostics: 1/180 tokens BACKREF (0.6%) | offset: 0.0% at max (127) | 0.0% upper half | length: 0.0% at max (1023) | offset_bits=7 length_bits=10 — OK
+Fold 1 adaptive: offset_bits=7 (window=127 bytes) length_bits=10 (max_len=1023)
+Fold 1 (LZ): 1816 bits (227 bytes)
+Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.275, threshold 0.10)
+Done. 824 bytes → 233 bytes

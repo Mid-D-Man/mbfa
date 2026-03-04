@@ -56,7 +56,9 @@ jobs:
           key: ubuntu-latest-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install compression tools
-        run: sudo apt-get install -y gzip zstd xz-utils zpaq brotli bc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gzip zstd xz-utils zpaq brotli bc
 
       - name: Build MBFA release
         run: cargo build --release
@@ -143,6 +145,7 @@ jobs:
             local ftype=$(file_type "$file")
             local orig=$(wc -c < "$file")
 
+            # ── MBFA compress ────────────────────────────────────────────────
             local t0=$(date +%s%N)
             ./target/release/mbfa compress "$file" "/tmp/${name}.mbfa" \
               > "/tmp/${name}_mbfa.log" 2>&1 || true
@@ -153,6 +156,14 @@ jobs:
               grep -E "^(Original|Fold|Done|Joint|Entropy)" | \
               tr '\n' '|' | sed 's/"/\\"/g')
 
+            # ── MBFA decompress ──────────────────────────────────────────────
+            t0=$(date +%s%N)
+            ./target/release/mbfa decompress "/tmp/${name}.mbfa" "/tmp/${name}.mbfa.out" \
+              > /dev/null 2>&1 || true
+            t1=$(date +%s%N)
+            local mbfa_decomp_ms=$(( (t1-t0)/1000000 ))
+
+            # ── gzip ─────────────────────────────────────────────────────────
             t0=$(date +%s%N)
             gzip -k -f -c "$file" > "/tmp/${name}.gz"
             t1=$(date +%s%N)
@@ -160,11 +171,23 @@ jobs:
             local gz_sz=$(wc -c < "/tmp/${name}.gz")
 
             t0=$(date +%s%N)
+            gzip -d -k -f -c "/tmp/${name}.gz" > /dev/null 2>/dev/null
+            t1=$(date +%s%N)
+            local gz_decomp_ms=$(( (t1-t0)/1000000 ))
+
+            # ── zstd ─────────────────────────────────────────────────────────
+            t0=$(date +%s%N)
             zstd -q -f -c "$file" > "/tmp/${name}.zst"
             t1=$(date +%s%N)
             local zst_ms=$(( (t1-t0)/1000000 ))
             local zst_sz=$(wc -c < "/tmp/${name}.zst")
 
+            t0=$(date +%s%N)
+            zstd -d -q -f -c "/tmp/${name}.zst" > /dev/null 2>/dev/null
+            t1=$(date +%s%N)
+            local zst_decomp_ms=$(( (t1-t0)/1000000 ))
+
+            # ── xz ───────────────────────────────────────────────────────────
             t0=$(date +%s%N)
             xz -k -f -c "$file" > "/tmp/${name}.xz"
             t1=$(date +%s%N)
@@ -172,17 +195,39 @@ jobs:
             local xz_sz=$(wc -c < "/tmp/${name}.xz")
 
             t0=$(date +%s%N)
+            xz -d -k -f -c "/tmp/${name}.xz" > /dev/null 2>/dev/null
+            t1=$(date +%s%N)
+            local xz_decomp_ms=$(( (t1-t0)/1000000 ))
+
+            # ── brotli ───────────────────────────────────────────────────────
+            t0=$(date +%s%N)
             brotli -k -f -c "$file" > "/tmp/${name}.br"
             t1=$(date +%s%N)
             local br_ms=$(( (t1-t0)/1000000 ))
             local br_sz=$(wc -c < "/tmp/${name}.br")
 
             t0=$(date +%s%N)
+            brotli -d -k -f -c "/tmp/${name}.br" > /dev/null 2>/dev/null
+            t1=$(date +%s%N)
+            local br_decomp_ms=$(( (t1-t0)/1000000 ))
+
+            # ── zpaq ─────────────────────────────────────────────────────────
+            t0=$(date +%s%N)
             zpaq a "/tmp/${name}.zpaq" "$file" -method 2 > /dev/null 2>&1 || true
             t1=$(date +%s%N)
             local zpaq_ms=$(( (t1-t0)/1000000 ))
             local zpaq_sz=$(wc -c < "/tmp/${name}.zpaq" 2>/dev/null || echo 0)
 
+            local zpaq_decomp_ms=0
+            if [ "$zpaq_sz" -gt 0 ]; then
+              t0=$(date +%s%N)
+              zpaq e "/tmp/${name}.zpaq" -to "/tmp/zpaq_decomp_corp_$$" > /dev/null 2>&1 || true
+              t1=$(date +%s%N)
+              zpaq_decomp_ms=$(( (t1-t0)/1000000 ))
+              rm -rf "/tmp/zpaq_decomp_corp_$$"
+            fi
+
+            # ── percentages ──────────────────────────────────────────────────
             local mbfa_pct=$(fix_pct $(echo "scale=2; $mbfa_sz*100/$orig" | bc))
             local gz_pct=$(fix_pct   $(echo "scale=2; $gz_sz  *100/$orig" | bc))
             local zst_pct=$(fix_pct  $(echo "scale=2; $zst_sz *100/$orig" | bc))
@@ -202,25 +247,27 @@ jobs:
             "file": "$name",
             "type": "$ftype",
             "original_bytes": $orig,
-            "mbfa_bytes": $mbfa_sz,   "mbfa_pct": $mbfa_pct,   "mbfa_ms": $mbfa_ms,
-            "gzip_bytes": $gz_sz,     "gzip_pct": $gz_pct,     "gzip_ms": $gz_ms,
-            "zstd_bytes": $zst_sz,    "zstd_pct": $zst_pct,    "zstd_ms": $zst_ms,
-            "xz_bytes": $xz_sz,       "xz_pct": $xz_pct,       "xz_ms": $xz_ms,
-            "brotli_bytes": $br_sz,   "brotli_pct": $br_pct,   "brotli_ms": $br_ms,
-            "zpaq_bytes": $zpaq_sz,   "zpaq_pct": $zpaq_pct,   "zpaq_ms": $zpaq_ms,
+            "mbfa_bytes": $mbfa_sz,   "mbfa_pct": $mbfa_pct,   "mbfa_ms": $mbfa_ms,   "mbfa_decomp_ms": $mbfa_decomp_ms,
+            "gzip_bytes": $gz_sz,     "gzip_pct": $gz_pct,     "gzip_ms": $gz_ms,     "gzip_decomp_ms": $gz_decomp_ms,
+            "zstd_bytes": $zst_sz,    "zstd_pct": $zst_pct,    "zstd_ms": $zst_ms,    "zstd_decomp_ms": $zst_decomp_ms,
+            "xz_bytes": $xz_sz,       "xz_pct": $xz_pct,       "xz_ms": $xz_ms,       "xz_decomp_ms": $xz_decomp_ms,
+            "brotli_bytes": $br_sz,   "brotli_pct": $br_pct,   "brotli_ms": $br_ms,   "brotli_decomp_ms": $br_decomp_ms,
+            "zpaq_bytes": $zpaq_sz,   "zpaq_pct": $zpaq_pct,   "zpaq_ms": $zpaq_ms,   "zpaq_decomp_ms": $zpaq_decomp_ms,
             "mbfa_rank": $rank,
             "fold_detail": "$fold_detail"
           }
           EOJSON
 
-            printf "%-18s %8s B | MBFA:%6s%%(#%s) gz:%6s%% zst:%6s%% xz:%6s%% br:%6s%% zpaq:%6s%%\n" \
+            printf "%-18s %8s B | MBFA:%6s%%(#%s) C:%-4sms D:%-4sms | gz C:%-4sms D:%-4sms\n" \
               "$name" "$orig" "$mbfa_pct" "$rank" \
-              "$gz_pct" "$zst_pct" "$xz_pct" "$br_pct" "$zpaq_pct"
+              "$mbfa_ms" "$mbfa_decomp_ms" \
+              "$gz_ms"   "$gz_decomp_ms"
           }
 
           echo "================================================"
           echo "  MBFA — Canterbury Corpus Benchmark"
           echo "  Build #${{ github.run_number }} | $(date -u)"
+          echo "  C = compress ms   D = decompress ms"
           echo "================================================"
 
           for f in corpus_files/*; do
@@ -230,7 +277,6 @@ jobs:
           echo "]" >> corpus_results/results.json
 
           echo "================================================"
-          cat corpus_results/results.json
 
       - name: Generate corpus HTML
         run: |
@@ -258,8 +304,6 @@ jobs:
 
           WORK=$(mktemp -d)
 
-          # Fetch the gh-pages branch so the worktree add gets existing content.
-          # If the branch doesn't exist at all yet, create a fresh orphan.
           if git fetch origin gh-pages:gh-pages 2>/dev/null; then
             git worktree add "$WORK" gh-pages
           else
@@ -267,7 +311,6 @@ jobs:
             git worktree add --orphan -b gh-pages "$WORK"
           fi
 
-          # Only update the corpus/ subdirectory — leave everything else intact.
           mkdir -p "$WORK/corpus"
           cp -r corpus_results/* "$WORK/corpus/"
 

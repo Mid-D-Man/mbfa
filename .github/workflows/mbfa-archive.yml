@@ -1,0 +1,497 @@
+name: MBFA Archive Benchmark
+
+on:
+  push:
+    branches: [ master, main, develop ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  parse-trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Check for archive flag
+        id: check
+        run: |
+          SHOULD_RUN="false"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SHOULD_RUN="true"
+          else
+            COMMIT_MSG="${{ github.event.head_commit.message }}"
+            if echo "$COMMIT_MSG" | grep -qiE '\-\-archive'; then
+              SHOULD_RUN="true"
+            fi
+          fi
+          echo "should_run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
+          echo "Will run archive benchmark: ${SHOULD_RUN}"
+
+  archive-benchmark:
+    runs-on: ubuntu-latest
+    needs: parse-trigger
+    if: needs.parse-trigger.outputs.should_run == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gzip zstd xz-utils zpaq brotli bc imagemagick zip
+
+      - name: Build MBFA release
+        run: cargo build --release
+
+      - name: Build archive test corpus
+        run: |
+          mkdir -p archive_corpus/source
+          mkdir -p archive_corpus/text
+          mkdir -p archive_corpus/data
+          mkdir -p archive_corpus/binary
+          mkdir -p archive_corpus/mixed
+          mkdir -p archive_results
+
+          # ── Source code files ────────────────────────────────────────────────
+          # Copy all of MBFA's own source — realistic source tree
+          cp src/*.rs   archive_corpus/source/
+          cp Cargo.toml archive_corpus/source/
+          # Duplicate and vary to make it a more interesting source tree (~200KB+)
+          for i in 1 2 3 4 5; do
+            for f in src/*.rs; do
+              base=$(basename "$f" .rs)
+              cp "$f" "archive_corpus/source/${base}_v${i}.rs"
+            done
+          done
+          echo "Source files: $(ls archive_corpus/source | wc -l) files, $(du -sh archive_corpus/source | cut -f1)"
+
+          # ── Text files ───────────────────────────────────────────────────────
+          curl -fsSL --retry 3 --max-time 60 \
+            "https://www.gutenberg.org/files/11/11-0.txt" \
+            -o archive_corpus/text/alice.txt 2>/dev/null || \
+            python3 -c "print('the quick brown fox ' * 5000)" > archive_corpus/text/alice.txt
+
+          curl -fsSL --retry 3 --max-time 60 \
+            "https://www.gutenberg.org/files/2600/2600-0.txt" \
+            -o archive_corpus/text/war_and_peace.txt 2>/dev/null || \
+            cat archive_corpus/text/alice.txt archive_corpus/text/alice.txt > archive_corpus/text/war_and_peace.txt
+
+          # Generate synthetic prose files
+          python3 -c "
+          import random
+          random.seed(1)
+          words = ['the','and','a','to','of','in','is','it','you','that','he','was',
+                   'for','on','are','as','with','his','they','I','at','be','this',
+                   'have','from','or','one','had','by','hot','but','some','what',
+                   'there','we','can','out','other','were','all','also','into','has',
+                   'her','their','time','if','will','how','said','an','each','she']
+          for i in range(5):
+              lines = []
+              for _ in range(500):
+                  line = ' '.join(random.choices(words, k=random.randint(8, 20)))
+                  lines.append(line.capitalize() + '.')
+              open(f'archive_corpus/text/prose_{i}.txt', 'w').write('\n'.join(lines))
+          "
+          echo "Text files: $(ls archive_corpus/text | wc -l) files, $(du -sh archive_corpus/text | cut -f1)"
+
+          # ── JSON / data files ────────────────────────────────────────────────
+          python3 -c "
+          import json, random
+          random.seed(42)
+          names  = ['alice','bob','charlie','diana','eve','frank','grace','henry']
+          cities = ['london','paris','berlin','tokyo','sydney','cairo','oslo','lima']
+          for batch in range(5):
+              records = []
+              for i in range(400):
+                  records.append({
+                      'id': batch * 400 + i,
+                      'name': random.choice(names),
+                      'email': f'user{i}@example{batch}.com',
+                      'city': random.choice(cities),
+                      'score': round(random.uniform(0,100), 2),
+                      'active': random.choice([True, False]),
+                      'tags': random.sample(['admin','user','guest','mod'], 2)
+                  })
+              open(f'archive_corpus/data/records_{batch}.json', 'w').write(
+                  json.dumps({'batch': batch, 'records': records}, indent=2))
+          "
+
+          # CSV files
+          python3 -c "
+          import random, csv
+          random.seed(7)
+          headers = ['id','name','value','category','timestamp','active']
+          for f in range(3):
+              rows = [headers]
+              for i in range(1000):
+                  rows.append([
+                      i, f'item_{i}', round(random.uniform(0, 9999), 2),
+                      random.choice(['A','B','C','D']),
+                      f'2025-{random.randint(1,12):02d}-{random.randint(1,28):02d}',
+                      random.choice(['true','false'])
+                  ])
+              with open(f'archive_corpus/data/table_{f}.csv', 'w', newline='') as fh:
+                  csv.writer(fh).writerows(rows)
+          "
+          echo "Data files: $(ls archive_corpus/data | wc -l) files, $(du -sh archive_corpus/data | cut -f1)"
+
+          # ── Binary files ─────────────────────────────────────────────────────
+          python3 -c "import os; open('archive_corpus/binary/random_1.bin','wb').write(os.urandom(50000))"
+          python3 -c "import os; open('archive_corpus/binary/random_2.bin','wb').write(os.urandom(75000))"
+          python3 -c "import os; open('archive_corpus/binary/random_3.bin','wb').write(os.urandom(30000))"
+
+          # BMP images
+          python3 -c "
+          import struct
+          for idx, (w, h, seed) in enumerate([(128,128,1),(200,150,2),(256,256,3)]):
+              import random; random.seed(seed)
+              pad = (4 - (w*3) % 4) % 4
+              px_sz = (w*3 + pad) * h
+              hdr = (b'BM' + struct.pack('<I', 54+px_sz) + struct.pack('<HH',0,0) +
+                     struct.pack('<I', 54) +
+                     struct.pack('<IiiHHIIiiII', 40, w, h, 1, 24, 0, px_sz, 2835, 2835, 0, 0))
+              rows = []
+              for y in range(h):
+                  row = b''
+                  for x in range(w):
+                      row += bytes([int(x/w*255), int(y/h*255),
+                                    int((x+y)/(w+h)*255)])
+                  rows.append(row + b'\x00'*pad)
+              open(f'archive_corpus/binary/image_{idx}.bmp','wb').write(
+                  hdr + b''.join(reversed(rows)))
+          "
+
+          # WAV audio files (short synthetic tones)
+          python3 -c "
+          import struct, math
+          for idx, freq in enumerate([440, 880, 220]):
+              sr = 44100; dur = 0.25; n = int(sr * dur)
+              pcm = [int(math.sin(2*math.pi*freq*i/sr) * 32767) for i in range(n)]
+              pcm_bytes = struct.pack(f'<{n}h', *pcm)
+              fmt  = b'fmt ' + struct.pack('<IHHIIHH', 16, 1, 1, sr, sr*2, 2, 16)
+              data = b'data' + struct.pack('<I', len(pcm_bytes)) + pcm_bytes
+              body = b'WAVE' + fmt + data
+              open(f'archive_corpus/binary/audio_{idx}.wav','wb').write(
+                  b'RIFF' + struct.pack('<I', len(body)) + body)
+          "
+          echo "Binary files: $(ls archive_corpus/binary | wc -l) files, $(du -sh archive_corpus/binary | cut -f1)"
+
+          # ── Mixed directory (one of each type) ───────────────────────────────
+          cp archive_corpus/source/encoder.rs       archive_corpus/mixed/
+          cp archive_corpus/text/alice.txt          archive_corpus/mixed/
+          cp archive_corpus/data/records_0.json     archive_corpus/mixed/
+          cp archive_corpus/binary/random_1.bin     archive_corpus/mixed/
+          cp archive_corpus/binary/image_0.bmp      archive_corpus/mixed/
+          cp archive_corpus/binary/audio_0.wav      archive_corpus/mixed/
+          echo "Mixed files: $(ls archive_corpus/mixed | wc -l) files, $(du -sh archive_corpus/mixed | cut -f1)"
+
+          echo ""
+          echo "Total corpus:"
+          du -sh archive_corpus/
+          find archive_corpus -type f | wc -l
+          echo "files"
+
+      - name: Run archive benchmarks
+        run: |
+          fix_pct() { echo "$1" | sed 's/^\./0./'; }
+
+          echo "[" > archive_results/results.json
+          FIRST=true
+
+          # ── run_archive_bench ────────────────────────────────────────────────
+          # Args: dir_path  display_name
+          # Creates MBFA archive, zip, tar.gz, tar.zst, tar.xz, tar.br
+          # Measures compress time, decompress time, output size.
+          # Verifies MBFA roundtrip by re-extracting and diffing every file.
+
+          run_archive_bench() {
+            local dir="$1"
+            local name="$2"
+            local orig_size=$(du -sb "$dir" | cut -f1)
+            local file_count=$(find "$dir" -type f | wc -l)
+
+            echo ""
+            echo "── $name ($file_count files, $(du -sh "$dir" | cut -f1)) ────────"
+
+            mkdir -p /tmp/arch_work_$$
+
+            # ── MBFA archive ──────────────────────────────────────────────────
+            local mbfa_out="/tmp/arch_work_$$/out.mbfa"
+            local mbfa_extract="/tmp/arch_work_$$/mbfa_extracted"
+
+            local mbfa_c_start=$(date +%s%N)
+            ./target/release/mbfa archive "$dir" "$mbfa_out" 2>&1 | tail -5
+            local mbfa_c_end=$(date +%s%N)
+            local mbfa_c_ms=$(( (mbfa_c_end - mbfa_c_start) / 1000000 ))
+            local mbfa_size=$(wc -c < "$mbfa_out" 2>/dev/null || echo 0)
+
+            local mbfa_d_start=$(date +%s%N)
+            ./target/release/mbfa extract "$mbfa_out" "$mbfa_extract" > /dev/null 2>&1
+            local mbfa_d_end=$(date +%s%N)
+            local mbfa_d_ms=$(( (mbfa_d_end - mbfa_d_start) / 1000000 ))
+
+            # Roundtrip verification — diff every file
+            local rt_status="PASS"
+            local rt_failures=0
+            while IFS= read -r -d '' src_file; do
+              local rel="${src_file#$dir/}"
+              local ext_file="$mbfa_extract/$rel"
+              if [ ! -f "$ext_file" ]; then
+                echo "  MISSING: $rel"
+                rt_failures=$((rt_failures + 1))
+              elif ! diff "$src_file" "$ext_file" > /dev/null 2>&1; then
+                echo "  DIFFER:  $rel"
+                rt_failures=$((rt_failures + 1))
+              fi
+            done < <(find "$dir" -type f -print0)
+
+            [ $rt_failures -gt 0 ] && rt_status="FAIL($rt_failures)"
+            echo "  MBFA: ${mbfa_size}B  C:${mbfa_c_ms}ms  D:${mbfa_d_ms}ms  RT:${rt_status}"
+
+            # ── zip ───────────────────────────────────────────────────────────
+            local zip_out="/tmp/arch_work_$$/out.zip"
+            local zip_extract="/tmp/arch_work_$$/zip_extracted"
+
+            local zip_c_start=$(date +%s%N)
+            (cd "$(dirname "$dir")" && zip -r -q "$zip_out" "$(basename "$dir")")
+            local zip_c_end=$(date +%s%N)
+            local zip_c_ms=$(( (zip_c_end - zip_c_start) / 1000000 ))
+            local zip_size=$(wc -c < "$zip_out" 2>/dev/null || echo 0)
+
+            local zip_d_start=$(date +%s%N)
+            unzip -q "$zip_out" -d "$zip_extract" 2>/dev/null
+            local zip_d_end=$(date +%s%N)
+            local zip_d_ms=$(( (zip_d_end - zip_d_start) / 1000000 ))
+
+            echo "  zip:  ${zip_size}B  C:${zip_c_ms}ms  D:${zip_d_ms}ms"
+
+            # ── tar.gz ────────────────────────────────────────────────────────
+            local tgz_out="/tmp/arch_work_$$/out.tar.gz"
+            local tgz_extract="/tmp/arch_work_$$/tgz_extracted"
+            mkdir -p "$tgz_extract"
+
+            local tgz_c_start=$(date +%s%N)
+            tar -czf "$tgz_out" -C "$(dirname "$dir")" "$(basename "$dir")"
+            local tgz_c_end=$(date +%s%N)
+            local tgz_c_ms=$(( (tgz_c_end - tgz_c_start) / 1000000 ))
+            local tgz_size=$(wc -c < "$tgz_out" 2>/dev/null || echo 0)
+
+            local tgz_d_start=$(date +%s%N)
+            tar -xzf "$tgz_out" -C "$tgz_extract"
+            local tgz_d_end=$(date +%s%N)
+            local tgz_d_ms=$(( (tgz_d_end - tgz_d_start) / 1000000 ))
+
+            echo "  tar.gz: ${tgz_size}B  C:${tgz_c_ms}ms  D:${tgz_d_ms}ms"
+
+            # ── tar.zst ───────────────────────────────────────────────────────
+            local tzst_out="/tmp/arch_work_$$/out.tar.zst"
+            local tzst_extract="/tmp/arch_work_$$/tzst_extracted"
+            mkdir -p "$tzst_extract"
+
+            local tzst_c_start=$(date +%s%N)
+            tar -c -C "$(dirname "$dir")" "$(basename "$dir")" | \
+              zstd -q -o "$tzst_out"
+            local tzst_c_end=$(date +%s%N)
+            local tzst_c_ms=$(( (tzst_c_end - tzst_c_start) / 1000000 ))
+            local tzst_size=$(wc -c < "$tzst_out" 2>/dev/null || echo 0)
+
+            local tzst_d_start=$(date +%s%N)
+            zstd -d -q -c "$tzst_out" | tar -x -C "$tzst_extract"
+            local tzst_d_end=$(date +%s%N)
+            local tzst_d_ms=$(( (tzst_d_end - tzst_d_start) / 1000000 ))
+
+            echo "  tar.zst: ${tzst_size}B  C:${tzst_c_ms}ms  D:${tzst_d_ms}ms"
+
+            # ── tar.xz ────────────────────────────────────────────────────────
+            local txz_out="/tmp/arch_work_$$/out.tar.xz"
+            local txz_extract="/tmp/arch_work_$$/txz_extracted"
+            mkdir -p "$txz_extract"
+
+            local txz_c_start=$(date +%s%N)
+            tar -cJf "$txz_out" -C "$(dirname "$dir")" "$(basename "$dir")"
+            local txz_c_end=$(date +%s%N)
+            local txz_c_ms=$(( (txz_c_end - txz_c_start) / 1000000 ))
+            local txz_size=$(wc -c < "$txz_out" 2>/dev/null || echo 0)
+
+            local txz_d_start=$(date +%s%N)
+            tar -xJf "$txz_out" -C "$txz_extract"
+            local txz_d_end=$(date +%s%N)
+            local txz_d_ms=$(( (txz_d_end - txz_d_start) / 1000000 ))
+
+            echo "  tar.xz: ${txz_size}B  C:${txz_c_ms}ms  D:${txz_d_ms}ms"
+
+            # ── tar.br ────────────────────────────────────────────────────────
+            local tbr_out="/tmp/arch_work_$$/out.tar.br"
+            local tbr_extract="/tmp/arch_work_$$/tbr_extracted"
+            mkdir -p "$tbr_extract"
+
+            local tbr_c_start=$(date +%s%N)
+            tar -c -C "$(dirname "$dir")" "$(basename "$dir")" | \
+              brotli -q -o "$tbr_out"
+            local tbr_c_end=$(date +%s%N)
+            local tbr_c_ms=$(( (tbr_c_end - tbr_c_start) / 1000000 ))
+            local tbr_size=$(wc -c < "$tbr_out" 2>/dev/null || echo 0)
+
+            local tbr_d_start=$(date +%s%N)
+            brotli -d -c "$tbr_out" | tar -x -C "$tbr_extract"
+            local tbr_d_end=$(date +%s%N)
+            local tbr_d_ms=$(( (tbr_d_end - tbr_d_start) / 1000000 ))
+
+            echo "  tar.br: ${tbr_size}B  C:${tbr_c_ms}ms  D:${tbr_d_ms}ms"
+
+            # ── percentages ───────────────────────────────────────────────────
+            local mbfa_pct=$(fix_pct $(echo "scale=2; $mbfa_size*100/$orig_size" | bc))
+            local zip_pct=$(fix_pct  $(echo "scale=2; $zip_size *100/$orig_size" | bc))
+            local tgz_pct=$(fix_pct  $(echo "scale=2; $tgz_size *100/$orig_size" | bc))
+            local tzst_pct=$(fix_pct $(echo "scale=2; $tzst_size*100/$orig_size" | bc))
+            local txz_pct=$(fix_pct  $(echo "scale=2; $txz_size *100/$orig_size" | bc))
+            local tbr_pct=$(fix_pct  $(echo "scale=2; $tbr_size *100/$orig_size" | bc))
+
+            # Rank MBFA among all archive formats
+            local all_pcts="$mbfa_pct $zip_pct $tgz_pct $tzst_pct $txz_pct $tbr_pct"
+            local rank=$(echo "$all_pcts" | tr ' ' '\n' | sort -n | \
+              grep -n "^${mbfa_pct}$" | head -1 | cut -d: -f1)
+            [ -z "$rank" ] && rank="-"
+
+            if [ "$FIRST" = "true" ]; then FIRST=false; else echo "," >> archive_results/results.json; fi
+
+            cat >> archive_results/results.json << EOJSON
+          {
+            "name": "$name",
+            "file_count": $file_count,
+            "original_bytes": $orig_size,
+            "mbfa_rank": $rank,
+            "mbfa_roundtrip": "$rt_status",
+            "mbfa_bytes":  $mbfa_size,  "mbfa_pct":  $mbfa_pct,  "mbfa_c_ms":  $mbfa_c_ms,  "mbfa_d_ms":  $mbfa_d_ms,
+            "zip_bytes":   $zip_size,   "zip_pct":   $zip_pct,   "zip_c_ms":   $zip_c_ms,   "zip_d_ms":   $zip_d_ms,
+            "tgz_bytes":   $tgz_size,   "tgz_pct":   $tgz_pct,   "tgz_c_ms":   $tgz_c_ms,   "tgz_d_ms":   $tgz_d_ms,
+            "tzst_bytes":  $tzst_size,  "tzst_pct":  $tzst_pct,  "tzst_c_ms":  $tzst_c_ms,  "tzst_d_ms":  $tzst_d_ms,
+            "txz_bytes":   $txz_size,   "txz_pct":   $txz_pct,   "txz_c_ms":   $txz_c_ms,   "txz_d_ms":   $txz_d_ms,
+            "tbr_bytes":   $tbr_size,   "tbr_pct":   $tbr_pct,   "tbr_c_ms":   $tbr_c_ms,   "tbr_d_ms":   $tbr_d_ms
+          }
+          EOJSON
+
+            rm -rf /tmp/arch_work_$$
+          }
+
+          echo "=============================================================="
+          echo "  MBFA Archive Benchmark"
+          echo "  Build #${{ github.run_number }} | $(date -u)"
+          echo "  Competing: MBFA | zip | tar.gz | tar.zst | tar.xz | tar.br"
+          echo "  C = compress ms   D = decompress ms   RT = roundtrip check"
+          echo "=============================================================="
+
+          run_archive_bench "archive_corpus/source"  "Source_Tree"
+          run_archive_bench "archive_corpus/text"    "Text_Files"
+          run_archive_bench "archive_corpus/data"    "JSON_CSV_Data"
+          run_archive_bench "archive_corpus/binary"  "Binary_Media"
+          run_archive_bench "archive_corpus/mixed"   "Mixed_Directory"
+
+          # Full corpus as single archive — tests block grouping across types
+          run_archive_bench "archive_corpus"         "Full_Corpus"
+
+          echo "]" >> archive_results/results.json
+
+          echo ""
+          echo "=============================================================="
+          echo "Lower % = better compression ratio."
+          echo "RT PASS = all extracted files byte-identical to originals."
+
+      - name: Single-file extract test
+        run: |
+          echo "── Single-file extract test ──────────────────────────────────"
+          # Archive the full corpus, then extract individual files by path
+          # and verify each one matches the original.
+
+          ./target/release/mbfa archive archive_corpus /tmp/test_single_extract.mbfa
+          echo "Archive created: $(wc -c < /tmp/test_single_extract.mbfa) bytes"
+
+          PASS=0
+          FAIL=0
+          while IFS= read -r -d '' f; do
+            rel="${f#archive_corpus/}"
+            mkdir -p "/tmp/single_extract_out/$(dirname "$rel")"
+            ./target/release/mbfa extract /tmp/test_single_extract.mbfa \
+              /tmp/single_extract_out --file "$rel" > /dev/null 2>&1
+
+            if diff "$f" "/tmp/single_extract_out/$rel" > /dev/null 2>&1; then
+              PASS=$((PASS+1))
+            else
+              echo "FAIL: $rel"
+              FAIL=$((FAIL+1))
+            fi
+          done < <(find archive_corpus -type f -print0)
+
+          echo "Single-file extract: ${PASS} passed, ${FAIL} failed"
+          [ $FAIL -gt 0 ] && exit 1
+          echo "All single-file extracts verified."
+
+      - name: List archive test
+        run: |
+          echo "── List archive ──────────────────────────────────────────────"
+          ./target/release/mbfa archive archive_corpus /tmp/test_list.mbfa > /dev/null 2>&1
+          ./target/release/mbfa list /tmp/test_list.mbfa
+          echo "List test complete."
+
+      - name: Upload archive results
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-results-${{ github.run_number }}
+          path: archive_results/
+          retention-days: 90
+
+      - name: Deploy archive results to gh-pages
+        run: |
+          git config --global user.name "MBFA CI"
+          git config --global user.email "ci@mbfa.dev"
+
+          WORK=$(mktemp -d)
+
+          if git fetch origin gh-pages:gh-pages 2>/dev/null; then
+            git worktree add "$WORK" gh-pages
+          else
+            echo "gh-pages branch does not exist yet — creating orphan"
+            git worktree add --orphan -b gh-pages "$WORK"
+          fi
+
+          mkdir -p "$WORK/archive"
+          cp -r archive_results/* "$WORK/archive/"
+
+          cd "$WORK"
+          git add archive/
+          git diff --staged --quiet && echo "No changes to archive/" && exit 0
+          git commit -m "MBFA archive benchmark — Build #${{ github.run_number }} [skip ci]"
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
+
+          echo "Deployed to https://mid-d-man.github.io/mbfa/archive/"
+
+  summary:
+    runs-on: ubuntu-latest
+    needs: [parse-trigger]
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "MBFA Archive Benchmark — Build #${{ github.run_number }}"
+          echo "Triggered: ${{ needs.parse-trigger.outputs.should_run }}"
+          echo "Use --archive in commit message to run archive benchmarks."

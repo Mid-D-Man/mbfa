@@ -10,7 +10,9 @@ pub mod fold;
 pub mod unfold;
 pub mod entropy;
 pub mod filters;
-
+pub mod archive;
+pub mod archive_io;
+pub mod platform;
 use std::io;
 
 /// File header layout (v3):

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MBFA — Canterbury Corpus | Build #144</title>
+  <title>MBFA — Canterbury Corpus | Build #158</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 32px 24px; }
@@ -63,6 +63,7 @@
     .win  { color: #3fb950; font-weight: 700; }
     .loss { color: #f85149; }
     .sub  { color: #8b949e; font-size: 0.73rem; }
+    .sub-decomp { color: #a371f7; font-size: 0.71rem; }
     .rank-1 { color: #f1c40f; font-weight: 700; }
     .rank-2 { color: #8b949e; font-weight: 600; }
     .rank-3 { color: #cd7f32; }
@@ -82,18 +83,13 @@
     .bar-row { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; }
     .bar { height: 6px; border-radius: 3px; min-width: 1px; }
 
-    /* Rank chart */
-    .rank-bar-wrap { display: flex; flex-direction: column; gap: 3px; }
-    .rank-bar-item { display: flex; align-items: center; gap: 6px; font-size: 0.72rem; }
-    .rank-num { width: 14px; color: #484f58; }
-
     /* Modal */
     .modal-overlay { display: none; position: fixed; inset: 0;
       background: rgba(0,0,0,0.72); z-index: 1000;
       align-items: center; justify-content: center; padding: 20px; }
     .modal-overlay.open { display: flex; }
     .modal { background: #161b22; border: 1px solid #30363d; border-radius: 12px;
-      width: 100%; max-width: 680px; max-height: 88vh;
+      width: 100%; max-width: 720px; max-height: 90vh;
       display: flex; flex-direction: column; overflow: hidden;
       box-shadow: 0 24px 64px rgba(0,0,0,0.6);
       animation: modal-in 0.15s ease; }
@@ -108,14 +104,27 @@
     .modal-body { padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
     .modal-section-label { font-size: 0.68rem; text-transform: uppercase;
       letter-spacing: 0.8px; color: #484f58; font-weight: 600; margin-bottom: 8px; }
+
+    /* Timing summary cards inside modal */
+    .timing-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 4px; }
+    .timing-card { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 10px 12px; }
+    .timing-card .t-label { font-size: 0.68rem; color: #8b949e; margin-bottom: 3px; }
+    .timing-card .t-value { font-size: 0.95rem; font-weight: 700; }
+    .timing-card .t-sub   { font-size: 0.68rem; color: #484f58; margin-top: 2px; }
+
     .cmp-row { display: flex; flex-direction: column; gap: 7px; }
-    .cmp-item { display: grid; grid-template-columns: 60px 1fr 58px 70px;
-      align-items: center; gap: 8px; }
-    .cmp-label { font-size: 0.76rem; color: #8b949e; }
+    .cmp-item { display: grid; grid-template-columns: 60px 1fr 52px 68px 52px 52px;
+      align-items: center; gap: 7px; }
+    .cmp-label { font-size: 0.76rem; }
     .cmp-track { background: #0d1117; border-radius: 3px; height: 9px; overflow: hidden; }
     .cmp-fill  { height: 100%; border-radius: 3px; }
     .cmp-pct   { font-size: 0.80rem; font-weight: 700; text-align: right; }
     .cmp-bytes { font-size: 0.70rem; color: #484f58; text-align: right; }
+    .cmp-ctime { font-size: 0.70rem; color: #79c0ff; text-align: right; }
+    .cmp-dtime { font-size: 0.70rem; color: #a371f7; text-align: right; }
+    .timing-legend { display: flex; gap: 14px; font-size: 0.70rem; margin-bottom: 6px; }
+    .timing-legend span { display: flex; align-items: center; gap: 4px; }
+
     .fold-detail-box { font-family: monospace; font-size: 0.72rem;
       color: #8b949e; background: #0d1117; border: 1px solid #21262d;
       border-radius: 6px; padding: 12px; line-height: 1.7; white-space: pre-wrap; }
@@ -137,10 +146,10 @@
     <h1>&#x1F4DA; MBFA <span>&#x2014; Canterbury Corpus Benchmark</span></h1>
     <p style="color:#8b949e;margin-top:5px">MidManStudio | Standard compression research benchmark suite</p>
     <div class="meta">
-      <div class="meta-item"><strong>Build:</strong> #144</div>
+      <div class="meta-item"><strong>Build:</strong> #158</div>
       <div class="meta-item"><strong>Branch:</strong> master</div>
-      <div class="meta-item"><strong>Commit:</strong> cb102571</div>
-      <div class="meta-item"><strong>Date:</strong> Wed Mar  4 11:21:33 UTC 2026</div>
+      <div class="meta-item"><strong>Commit:</strong> 3f980422</div>
+      <div class="meta-item"><strong>Date:</strong> Wed Mar  4 15:57:36 UTC 2026</div>
     </div>
   </header>
 
@@ -149,7 +158,9 @@
     compression research since 1997. It covers a representative spread of real-world file
     types — English prose, source code, HTML, binary data, executables, and spreadsheets.
     Results on this corpus are directly comparable to published compression research.
-    Lower % = better compression. All MBFA roundtrips must pass for results to be valid.
+    Lower % = better compression. <span style="color:#79c0ff">C</span> = compress ms,
+    <span style="color:#a371f7">D</span> = decompress ms.
+    All MBFA roundtrips must pass for results to be valid.
   </div>
 
   <div class="summary-grid" id="summary-grid">
@@ -183,6 +194,16 @@
       <div class="value" id="stat-vs-zstd">—</div>
       <div class="sub">negative = MBFA wins</div>
     </div>
+    <div class="summary-card">
+      <div class="label">Avg MBFA C time</div>
+      <div class="value" id="stat-avg-ctime" style="color:#79c0ff">—</div>
+      <div class="sub">compress ms</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Avg MBFA D time</div>
+      <div class="value" id="stat-avg-dtime" style="color:#a371f7">—</div>
+      <div class="sub">decompress ms</div>
+    </div>
   </div>
 
   <div class="toolbar">
@@ -203,11 +224,13 @@
     <div class="legend-item"><div class="dot" style="background:#e3b341"></div>xz</div>
     <div class="legend-item"><div class="dot" style="background:#3fb950"></div>brotli</div>
     <div class="legend-item"><div class="dot" style="background:#ff7b72"></div>zpaq</div>
-    <div class="legend-item" style="margin-left:auto">
-      <span style="color:#f1c40f;font-size:0.78rem">&#x1F947; = best for that file</span>
+    <div class="legend-item" style="margin-left:auto;font-size:0.72rem;color:#484f58">
+      <span style="color:#79c0ff">C</span> = compress ms &nbsp;
+      <span style="color:#a371f7">D</span> = decompress ms &nbsp;
+      <span style="color:#f1c40f">&#x1F947;</span> = best ratio for that file
     </div>
   </div>
-  <p class="click-hint">&#x1F4A1; Click any row for breakdown and fold pipeline</p>
+  <p class="click-hint">&#x1F4A1; Click any row for breakdown, timing detail, and fold pipeline</p>
 
   <table>
     <thead>
@@ -228,7 +251,7 @@
   </table>
 
   <footer>
-    MBFA Canterbury Corpus — MidManStudio — Build #144
+    MBFA Canterbury Corpus — MidManStudio — Build #158
   </footer>
 </div>
 
@@ -241,7 +264,15 @@
     </div>
     <div class="modal-body">
       <div>
+        <div class="modal-section-label">Timing — MBFA</div>
+        <div class="timing-grid" id="modal-timing"></div>
+      </div>
+      <div>
         <div class="modal-section-label">Compression Comparison</div>
+        <div class="timing-legend">
+          <span><span style="color:#79c0ff">■</span> C = compress ms</span>
+          <span><span style="color:#a371f7">■</span> D = decompress ms</span>
+        </div>
         <div class="cmp-row" id="modal-cmp"></div>
       </div>
       <div>
@@ -301,6 +332,7 @@
       const n = data.length;
       let wins = 0, rtPass = 0;
       let sumMbfa = 0, sumGzip = 0, sumZstd = 0;
+      let sumCtime = 0, sumDtime = 0, dtimeCount = 0;
 
       data.forEach(row => {
         const m = parseFloat(row.mbfa_pct);
@@ -312,12 +344,21 @@
         if (m <= Math.min(g, z, x, b, p)) wins++;
         if (row.mbfa_roundtrip === 'PASS') rtPass++;
         sumMbfa += m; sumGzip += g; sumZstd += z;
+        sumCtime += (row.mbfa_ms || 0);
+        if (row.mbfa_decomp_ms !== undefined) {
+          sumDtime += row.mbfa_decomp_ms;
+          dtimeCount++;
+        }
       });
 
       document.getElementById('stat-files').textContent = n;
       document.getElementById('stat-wins').textContent  = wins;
       document.getElementById('stat-rt').textContent    = rtPass === n ? `${n}/${n} ✅` : `${rtPass}/${n} ❌`;
       document.getElementById('stat-avg').textContent   = (sumMbfa/n).toFixed(1) + '%';
+      document.getElementById('stat-avg-ctime').textContent = Math.round(sumCtime/n) + 'ms';
+      document.getElementById('stat-avg-dtime').textContent =
+        dtimeCount > 0 ? Math.round(sumDtime/dtimeCount) + 'ms' : '—';
+
       const vg = ((sumMbfa - sumGzip)/n).toFixed(1);
       const vz = ((sumMbfa - sumZstd)/n).toFixed(1);
       const gEl = document.getElementById('stat-vs-gzip');
@@ -329,18 +370,19 @@
 
       data.forEach((row, idx) => {
         const m    = parseFloat(row.mbfa_pct);
-        const g    = parseFloat(row.gzip_pct);
-        const best = Math.min(m, g, parseFloat(row.zstd_pct),
+        const best = Math.min(m, parseFloat(row.gzip_pct), parseFloat(row.zstd_pct),
                               parseFloat(row.xz_pct), parseFloat(row.brotli_pct),
                               parseFloat(row.zpaq_pct));
-        const mbfaWins = m <= best;
-        const rank     = row.mbfa_rank;
-        const scale    = v => Math.min(130, Math.round(parseFloat(v) * 1.3));
+        const rank  = row.mbfa_rank;
+        const scale = v => Math.min(130, Math.round(parseFloat(v) * 1.3));
 
-        function cell(pct, color) {
+        function cell(pct, color, cMs, dMs) {
           const isB = parseFloat(pct) <= best;
           return `<td style="color:${isB ? color : ''}" class="${isB ? 'win' : ''}">
-            ${pct}%</td>`;
+            ${pct}%<br>
+            <span class="sub" style="color:#79c0ff">C:${cMs}ms</span>
+            <span class="sub-decomp"> D:${dMs !== undefined ? dMs+'ms' : '—'}</span>
+          </td>`;
         }
 
         const tr = document.createElement('tr');
@@ -349,17 +391,18 @@
           `<td style="font-weight:600">${row.file}
              <span class="badge ${badgeCls(row.type)}">${row.type}</span></td>` +
           `<td>${fmtBytes(row.original_bytes)}</td>` +
-          cell(row.mbfa_pct,   COLORS.mbfa) +
-          cell(row.gzip_pct,   COLORS.gzip) +
-          cell(row.zstd_pct,   COLORS.zstd) +
-          cell(row.xz_pct,     COLORS.xz)   +
-          cell(row.brotli_pct, COLORS.brotli)+
-          cell(row.zpaq_pct,   COLORS.zpaq)  +
+          cell(row.mbfa_pct,   COLORS.mbfa,   row.mbfa_ms,   row.mbfa_decomp_ms) +
+          cell(row.gzip_pct,   COLORS.gzip,   row.gzip_ms,   row.gzip_decomp_ms) +
+          cell(row.zstd_pct,   COLORS.zstd,   row.zstd_ms,   row.zstd_decomp_ms) +
+          cell(row.xz_pct,     COLORS.xz,     row.xz_ms,     row.xz_decomp_ms)   +
+          cell(row.brotli_pct, COLORS.brotli, row.brotli_ms, row.brotli_decomp_ms)+
+          cell(row.zpaq_pct,   COLORS.zpaq,   row.zpaq_ms,   row.zpaq_decomp_ms)  +
           `<td class="${rankClass(rank)}">${rankEmoji(rank)}</td>` +
           `<td>
-            ${Object.entries({mbfa:row.mbfa_pct,gzip:row.gzip_pct,zstd:row.zstd_pct,
-                               xz:row.xz_pct,brotli:row.brotli_pct,zpaq:row.zpaq_pct})
-              .map(([k,v]) =>
+            ${Object.entries({
+                mbfa:row.mbfa_pct, gzip:row.gzip_pct, zstd:row.zstd_pct,
+                xz:row.xz_pct, brotli:row.brotli_pct, zpaq:row.zpaq_pct
+              }).map(([k,v]) =>
                 `<div class="bar-row">
                    <div class="bar" style="background:${COLORS[k]};width:${scale(v)}px"></div>
                    <span style="font-size:0.70rem;color:${COLORS[k]}">${v}%</span>
@@ -396,13 +439,39 @@
     document.getElementById('modal-title').textContent =
       `${row.file} — ${fmtBytes(row.original_bytes)}`;
 
+    document.getElementById('modal-timing').innerHTML =
+      `<div class="timing-card">
+        <div class="t-label">Compress time</div>
+        <div class="t-value" style="color:#79c0ff">${row.mbfa_ms}ms</div>
+        <div class="t-sub">MBFA release build</div>
+      </div>
+      <div class="timing-card">
+        <div class="t-label">Decompress time</div>
+        <div class="t-value" style="color:#a371f7">${row.mbfa_decomp_ms !== undefined ? row.mbfa_decomp_ms+'ms' : '—'}</div>
+        <div class="t-sub">MBFA release build</div>
+      </div>
+      <div class="timing-card">
+        <div class="t-label">vs gzip compress</div>
+        <div class="t-value" style="color:#e6edf3;font-size:0.9rem">${row.mbfa_ms}ms vs ${row.gzip_ms}ms</div>
+        <div class="t-sub">${row.mbfa_ms <= row.gzip_ms ? '✓ MBFA faster' : '✗ gzip faster'}</div>
+      </div>
+      <div class="timing-card">
+        <div class="t-label">vs gzip decompress</div>
+        <div class="t-value" style="color:#e6edf3;font-size:0.9rem">
+          ${row.mbfa_decomp_ms !== undefined ? row.mbfa_decomp_ms+'ms' : '—'} vs ${row.gzip_decomp_ms !== undefined ? row.gzip_decomp_ms+'ms' : '—'}
+        </div>
+        <div class="t-sub">${row.mbfa_decomp_ms !== undefined && row.gzip_decomp_ms !== undefined
+          ? (row.mbfa_decomp_ms <= row.gzip_decomp_ms ? '✓ MBFA faster' : '✗ gzip faster')
+          : ''}</div>
+      </div>`;
+
     const algos = [
-      {k:'mbfa',   pct:row.mbfa_pct,   bytes:row.mbfa_bytes,   ms:row.mbfa_ms},
-      {k:'gzip',   pct:row.gzip_pct,   bytes:row.gzip_bytes,   ms:row.gzip_ms},
-      {k:'zstd',   pct:row.zstd_pct,   bytes:row.zstd_bytes,   ms:row.zstd_ms},
-      {k:'xz',     pct:row.xz_pct,     bytes:row.xz_bytes,     ms:row.xz_ms},
-      {k:'brotli', pct:row.brotli_pct, bytes:row.brotli_bytes, ms:row.brotli_ms},
-      {k:'zpaq',   pct:row.zpaq_pct,   bytes:row.zpaq_bytes,   ms:row.zpaq_ms},
+      {k:'mbfa',   pct:row.mbfa_pct,   bytes:row.mbfa_bytes,   cMs:row.mbfa_ms,   dMs:row.mbfa_decomp_ms},
+      {k:'gzip',   pct:row.gzip_pct,   bytes:row.gzip_bytes,   cMs:row.gzip_ms,   dMs:row.gzip_decomp_ms},
+      {k:'zstd',   pct:row.zstd_pct,   bytes:row.zstd_bytes,   cMs:row.zstd_ms,   dMs:row.zstd_decomp_ms},
+      {k:'xz',     pct:row.xz_pct,     bytes:row.xz_bytes,     cMs:row.xz_ms,     dMs:row.xz_decomp_ms},
+      {k:'brotli', pct:row.brotli_pct, bytes:row.brotli_bytes, cMs:row.brotli_ms, dMs:row.brotli_decomp_ms},
+      {k:'zpaq',   pct:row.zpaq_pct,   bytes:row.zpaq_bytes,   cMs:row.zpaq_ms,   dMs:row.zpaq_decomp_ms},
     ];
     const maxPct = Math.max(...algos.map(a => parseFloat(a.pct)));
 
@@ -415,7 +484,9 @@
           <div class="cmp-fill" style="width:${w}%;background:${c}"></div>
         </div>
         <div class="cmp-pct" style="color:${c}">${a.pct}%</div>
-        <div class="cmp-bytes">${fmtBytes(a.bytes)} · ${a.ms}ms</div>
+        <div class="cmp-bytes">${fmtBytes(a.bytes)}</div>
+        <div class="cmp-ctime">C:${a.cMs !== undefined ? a.cMs+'ms' : '—'}</div>
+        <div class="cmp-dtime">D:${a.dMs !== undefined ? a.dMs+'ms' : '—'}</div>
       </div>`;
     }).join('');
 
@@ -437,4 +508,4 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 </script>
 </body>
-  </html>
+</html>

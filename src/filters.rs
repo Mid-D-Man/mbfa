@@ -1,5 +1,5 @@
 // src/filters.rs
-//! Pre/post compression delta filters.
+//! Pre/post compression delta filters..
 //!
 //! Applied to the raw input BEFORE folding, reversed AFTER unfolding.
 //! Converts smooth-varying binary data (PCM audio, BMP pixels) into

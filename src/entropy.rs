@@ -1,5 +1,6 @@
-// src/entropy.rs — pre-slot baseline + v4 byte-category literal contexts
+// src/entropy.rs — full file, pre-slot baseline + v4 byte-category literal contexts
 // + v5 (v2+slots) / v6 (v3+slots) recent-offset slot reuse
+// + v7 block-split per-block v2 Huffman
 
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
@@ -17,22 +18,10 @@ pub type EncodeTable = HashMap<u32, (u32, u32)>;
 pub type DecodeTable = HashMap<(u32, u32), u32>;
 
 // ── Recent-offset slot reuse ──────────────────────────────────────────────────
-//
-// Maintains an LRU cache of the 4 most recently used BACKREF offsets.
-// On a cache hit the offset symbol emitted into the *offset* Huffman table is
-// SLOT_SYMBOL_BASE + pre_move_slot_index (0–3), which costs only the short
-// Huffman code (≈2–3 bits) with zero extra raw bits.
-// On a miss the normal bucket + extra_bits path is used, exactly as in v2/v3.
-//
-// Slot symbols are unambiguously distinct from bucket symbols:
-//   max bucket value = 47  (ob=24)   SLOT_SYMBOL_BASE = 1000  →  no collision.
-//
-// Table overhead: 4 extra fmt0 entries = 12 bytes. Break-even < 0.1% hit rate.
 
 pub const NUM_SLOTS:         usize = 8;
 pub const SLOT_SYMBOL_BASE:  u32   = 1000;
 
-/// Fixed-capacity LRU cache of recently-used BACKREF offsets. MRU at index 0.
 pub struct OffsetSlots {
     slots: [u32; NUM_SLOTS],
     count: usize,
@@ -41,14 +30,9 @@ pub struct OffsetSlots {
 impl OffsetSlots {
     pub fn new() -> Self { Self { slots: [0; NUM_SLOTS], count: 0 } }
 
-    /// Access `offset`.
-    /// Returns `Some(pre_move_index)` on cache hit (moves offset to front).
-    /// Returns `None`              on cache miss  (inserts offset at front).
-    /// Both paths update cache state identically to the decode path.
     pub fn access(&mut self, offset: u32) -> Option<usize> {
         let found = (0..self.count).find(|&i| self.slots[i] == offset);
         if let Some(idx) = found {
-            // Move to front — preserve the pre-move index for the caller.
             for j in (1..=idx).rev() { self.slots[j] = self.slots[j - 1]; }
             self.slots[0] = offset;
             Some(idx)
@@ -61,8 +45,6 @@ impl OffsetSlots {
         }
     }
 
-    /// Decoder path: read the offset stored in `slot_idx`, then move it to front.
-    /// Mirrors exactly what `access(slots[slot_idx])` would do on the encoder side.
     pub fn access_by_slot(&mut self, slot_idx: usize) -> Option<u32> {
         if slot_idx >= self.count { return None; }
         let offset = self.slots[slot_idx];
@@ -126,9 +108,6 @@ pub fn count_offset_bucket_freq(tokens: &[Token]) -> HashMap<u32, u64> {
     freq
 }
 
-/// Like `count_offset_bucket_freq` but intercepts slot hits.
-/// Simulates the exact same LRU cache traversal that the encoder will perform,
-/// so the resulting frequencies are accurate for Huffman table construction.
 pub fn count_offset_bucket_freq_slotted(tokens: &[Token]) -> HashMap<u32, u64> {
     let mut freq  = HashMap::new();
     let mut slots = OffsetSlots::new();
@@ -258,8 +237,6 @@ pub fn build_offset_encode_table(tokens: &[Token]) -> Option<EncodeTable> {
     Some(canonical_codes_from_lengths(&assign_code_lengths(&freq)))
 }
 
-/// Build offset Huffman table that includes slot symbols (1000–1003).
-/// Slot symbols only appear if the file has BACKREFs; returns None otherwise.
 pub fn build_offset_encode_table_slotted(tokens: &[Token]) -> Option<EncodeTable> {
     let freq = count_offset_bucket_freq_slotted(tokens);
     if freq.is_empty() { return None; }
@@ -874,19 +851,11 @@ pub fn read_tokens_joint_v4(
 }
 
 // ── v5: v2 + recent-offset slot reuse ────────────────────────────────────────
-//
-// entropy_flag = 5
-// Header: [lit_table][offset_table_with_slots][bitstream]
-// Offset table contains both bucket symbols (0–47) and slot symbols (1000–1003).
-// On a cache hit: emits slot symbol (Huffman only, no extra raw bits).
-// On a cache miss: emits bucket symbol + extra raw bits (same as v2).
-// LRU cache state is identical on encoder and decoder because they process
-// tokens in the same order and make the same hit/miss decisions.
 
 pub fn write_tokens_joint_v2_slotted(
     tokens:       &[Token],
     lit_table:    &EncodeTable,
-    offset_table: &EncodeTable,   // includes slot symbols 1000–1003
+    offset_table: &EncodeTable,
 ) -> std::io::Result<Vec<u8>> {
     let mut output = Vec::new();
     {
@@ -902,7 +871,6 @@ pub fn write_tokens_joint_v2_slotted(
                     w.write(len, code)?;
                 }
                 Token::Backref { offset, length } => {
-                    // Length symbol
                     let sym = sym_from_length(*length);
                     let &(code, len) = lit_table.get(&sym).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
@@ -910,7 +878,6 @@ pub fn write_tokens_joint_v2_slotted(
                     })?;
                     w.write(len, code)?;
 
-                    // Offset: slot hit or bucket miss
                     if let Some(slot_idx) = slots.access(*offset) {
                         let slot_sym = SLOT_SYMBOL_BASE + slot_idx as u32;
                         let &(scode, slen) = offset_table.get(&slot_sym).ok_or_else(|| {
@@ -918,7 +885,6 @@ pub fn write_tokens_joint_v2_slotted(
                                 format!("v5 slot sym {} missing", slot_sym))
                         })?;
                         w.write(slen, scode)?;
-                        // No extra bits — slot lookup resolves the full offset
                     } else {
                         let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
                         let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
@@ -968,18 +934,16 @@ pub fn read_tokens_joint_v2_slotted(
             let off_sym = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
 
             let offset = if off_sym >= SLOT_SYMBOL_BASE {
-                // Slot hit path
                 let slot_idx = (off_sym - SLOT_SYMBOL_BASE) as usize;
                 slots.access_by_slot(slot_idx).ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData,
                         format!("v5 invalid slot index {}", slot_idx))
                 })?
             } else {
-                // Bucket miss path
                 let extra_cnt = bucket_extra_bits(off_sym);
                 let extra_val = if extra_cnt > 0 { r.read::<u32>(extra_cnt)? } else { 0 };
                 let off = bucket_to_offset(off_sym, extra_val);
-                slots.access(off);  // insert into cache; return value ignored (always None here)
+                slots.access(off);
                 off
             };
             tokens.push(Token::Backref { offset, length });
@@ -989,16 +953,12 @@ pub fn read_tokens_joint_v2_slotted(
 }
 
 // ── v6: v3 + recent-offset slot reuse ────────────────────────────────────────
-//
-// entropy_flag = 6
-// Header: [lit_table0][lit_table1][offset_table_with_slots][bitstream]
-// Combines v3's two-context literal Huffman with v5's slot reuse on offsets.
 
 pub fn write_tokens_joint_v3_slotted(
     tokens:       &[Token],
     lit_table0:   &EncodeTable,
     lit_table1:   &EncodeTable,
-    offset_table: &EncodeTable,   // includes slot symbols 1000–1003
+    offset_table: &EncodeTable,
 ) -> std::io::Result<Vec<u8>> {
     let mut output = Vec::new();
     {
@@ -1107,6 +1067,162 @@ pub fn read_tokens_joint_v3_slotted(
     Ok(tokens)
 }
 
+// ── v7: block-split per-block v2 Huffman ─────────────────────────────────────
+//
+// entropy_flag = 7
+//
+// Splits the token stream into fixed-size blocks. Each block gets its own
+// independent joint lit/length Huffman table and offset bucket Huffman table.
+// Per-block tables track local statistics — beneficial when file statistics
+// shift across sections (spreadsheets, mixed binary, long text).
+//
+// Payload format:
+//   [block_count: u16 LE]
+//   For each block:
+//     [lit_table: serialize_table format]
+//     [offset_table: serialize_table format]
+//     [block_bitstream_len: u32 LE]
+//     [block_bitstream: bytes]
+
+pub fn write_tokens_block_split(
+    tokens:     &[Token],
+    block_size: usize,
+) -> std::io::Result<Vec<u8>> {
+    // Collect non-END tokens, split into chunks of block_size
+    let data: Vec<&Token> = tokens.iter()
+        .filter(|t| !matches!(t, Token::End))
+        .collect();
+
+    if data.is_empty() {
+        // Degenerate: just an END — encode as single block
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_le_bytes());
+        let end_only = vec![Token::End];
+        let lit_table = build_encode_table(&end_only)
+            .ok_or_else(|| std::io::Error::new(
+                std::io::ErrorKind::InvalidData, "block: cannot build empty lit table"
+            ))?;
+        let empty_offset = EncodeTable::new();
+        let coded = write_tokens_joint_v2(&end_only, &lit_table, &empty_offset)?;
+        out.extend_from_slice(&serialize_table(&lit_table));
+        out.extend_from_slice(&serialize_table(&empty_offset));
+        out.extend_from_slice(&(coded.len() as u32).to_le_bytes());
+        out.extend_from_slice(&coded);
+        return Ok(out);
+    }
+
+    let chunks: Vec<&[&Token]> = data.chunks(block_size).collect();
+    let block_count = chunks.len() as u16;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&block_count.to_le_bytes());
+
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        // Build a Vec<Token> for this block, appending END
+        let mut block_tokens: Vec<Token> = chunk.iter()
+            .map(|t| (*t).clone())
+            .collect();
+        block_tokens.push(Token::End);
+
+        // Build per-block tables
+        let lit_table = build_encode_table(&block_tokens)
+            .ok_or_else(|| std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("block {}: empty lit table", chunk_idx),
+            ))?;
+
+        // offset table may be absent if block has no backrefs
+        let offset_table = build_offset_encode_table(&block_tokens)
+            .unwrap_or_default();
+
+        let coded = write_tokens_joint_v2(&block_tokens, &lit_table, &offset_table)?;
+
+        out.extend_from_slice(&serialize_table(&lit_table));
+        out.extend_from_slice(&serialize_table(&offset_table));
+        out.extend_from_slice(&(coded.len() as u32).to_le_bytes());
+        out.extend_from_slice(&coded);
+    }
+
+    Ok(out)
+}
+
+pub fn read_tokens_block_split(data: &[u8]) -> std::io::Result<Vec<Token>> {
+    if data.len() < 2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "block-split: header too short",
+        ));
+    }
+
+    let block_count = u16::from_le_bytes([data[0], data[1]]) as usize;
+    let mut cursor  = 2usize;
+    let mut all_tokens: Vec<Token> = Vec::new();
+
+    for b in 0..block_count {
+        // Deserialize lit table
+        let (lit_enc, lit_c) = deserialize_table(&data[cursor..])
+            .map_err(|e| std::io::Error::new(e.kind(),
+                format!("block {}: lit table: {}", b, e)))?;
+        cursor += lit_c;
+
+        // Deserialize offset table
+        let (off_enc, off_c) = deserialize_table(&data[cursor..])
+            .map_err(|e| std::io::Error::new(e.kind(),
+                format!("block {}: offset table: {}", b, e)))?;
+        cursor += off_c;
+
+        // Read block bitstream length
+        if cursor + 4 > data.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("block {}: length prefix missing", b),
+            ));
+        }
+        let block_len = u32::from_le_bytes([
+            data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
+        ]) as usize;
+        cursor += 4;
+
+        if cursor + block_len > data.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("block {}: bitstream truncated (need {} have {})",
+                    b, block_len, data.len() - cursor),
+            ));
+        }
+
+        let lit_dt = decode_table_from_encode(&lit_enc);
+        let off_dt = decode_table_from_encode(&off_enc);
+
+        let block_tokens = read_tokens_joint_v2(
+            &data[cursor..cursor + block_len],
+            &lit_dt,
+            &off_dt,
+        ).map_err(|e| std::io::Error::new(e.kind(),
+            format!("block {}: decode failed: {}", b, e)))?;
+        cursor += block_len;
+
+        // Collect tokens — strip END from all but last block
+        let is_last = b == block_count - 1;
+        for t in block_tokens {
+            match t {
+                Token::End => {
+                    if is_last { all_tokens.push(Token::End); }
+                    break;
+                }
+                other => all_tokens.push(other),
+            }
+        }
+    }
+
+    // Safety: ensure END is present
+    if !matches!(all_tokens.last(), Some(Token::End)) {
+        all_tokens.push(Token::End);
+    }
+
+    Ok(all_tokens)
+}
+
 // ── Shared Huffman reader ─────────────────────────────────────────────────────
 
 fn read_huffman_sym<R: std::io::Read>(
@@ -1124,4 +1240,4 @@ fn read_huffman_sym<R: std::io::Read>(
         std::io::ErrorKind::InvalidData,
         format!("invalid huffman symbol after {} bits", max_len),
     ))
-    }
+}

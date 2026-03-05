@@ -1,0 +1,15 @@
+Original size: 8664064 bits (1083008 bytes)
+  lb cap applied: wide lb=20 output=54278B >= entropy threshold 400B — re-scanned at lb=15 (cost 391760 vs wide cost 434224)
+Window diagnostics: 9127/17271 tokens BACKREF (52.8%) | offset: 0.0% at max (262143) | 0.5% upper half | length: 0.3% at max (32767) | offset_bits=18 length_bits=15 — OK
+Fold 1 adaptive: offset_bits=18 (window=262143 bytes) length_bits=15 (max_len=32767)
+Fold 1 (LZ): 391760 bits (48970 bytes)
+Fold 2 pairing pre-scan: Cantor fallback rate = 74.1% (threshold 77%)
+Fold 2 (PAIR): 361232 bits (45154 bytes)
+Fold 3 (LZ): 441080 bits (55135 bytes)
+Fold 3 not worth it (ratio 1.221), stopping at fold 2
+  lb cap applied: wide lb=20 output=54278B >= entropy threshold 400B — re-scanned at lb=15 (cost 391760 vs wide cost 434224)
+  v7 block-split bs=1024: 35437 B
+  v7 block-split bs=2048: 33169 B
+  v7 block-split bs=4096: 32079 B
+Entropy flag=5 beats PAIR: 30878 B < 45154 B
+Done. 1083008 bytes → 30884 bytes

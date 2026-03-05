@@ -1,0 +1,16 @@
+PNG detected — will extract raw pixels before folding
+PNG extract: 1024x1024 color_type=2 stride=3 → 3146752 filtered bytes
+PNG: 1024x1024 → 3146752 filtered bytes ready for folding
+Original size: 25174016 bits (3146752 bytes)
+Window diagnostics: 744760/978186 tokens BACKREF (76.1%) | offset: 0.0% at max (131071) | 29.1% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 21698024 bits (2712253 bytes)
+Fold 2 pairing pre-scan: Cantor fallback rate = 98.8% (threshold 77%)
+Fold 2 pairing skipped — high fallback rate
+Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.862, threshold 0.10)
+  v7 block-split bs=1024: 2073024 B
+  v7 block-split bs=2048: 2009928 B
+  v7 block-split bs=4096: 1975060 B
+Joint entropy flag=3: 2712253 → 1926550 B
+PNG header_blob stored: 126 B | original_idat stored: 1723207 B
+Done. 1723969 bytes → 3649897 bytes

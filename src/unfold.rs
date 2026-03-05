@@ -4,6 +4,9 @@
 //! entropy_flag values:
 //!   0 = raw  1 = v1  2 = v2  3 = v3  4 = v4  5 = v5  6 = v6
 //!   7 = v7 block-split per-block v2 Huffman
+//!
+//! filter_flag values:
+//!   0 = none  1-4 = delta stride 1-4  5 = PNG (png_xform path)
 
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
@@ -46,10 +49,44 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     let final_ob = ob_for_fold(fold_count);
     let final_lb = lb_for_fold(fold_count);
 
+    // ── PNG prefix parsing ────────────────────────────────────────────────────
+    // If filter_flag == FILTER_PNG, the bytes immediately after the standard
+    // header are: [header_blob_len: u32 LE][header_blob][png_delta_stride: u8]
+    // The actual compressed payload follows after this PNG section.
+    let (png_header_blob, png_delta_stride, actual_payload_start) =
+        if filter_flag == filters::FILTER_PNG {
+            if payload_start + 4 > input.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "PNG unfold: header_blob_len field missing"));
+            }
+            let blob_len = u32::from_le_bytes(
+                input[payload_start..payload_start+4].try_into().unwrap()
+            ) as usize;
+            let blob_end = payload_start + 4 + blob_len;
+            if blob_end + 1 > input.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "PNG unfold: header_blob truncated"));
+            }
+            let blob         = input[payload_start+4..blob_end].to_vec();
+            let delta_stride = input[blob_end];
+            println!(
+                "PNG unfold: header_blob={} B, delta_stride={}",
+                blob_len, delta_stride
+            );
+            (Some(blob), delta_stride, blob_end + 1)
+        } else {
+            (None, 0u8, payload_start)
+        };
+
+    // ── Entropy decode ────────────────────────────────────────────────────────
+    // All branches use actual_payload_start — which equals payload_start for
+    // non-PNG files and skips the PNG metadata prefix for PNG files.
     let (mut current, folds_to_undo) = match entropy_flag {
 
         1 => {
-            let payload = &input[payload_start..];
+            let payload = &input[actual_payload_start..];
             let (enc_table, consumed) = entropy::deserialize_table(payload)?;
             let dtable  = entropy::decode_table_from_encode(&enc_table);
             let tokens  = entropy::read_tokens_joint(
@@ -60,7 +97,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         }
 
         2 => {
-            let payload = &input[payload_start..];
+            let payload = &input[actual_payload_start..];
             let (lit_enc, lit_c) = entropy::deserialize_table(payload)?;
             let (off_enc, off_c) = entropy::deserialize_table(&payload[lit_c..])?;
             let lit_dt  = entropy::decode_table_from_encode(&lit_enc);
@@ -73,7 +110,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         }
 
         3 => {
-            let payload = &input[payload_start..];
+            let payload = &input[actual_payload_start..];
             let (enc0, c0) = entropy::deserialize_table(payload)?;
             let (enc1, c1) = entropy::deserialize_table(&payload[c0..])?;
             let (off_enc, c2) = entropy::deserialize_table(&payload[c0 + c1..])?;
@@ -88,7 +125,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         }
 
         4 => {
-            let payload = &input[payload_start..];
+            let payload = &input[actual_payload_start..];
             let mut cursor = 0usize;
             let mut lit_dtables: Vec<entropy::DecodeTable> = Vec::with_capacity(8);
             for i in 0..8usize {
@@ -115,7 +152,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         }
 
         5 => {
-            let payload = &input[payload_start..];
+            let payload = &input[actual_payload_start..];
             let (lit_enc, lit_c) = entropy::deserialize_table(payload)?;
             let (off_enc, off_c) = entropy::deserialize_table(&payload[lit_c..])?;
             let lit_dt = entropy::decode_table_from_encode(&lit_enc);
@@ -128,7 +165,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         }
 
         6 => {
-            let payload = &input[payload_start..];
+            let payload = &input[actual_payload_start..];
             let (enc0, c0) = entropy::deserialize_table(payload)?;
             let (enc1, c1) = entropy::deserialize_table(&payload[c0..])?;
             let (off_enc, c2) = entropy::deserialize_table(&payload[c0 + c1..])?;
@@ -143,7 +180,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         }
 
         7 => {
-            let payload = &input[payload_start..];
+            let payload = &input[actual_payload_start..];
             let tokens  = entropy::read_tokens_block_split(payload)?;
             let rec     = reconstruct(&tokens);
             println!("Entropy v7 (block-split) unfold: {} bytes", rec.len());
@@ -151,10 +188,11 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         }
 
         _ => {
-            (input[payload_start..].to_vec(), fold_count)
+            (input[actual_payload_start..].to_vec(), fold_count)
         }
     };
 
+    // ── LZ/PAIR unfold passes ─────────────────────────────────────────────────
     for pass in (1..=folds_to_undo).rev() {
         let ob = ob_for_fold(pass);
         let lb = lb_for_fold(pass);
@@ -173,7 +211,21 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         }
     }
 
-    if filter_flag != filters::FILTER_NONE {
+    // ── Post-filter ───────────────────────────────────────────────────────────
+    if filter_flag == filters::FILTER_PNG {
+        // current = delta-filtered raw pixels
+        // Undo delta, then rebuild the PNG container
+        if let Some(blob) = png_header_blob {
+            let raw_pixels = filters::undo_filter(&current, png_delta_stride);
+            let meta = crate::png_xform::meta_from_blob(&blob)?;
+            let before = raw_pixels.len();
+            current = crate::png_xform::repack_png(&raw_pixels, &meta)?;
+            println!(
+                "PNG repacked: {} raw bytes → {} PNG bytes",
+                before, current.len()
+            );
+        }
+    } else if filter_flag != filters::FILTER_NONE {
         let before = current.len();
         current = filters::undo_filter(&current, filter_flag);
         println!(

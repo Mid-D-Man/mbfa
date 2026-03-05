@@ -226,29 +226,28 @@ jobs:
           open('bench_files/image.bmp','wb').write(hdr + b''.join(reversed(rows)))
           "
 
-          # ── PNG — 256x256 RGB gradient (uncompressed pixels, then PNG-wrapped) ─
-          # Using imagemagick for a real encoded PNG so it reflects realistic
-          # already-compressed image data that most compressors struggle with.
-          convert -size 256x256 \
-            gradient:'rgb(255,80,0)-rgb(0,80,255)' \
-            -channel RGB \
-            bench_files/image_gradient.png
-          echo "PNG size: $(wc -c < bench_files/image_gradient.png) bytes"
+          # ── PNG small (~5-20KB): 256x256 plasma fractal noise ──────────────
+          # plasma: generates complex fractal content that PNG's DEFLATE
+          # struggles to compress as well as a smooth gradient.
+          # Expected file size: 5–20KB depending on the generated pattern.
+          convert -size 256x256 plasma: -depth 8 bench_files/image_png_small.png
+          echo "PNG small size: $(wc -c < bench_files/image_png_small.png) bytes"
+
+          # ── PNG large (~500KB–1.5MB): 1024x1024 plasma fractal ─────────────
+          # Large enough to exercise the PNG transform path meaningfully.
+          # 1024x1024 plasma with RGB depth produces ~500KB–1.5MB PNG.
+          convert -size 1024x1024 plasma: -depth 8 bench_files/image_png_large.png
+          echo "PNG large size: $(wc -c < bench_files/image_png_large.png) bytes"
 
           # ── JPEG — 512x512 photo-like gradient noise ───────────────────────
-          # Generate a noisy gradient image then encode as JPEG quality 85.
-          # JPEG at q85 is already heavily compressed — tests near-incompressible
-          # behaviour.
           python3 -c "
           import struct, zlib, math, random
           random.seed(7)
-          # Write a 512x512 RGB raw PPM first, then convert
           w, h = 512, 512
           rows = []
           for y in range(h):
               row = bytearray()
               for x in range(w):
-                  # Smooth gradient + mild noise — representative of real photo data
                   r = int(x / w * 200 + random.gauss(0, 8)) % 256
                   g = int(y / h * 200 + random.gauss(0, 8)) % 256
                   b = int((x + y) / (w + h) * 200 + random.gauss(0, 8)) % 256
@@ -264,30 +263,13 @@ jobs:
           echo "JPEG size: $(wc -c < bench_files/photo.jpg) bytes"
 
           # ── FBX — binary FBX stub (~150KB synthetic mesh data) ────────────
-          # Writes a valid FBX 7.4 binary header followed by realistic mesh
-          # data (vertices, normals, UV coords, indices) as would appear in a
-          # real game asset export. Not a fully spec-compliant scene graph —
-          # just representative binary content for compression benchmarking.
           python3 -c "
           import struct, math, random
 
           random.seed(13)
 
           def fbx_magic():
-              # 'Kaydara FBX Binary  ' + 0x00 0x1A 0x00 + version u32 LE
               return b'Kaydara FBX Binary  \x00\x1a\x00' + struct.pack('<I', 7400)
-
-          def fbx_node(name: bytes, props: bytes, children: bytes = b'') -> bytes:
-              # FBX 7.4 node record: end_offset(u64) num_props(u64)
-              #   prop_list_len(u64) name_len(u8) name props children null_record
-              name_bytes = name
-              num_props  = 0  # simplified — properties embedded raw
-              prop_len   = len(props)
-              # end_offset is relative to start of file — we'll use 0 as placeholder
-              # (not a fully valid FBX tree, but fine for binary content benchmarking)
-              header = struct.pack('<QQQ', 0, num_props, prop_len)
-              header += bytes([len(name_bytes)]) + name_bytes
-              return header + props + children
 
           def pack_float_array(vals):
               return struct.pack(f'<{len(vals)}f', *vals)
@@ -295,7 +277,6 @@ jobs:
           def pack_int_array(vals):
               return struct.pack(f'<{len(vals)}i', *vals)
 
-          # Generate a subdivided sphere mesh — ~2000 vertices
           vertices = []
           normals  = []
           uvs      = []
@@ -310,7 +291,6 @@ jobs:
                   x = math.sin(phi) * math.cos(theta)
                   y = math.cos(phi)
                   z = math.sin(phi) * math.sin(theta)
-                  # Slight random jitter for realism
                   jx = x + random.gauss(0, 0.002)
                   jy = y + random.gauss(0, 0.002)
                   jz = z + random.gauss(0, 0.002)
@@ -324,19 +304,16 @@ jobs:
                   b = a + segs + 1
                   indices.extend([a, b, a + 1, b, b + 1, a + 1])
 
-          # Pack all arrays
           verts_bytes   = pack_float_array(vertices)
           normals_bytes = pack_float_array(normals)
           uvs_bytes     = pack_float_array(uvs)
           idx_bytes     = pack_int_array(indices)
 
-          # Transform data block: scale, rotation, translation (4x4 matrix x 50 objects)
           transforms = []
           for i in range(50):
               angle = i * 0.2
               scale = 1.0 + i * 0.01
               tx, ty, tz = i * 5.0, 0.0, 0.0
-              # Row-major 4x4 transform matrix
               m = [
                   scale * math.cos(angle), -math.sin(angle), 0.0, tx,
                   math.sin(angle),  scale * math.cos(angle), 0.0, ty,
@@ -346,7 +323,6 @@ jobs:
               transforms.extend(m)
           transforms_bytes = pack_float_array(transforms)
 
-          # Material / property block — string-keyed float properties
           mat_props = b''
           prop_names = [b'DiffuseColor', b'SpecularColor', b'EmissiveColor',
                         b'Roughness', b'Metalness', b'Opacity', b'BumpFactor']
@@ -358,13 +334,10 @@ jobs:
                       random.uniform(0, 1),
                       random.uniform(0, 1))
 
-          # Assemble FBX binary blob
           magic  = fbx_magic()
           body   = verts_bytes + normals_bytes + uvs_bytes + idx_bytes
           body  += transforms_bytes + mat_props
-          # Null record terminator (13 bytes for FBX 7.4)
-          null_record = b'\x00' * 13
-          body += null_record
+          body  += b'\x00' * 13
 
           with open('bench_files/mesh.fbx', 'wb') as f:
               f.write(magic + body)
@@ -468,7 +441,7 @@ jobs:
             local mbfa_size=$(wc -c < "bench_files/$file.mbfa" 2>/dev/null || echo 0)
 
             local fold_detail=$(cat bench_results/mbfa_log_${name}.txt | \
-              grep -E "^(Original|Fold|Done|Joint|Entropy|Window|Wide)" | \
+              grep -E "^(Original|Fold|Done|Joint|Entropy|Window|Wide|PNG|Filter)" | \
               tr '\n' '|' | sed 's/"/\\"/g')
 
             # ── MBFA decompress (timed separately) ────────────────────────────
@@ -491,7 +464,6 @@ jobs:
             local gz_ms=$(( (gz_end - gz_start) / 1000000 ))
             local gz_size=$(wc -c < "bench_files/$file.gz" 2>/dev/null || echo 0)
 
-            # gzip decompress timing
             local gz_decomp_start=$(date +%s%N)
             gzip -d -k -f -c "bench_files/$file.gz" > /dev/null 2>/dev/null
             local gz_decomp_end=$(date +%s%N)
@@ -540,7 +512,6 @@ jobs:
             local zpaq_ms=$(( (zpaq_end - zpaq_start) / 1000000 ))
             local zpaq_size=$(wc -c < "bench_files/$file.zpaq" 2>/dev/null || echo 0)
 
-            # zpaq decompress timing
             local zpaq_decomp_ms=0
             if [ "$zpaq_size" -gt 0 ]; then
               local zpaq_decomp_start=$(date +%s%N)
@@ -605,7 +576,7 @@ jobs:
           EOJSON
 
             local rank_str="#${rank}"
-            printf "%-26s %9s B | MBFA:%6s%%(%-2s) C:%-4sms D:%-4sms | gz C:%-4sms D:%-4sms | rt:%s\n" \
+            printf "%-28s %9s B | MBFA:%6s%%(%-2s) C:%-4sms D:%-4sms | gz C:%-4sms D:%-4sms | rt:%s\n" \
               "$name" "$orig_size" \
               "$mbfa_pct" "$rank_str" \
               "$mbfa_ms" "$mbfa_decomp_ms" \
@@ -620,23 +591,24 @@ jobs:
           echo "================================================================"
           echo ""
           echo "── Small / Medium ───────────────────────────────────────────────"
-          run_bench "repetitive.txt"    "Repetitive_12KB"
-          run_bench "alice_small.txt"   "Prose_Alice_20KB"
-          run_bench "alice_100k.txt"    "Prose_Alice_100KB"
-          run_bench "random.bin"        "Random_10KB"
-          run_bench "source_code.rs"    "Source_Code"
-          run_bench "data.json"         "JSON_100KB"
-          run_bench "audio.wav"         "Audio_WAV_44KB"
-          run_bench "image.bmp"         "Image_BMP_29KB"
-          run_bench "image_gradient.png" "Image_PNG_256"
-          run_bench "photo.jpg"          "Image_JPEG_512"
-          run_bench "mesh.fbx"           "Mesh_FBX"
+          run_bench "repetitive.txt"      "Repetitive_12KB"
+          run_bench "alice_small.txt"     "Prose_Alice_20KB"
+          run_bench "alice_100k.txt"      "Prose_Alice_100KB"
+          run_bench "random.bin"          "Random_10KB"
+          run_bench "source_code.rs"      "Source_Code"
+          run_bench "data.json"           "JSON_100KB"
+          run_bench "audio.wav"           "Audio_WAV_44KB"
+          run_bench "image.bmp"           "Image_BMP_29KB"
+          run_bench "image_png_small.png" "Image_PNG_Small"
+          run_bench "image_png_large.png" "Image_PNG_1MB"
+          run_bench "photo.jpg"           "Image_JPEG_512"
+          run_bench "mesh.fbx"            "Mesh_FBX"
           echo ""
           echo "── Large (MB scale) ─────────────────────────────────────────────"
-          run_bench "prose_3mb.txt"      "Prose_WarAndPeace_3MB"
-          run_bench "repetitive_2mb.txt" "Repetitive_2MB"
-          run_bench "data_2mb.json"      "JSON_2MB"
-          run_bench "source_1mb.rs"      "Source_1MB"
+          run_bench "prose_3mb.txt"       "Prose_WarAndPeace_3MB"
+          run_bench "repetitive_2mb.txt"  "Repetitive_2MB"
+          run_bench "data_2mb.json"       "JSON_2MB"
+          run_bench "source_1mb.rs"       "Source_1MB"
 
           echo "]" >> bench_results/results.json
 
@@ -667,7 +639,8 @@ jobs:
             bench_files/data_2mb.json \
             bench_files/audio.wav \
             bench_files/image.bmp \
-            bench_files/image_gradient.png \
+            bench_files/image_png_small.png \
+            bench_files/image_png_large.png \
             bench_files/photo.jpg \
             bench_files/mesh.fbx \
             2>&1 | tee bench_results/offset_profile.txt

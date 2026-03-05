@@ -73,10 +73,8 @@ jobs:
           mkdir -p archive_results
 
           # ── Source code files ────────────────────────────────────────────────
-          # Copy all of MBFA's own source — realistic source tree
           cp src/*.rs   archive_corpus/source/
           cp Cargo.toml archive_corpus/source/
-          # Duplicate and vary to make it a more interesting source tree (~200KB+)
           for i in 1 2 3 4 5; do
             for f in src/*.rs; do
               base=$(basename "$f" .rs)
@@ -96,7 +94,6 @@ jobs:
             -o archive_corpus/text/war_and_peace.txt 2>/dev/null || \
             cat archive_corpus/text/alice.txt archive_corpus/text/alice.txt > archive_corpus/text/war_and_peace.txt
 
-          # Generate synthetic prose files
           python3 -c "
           import random
           random.seed(1)
@@ -136,7 +133,6 @@ jobs:
                   json.dumps({'batch': batch, 'records': records}, indent=2))
           "
 
-          # CSV files
           python3 -c "
           import random, csv
           random.seed(7)
@@ -160,7 +156,6 @@ jobs:
           python3 -c "import os; open('archive_corpus/binary/random_2.bin','wb').write(os.urandom(75000))"
           python3 -c "import os; open('archive_corpus/binary/random_3.bin','wb').write(os.urandom(30000))"
 
-          # BMP images
           python3 -c "
           import struct
           for idx, (w, h, seed) in enumerate([(128,128,1),(200,150,2),(256,256,3)]):
@@ -181,7 +176,6 @@ jobs:
                   hdr + b''.join(reversed(rows)))
           "
 
-          # WAV audio files (short synthetic tones)
           python3 -c "
           import struct, math
           for idx, freq in enumerate([440, 880, 220]):
@@ -196,7 +190,7 @@ jobs:
           "
           echo "Binary files: $(ls archive_corpus/binary | wc -l) files, $(du -sh archive_corpus/binary | cut -f1)"
 
-          # ── Mixed directory (one of each type) ───────────────────────────────
+          # ── Mixed directory ───────────────────────────────────────────────────
           cp archive_corpus/source/encoder.rs       archive_corpus/mixed/
           cp archive_corpus/text/alice.txt          archive_corpus/mixed/
           cp archive_corpus/data/records_0.json     archive_corpus/mixed/
@@ -217,12 +211,6 @@ jobs:
 
           echo "[" > archive_results/results.json
           FIRST=true
-
-          # ── run_archive_bench ────────────────────────────────────────────────
-          # Args: dir_path  display_name
-          # Creates MBFA archive, zip, tar.gz, tar.zst, tar.xz, tar.br
-          # Measures compress time, decompress time, output size.
-          # Verifies MBFA roundtrip by re-extracting and diffing every file.
 
           run_archive_bench() {
             local dir="$1"
@@ -250,7 +238,7 @@ jobs:
             local mbfa_d_end=$(date +%s%N)
             local mbfa_d_ms=$(( (mbfa_d_end - mbfa_d_start) / 1000000 ))
 
-            # Roundtrip verification — diff every file
+            # Roundtrip verification
             local rt_status="PASS"
             local rt_failures=0
             while IFS= read -r -d '' src_file; do
@@ -347,7 +335,7 @@ jobs:
 
             local tbr_c_start=$(date +%s%N)
             tar -c -C "$(dirname "$dir")" "$(basename "$dir")" | \
-              brotli -q -o "$tbr_out"
+              brotli -q -c > "$tbr_out"
             local tbr_c_end=$(date +%s%N)
             local tbr_c_ms=$(( (tbr_c_end - tbr_c_start) / 1000000 ))
             local tbr_size=$(wc -c < "$tbr_out" 2>/dev/null || echo 0)
@@ -406,8 +394,6 @@ jobs:
           run_archive_bench "archive_corpus/data"    "JSON_CSV_Data"
           run_archive_bench "archive_corpus/binary"  "Binary_Media"
           run_archive_bench "archive_corpus/mixed"   "Mixed_Directory"
-
-          # Full corpus as single archive — tests block grouping across types
           run_archive_bench "archive_corpus"         "Full_Corpus"
 
           echo "]" >> archive_results/results.json
@@ -420,9 +406,6 @@ jobs:
       - name: Single-file extract test
         run: |
           echo "── Single-file extract test ──────────────────────────────────"
-          # Archive the full corpus, then extract individual files by path
-          # and verify each one matches the original.
-
           ./target/release/mbfa archive archive_corpus /tmp/test_single_extract.mbfa
           echo "Archive created: $(wc -c < /tmp/test_single_extract.mbfa) bytes"
 
@@ -452,6 +435,20 @@ jobs:
           ./target/release/mbfa archive archive_corpus /tmp/test_list.mbfa > /dev/null 2>&1
           ./target/release/mbfa list /tmp/test_list.mbfa
           echo "List test complete."
+
+      - name: Generate archive HTML
+        run: |
+          BUILD_DATE=$(date -u)
+          BUILD_NUM="${{ github.run_number }}"
+          COMMIT="${{ github.sha }}"
+          BRANCH="${{ github.ref_name }}"
+
+          cp .github/archive-template.html archive_results/index.html
+
+          sed -i "s/BUILD_NUM_PLACEHOLDER/${BUILD_NUM}/g"  archive_results/index.html
+          sed -i "s/BRANCH_PLACEHOLDER/${BRANCH}/g"        archive_results/index.html
+          sed -i "s/COMMIT_PLACEHOLDER/${COMMIT:0:8}/g"    archive_results/index.html
+          sed -i "s|DATE_PLACEHOLDER|${BUILD_DATE}|g"      archive_results/index.html
 
       - name: Upload archive results
         uses: actions/upload-artifact@v4

@@ -1,6 +1,6 @@
 // src/lib.rs — pre-slot baseline + v4 byte-category entropy + delta filter support
 // + v5/v6 recent-offset slot reuse + v7 block-split per-block Huffman
-// + PNG raw-pixel extraction via png_xform
+// + PNG filtered-bytes extraction via png_xform
 pub mod opcode;
 pub mod encoder;
 pub mod bitwriter;
@@ -17,42 +17,34 @@ pub mod archive_io;
 pub mod platform;
 use std::io;
 
-/// File header layout (v3):
+/// File header layout:
 ///   Byte 0:              fold_count
 ///   Byte 1:              pair_flag    (1 = fold 2 used pair encoding)
-///   Byte 2:              entropy_flag
-///                          0 = raw  1 = v1  2 = v2  3 = v3  4 = v4
-///                          5 = v5   6 = v6  7 = v7 block-split
+///   Byte 2:              entropy_flag (0-7)
 ///   Byte 3:              filter_flag
 ///                          0 = none  1-4 = delta stride 1-4
-///                          5 = PNG (raw pixel path via png_xform)
-///   Bytes 4..4+N:        offset_bits[0..N]  where N = fold_count
+///                          5 = PNG (inflate IDAT path)
+///   Bytes 4..4+N:        offset_bits[0..N]  N = fold_count
 ///   Bytes 4+N..4+2N:     length_bits[0..N]
 ///   --- if filter_flag == 5 (PNG) ---
-///   Bytes 4+2N..4+2N+4:  header_blob_len (u32 LE)
+///   Bytes 4+2N..4+2N+4:  header_blob_len u32 LE
 ///   Bytes 4+2N+4..:      header_blob (PNG chunks without IDAT)
-///   1 byte:              png_delta_stride (1-4)
 ///   --- end PNG section ---
-///   Byte 4+2N onward:    compressed payload
+///   Remaining:           compressed payload
 pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     // ── Pre-filter ────────────────────────────────────────────────────────────
     let mut filter_flag = filters::detect_filter(input);
     let mut png_meta_opt: Option<png_xform::PngMeta> = None;
-    let mut png_delta_stride: u8 = 0;
 
     let filter_buf: Option<Vec<u8>> = if filter_flag == filters::FILTER_PNG {
-        match png_xform::extract_raw_pixels(input) {
-            Ok((raw_pixels, meta)) => {
-                // Clamp stride to 1-4 for the delta filter
-                png_delta_stride = meta.stride.clamp(1, 4) as u8;
-                let delta = filters::apply_filter(&raw_pixels, png_delta_stride);
+        match png_xform::extract_filtered_bytes(input) {
+            Ok((filtered, meta)) => {
                 println!(
-                    "PNG: {}x{} px, color_type={}, stride={} → delta{} on {} raw bytes",
-                    meta.width, meta.height, meta.color_type,
-                    meta.stride, png_delta_stride, raw_pixels.len()
+                    "PNG: {}x{} → {} filtered bytes ready for folding",
+                    meta.width, meta.height, filtered.len()
                 );
                 png_meta_opt = Some(meta);
-                Some(delta)
+                Some(filtered)
             }
             Err(e) => {
                 eprintln!("PNG extraction failed ({}), falling back to raw fold", e);
@@ -63,7 +55,7 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     } else if filter_flag != filters::FILTER_NONE {
         let f = filters::apply_filter(input, filter_flag);
         println!(
-            "Filter delta{}: {} bytes in, {} bytes filtered (same size — pre-LZ transform)",
+            "Filter delta{}: {} bytes in, {} bytes filtered",
             filter_flag, input.len(), f.len()
         );
         Some(f)
@@ -150,17 +142,12 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     for &ob in &out_ob { output.push(ob as u8); }
     for &lb in &out_lb { output.push(lb as u8); }
 
-    // PNG metadata block — stored between standard header and compressed payload
+    // PNG metadata block — header_blob stored between standard header and payload
     if filter_flag == filters::FILTER_PNG {
         if let Some(ref meta) = png_meta_opt {
-            let blob_len = meta.header_blob.len() as u32;
-            output.extend_from_slice(&blob_len.to_le_bytes());
+            output.extend_from_slice(&(meta.header_blob.len() as u32).to_le_bytes());
             output.extend_from_slice(&meta.header_blob);
-            output.push(png_delta_stride);
-            println!(
-                "PNG meta stored: {} byte header_blob, delta_stride={}",
-                meta.header_blob.len(), png_delta_stride
-            );
+            println!("PNG header_blob stored: {} B", meta.header_blob.len());
         }
     }
 
@@ -249,7 +236,6 @@ fn try_entropy_block_split(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
 
     for &block_size in &[1024usize, 2048, 4096] {
         if token_count < block_size * 3 { continue; }
-
         if let Ok(payload) = entropy::write_tokens_block_split(tokens, block_size) {
             let is_better = best.as_ref().map_or(true, |b| payload.len() < b.len());
             if is_better {

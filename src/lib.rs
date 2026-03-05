@@ -1,5 +1,6 @@
 // src/lib.rs — pre-slot baseline + v4 byte-category entropy + delta filter support
 // + v5/v6 recent-offset slot reuse + v7 block-split per-block Huffman
+// + PNG raw-pixel extraction via png_xform
 pub mod opcode;
 pub mod encoder;
 pub mod bitwriter;
@@ -10,6 +11,7 @@ pub mod fold;
 pub mod unfold;
 pub mod entropy;
 pub mod filters;
+pub mod png_xform;
 pub mod archive;
 pub mod archive_io;
 pub mod platform;
@@ -19,33 +21,57 @@ use std::io;
 ///   Byte 0:              fold_count
 ///   Byte 1:              pair_flag    (1 = fold 2 used pair encoding)
 ///   Byte 2:              entropy_flag
-///                          0 = raw (no entropy)
-///                          1 = v1 joint Huffman, raw offsets
-///                          2 = v2 joint Huffman + offset bucket Huffman
-///                          3 = v3 two-context Huffman + shared offset buckets
-///                          4 = v4 eight-context (byte-category) + shared offset buckets
-///                          5 = v5 v2 + recent-offset slot reuse (8-slot LRU)
-///                          6 = v6 v3 + recent-offset slot reuse (8-slot LRU)
-///                          7 = v7 block-split per-block v2 Huffman
+///                          0 = raw  1 = v1  2 = v2  3 = v3  4 = v4
+///                          5 = v5   6 = v6  7 = v7 block-split
 ///   Byte 3:              filter_flag
 ///                          0 = none  1-4 = delta stride 1-4
+///                          5 = PNG (raw pixel path via png_xform)
 ///   Bytes 4..4+N:        offset_bits[0..N]  where N = fold_count
 ///   Bytes 4+N..4+2N:     length_bits[0..N]
+///   --- if filter_flag == 5 (PNG) ---
+///   Bytes 4+2N..4+2N+4:  header_blob_len (u32 LE)
+///   Bytes 4+2N+4..:      header_blob (PNG chunks without IDAT)
+///   1 byte:              png_delta_stride (1-4)
+///   --- end PNG section ---
 ///   Byte 4+2N onward:    compressed payload
 pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     // ── Pre-filter ────────────────────────────────────────────────────────────
-    let filter_flag = filters::detect_filter(input);
-    let filtered: std::borrow::Cow<[u8]> = if filter_flag != filters::FILTER_NONE {
+    let mut filter_flag = filters::detect_filter(input);
+    let mut png_meta_opt: Option<png_xform::PngMeta> = None;
+    let mut png_delta_stride: u8 = 0;
+
+    let filter_buf: Option<Vec<u8>> = if filter_flag == filters::FILTER_PNG {
+        match png_xform::extract_raw_pixels(input) {
+            Ok((raw_pixels, meta)) => {
+                // Clamp stride to 1-4 for the delta filter
+                png_delta_stride = meta.stride.clamp(1, 4) as u8;
+                let delta = filters::apply_filter(&raw_pixels, png_delta_stride);
+                println!(
+                    "PNG: {}x{} px, color_type={}, stride={} → delta{} on {} raw bytes",
+                    meta.width, meta.height, meta.color_type,
+                    meta.stride, png_delta_stride, raw_pixels.len()
+                );
+                png_meta_opt = Some(meta);
+                Some(delta)
+            }
+            Err(e) => {
+                eprintln!("PNG extraction failed ({}), falling back to raw fold", e);
+                filter_flag = filters::FILTER_NONE;
+                None
+            }
+        }
+    } else if filter_flag != filters::FILTER_NONE {
         let f = filters::apply_filter(input, filter_flag);
         println!(
             "Filter delta{}: {} bytes in, {} bytes filtered (same size — pre-LZ transform)",
             filter_flag, input.len(), f.len()
         );
-        std::borrow::Cow::Owned(f)
+        Some(f)
     } else {
-        std::borrow::Cow::Borrowed(input)
+        None
     };
-    let to_fold: &[u8] = &filtered;
+
+    let to_fold: &[u8] = filter_buf.as_deref().unwrap_or(input);
 
     // ── Fold passes ───────────────────────────────────────────────────────────
     let (compressed, folds_done, used_pairing, offset_bits_per_fold, length_bits_per_fold) =
@@ -123,6 +149,21 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     output.push(filter_flag);
     for &ob in &out_ob { output.push(ob as u8); }
     for &lb in &out_lb { output.push(lb as u8); }
+
+    // PNG metadata block — stored between standard header and compressed payload
+    if filter_flag == filters::FILTER_PNG {
+        if let Some(ref meta) = png_meta_opt {
+            let blob_len = meta.header_blob.len() as u32;
+            output.extend_from_slice(&blob_len.to_le_bytes());
+            output.extend_from_slice(&meta.header_blob);
+            output.push(png_delta_stride);
+            println!(
+                "PNG meta stored: {} byte header_blob, delta_stride={}",
+                meta.header_blob.len(), png_delta_stride
+            );
+        }
+    }
+
     output.extend_from_slice(&final_payload);
     Ok(output)
 }
@@ -199,10 +240,6 @@ fn try_entropy_v3_slotted(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     Some(payload)
 }
 
-/// v7: block-split per-block v2 Huffman.
-/// Tries block sizes 1024, 2048, 4096. Only attempts if we have
-/// at least 3 blocks worth of tokens (overhead must be justified).
-/// Competes against v1-v6 — only fires if it actually wins.
 fn try_entropy_block_split(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     let token_count = tokens.iter()
         .filter(|t| !matches!(t, opcode::Token::End))
@@ -211,16 +248,12 @@ fn try_entropy_block_split(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     let mut best: Option<Vec<u8>> = None;
 
     for &block_size in &[1024usize, 2048, 4096] {
-        // Require at least 3 full blocks to justify the per-block overhead
         if token_count < block_size * 3 { continue; }
 
         if let Ok(payload) = entropy::write_tokens_block_split(tokens, block_size) {
             let is_better = best.as_ref().map_or(true, |b| payload.len() < b.len());
             if is_better {
-                println!(
-                    "  v7 block-split bs={}: {} B",
-                    block_size, payload.len()
-                );
+                println!("  v7 block-split bs={}: {} B", block_size, payload.len());
                 best = Some(payload);
             }
         }

@@ -335,7 +335,7 @@ jobs:
 
             local tbr_c_start=$(date +%s%N)
             tar -c -C "$(dirname "$dir")" "$(basename "$dir")" | \
-              brotli -q -c > "$tbr_out"
+              brotli -q 6 -c > "$tbr_out"
             local tbr_c_end=$(date +%s%N)
             local tbr_c_ms=$(( (tbr_c_end - tbr_c_start) / 1000000 ))
             local tbr_size=$(wc -c < "$tbr_out" 2>/dev/null || echo 0)

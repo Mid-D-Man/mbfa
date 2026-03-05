@@ -129,6 +129,14 @@
           onmouseout="this.style.background='#0f1e3a'">
           &#x1F4DA; Canterbury Corpus &#x2192;
         </a>
+        <a href="archive/" style="display:inline-flex;align-items:center;gap:6px;
+          background:#0f2a1a;border:1px solid #1a5a2a;color:#3fb950;
+          padding:5px 14px;border-radius:6px;font-size:0.82rem;
+          text-decoration:none;margin-top:2px;transition:background 0.15s;"
+          onmouseover="this.style.background='#1a3a24'"
+          onmouseout="this.style.background='#0f2a1a'">
+          &#x1F4E6; Archive Benchmark &#x2192;
+        </a>
         <a href="./visual.html"
           style="display:inline-flex;align-items:center;gap:6px;
           background:rgba(247,129,102,0.1);border:1px solid #f78166;
@@ -253,7 +261,6 @@
       return { label:'Text', cls:'badge-text' };
     }
 
-    // Formats where ratios >= 95% are expected and should be annotated
     function isExpectedIncompressible(name) {
       const n = name.toLowerCase();
       return n.includes('png') || n.includes('jpeg') || n.includes('jpg') || n.includes('photo');
@@ -297,7 +304,6 @@
 
           const scale = v => Math.min(140, Math.round(parseFloat(v) * 1.4));
 
-          // Compress+decompress time cell for MBFA
           function mbfaCell(pct, bytes, cMs, dMs, colorClass) {
             return `<td class="${colorClass}">${pct}%<br>
               <span class="sub" style="color:#79c0ff">C:${cMs}ms</span>
@@ -307,7 +313,6 @@
             </td>`;
           }
 
-          // Standard cell for other algorithms
           function cell(pct, bytes, ms, dMs) {
             return `<td>${pct}%<br>
               <span class="sub" style="color:#79c0ff">C:${ms}ms</span>
@@ -523,4 +528,4 @@
     document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
   </script>
 </body>
-</html>
+  </html>

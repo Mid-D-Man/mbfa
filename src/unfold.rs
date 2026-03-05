@@ -40,165 +40,99 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     let final_ob = ob_for_fold(fold_count);
     let final_lb = lb_for_fold(fold_count);
 
-    // ── PNG prefix: [header_blob_len u32][header_blob][idat_len u32][original_idat] ──
-    // Sits between the standard fold header and the compressed payload.
-    struct PngBlobs {
-        header_blob:   Vec<u8>,
-        original_idat: Vec<u8>,
-    }
-
-    let (png_blobs, actual_payload_start) =
-        if filter_flag == filters::FILTER_PNG {
-            // Read header_blob
-            if payload_start + 4 > input.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "PNG unfold: header_blob_len missing"));
-            }
-            let blob_len = u32::from_le_bytes(
-                input[payload_start..payload_start+4].try_into().unwrap()
-            ) as usize;
-            let blob_end = payload_start + 4 + blob_len;
-            if blob_end > input.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "PNG unfold: header_blob truncated"));
-            }
-            let header_blob = input[payload_start+4..blob_end].to_vec();
-
-            // Read original_idat
-            if blob_end + 4 > input.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "PNG unfold: original_idat_len missing"));
-            }
-            let idat_len = u32::from_le_bytes(
-                input[blob_end..blob_end+4].try_into().unwrap()
-            ) as usize;
-            let idat_end = blob_end + 4 + idat_len;
-            if idat_end > input.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "PNG unfold: original_idat truncated"));
-            }
-            let original_idat = input[blob_end+4..idat_end].to_vec();
-
-            println!(
-                "PNG unfold: header_blob={} B | original_idat={} B",
-                blob_len, idat_len
-            );
-
-            (Some(PngBlobs { header_blob, original_idat }), idat_end)
-        } else {
-            (None, payload_start)
-        };
-
     // ── Entropy decode ────────────────────────────────────────────────────────
     let (mut current, folds_to_undo) = match entropy_flag {
 
+        // v1: joint lit/length + offset bucket
         1 => {
-            let payload = &input[actual_payload_start..];
-            let (enc_table, consumed) = entropy::deserialize_table(payload)?;
-            let dtable  = entropy::decode_table_from_encode(&enc_table);
-            let tokens  = entropy::read_tokens_joint(
-                &payload[consumed..], &dtable, final_ob, final_lb)?;
+            let payload = &input[payload_start..];
+            let (lit_enc, lit_c) = entropy::deserialize_table(payload)?;
+            let (off_enc, off_c) = entropy::deserialize_table(&payload[lit_c..])?;
+            let lit_dt  = entropy::decode_table_from_encode(&lit_enc);
+            let off_dt  = entropy::decode_table_from_encode(&off_enc);
+            let tokens  = entropy::read_tokens_v1(
+                &payload[lit_c + off_c..], &lit_dt, &off_dt)?;
             let rec = reconstruct(&tokens);
             println!("Entropy v1 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
 
+        // v2: 2-context lit/length + offset bucket
         2 => {
-            let payload = &input[actual_payload_start..];
-            let (lit_enc, lit_c) = entropy::deserialize_table(payload)?;
-            let (off_enc, off_c) = entropy::deserialize_table(&payload[lit_c..])?;
-            let lit_dt  = entropy::decode_table_from_encode(&lit_enc);
-            let off_dt  = entropy::decode_table_from_encode(&off_enc);
-            let tokens  = entropy::read_tokens_joint_v2(
-                &payload[lit_c + off_c..], &lit_dt, &off_dt)?;
+            let payload = &input[payload_start..];
+            let (enc0, c0) = entropy::deserialize_table(payload)?;
+            let (enc1, c1) = entropy::deserialize_table(&payload[c0..])?;
+            let (off_enc, c2) = entropy::deserialize_table(&payload[c0 + c1..])?;
+            let dt0    = entropy::decode_table_from_encode(&enc0);
+            let dt1    = entropy::decode_table_from_encode(&enc1);
+            let off_dt = entropy::decode_table_from_encode(&off_enc);
+            let tokens = entropy::read_tokens_v2(
+                &payload[c0 + c1 + c2..], &dt0, &dt1, &off_dt)?;
             let rec = reconstruct(&tokens);
             println!("Entropy v2 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
 
+        // v3: 8-context lit/length + offset bucket
         3 => {
-            let payload = &input[actual_payload_start..];
-            let (enc0, c0) = entropy::deserialize_table(payload)?;
-            let (enc1, c1) = entropy::deserialize_table(&payload[c0..])?;
-            let (off_enc, c2) = entropy::deserialize_table(&payload[c0 + c1..])?;
-            let dt0    = entropy::decode_table_from_encode(&enc0);
-            let dt1    = entropy::decode_table_from_encode(&enc1);
-            let off_dt = entropy::decode_table_from_encode(&off_enc);
-            let tokens = entropy::read_tokens_joint_v3(
-                &payload[c0 + c1 + c2..], &dt0, &dt1, &off_dt)?;
-            let rec = reconstruct(&tokens);
-            println!("Entropy v3 unfold: {} bytes", rec.len());
-            (rec, fold_count.saturating_sub(1))
-        }
-
-        4 => {
-            let payload = &input[actual_payload_start..];
+            let payload = &input[payload_start..];
             let mut cursor = 0usize;
             let mut lit_dtables: Vec<entropy::DecodeTable> = Vec::with_capacity(8);
             for i in 0..8usize {
                 let (enc, consumed) = entropy::deserialize_table(&payload[cursor..])
                     .map_err(|e| std::io::Error::new(e.kind(),
-                        format!("v4 unfold: lit table {} failed: {}", i, e)))?;
+                        format!("v3 unfold: lit table {} failed: {}", i, e)))?;
                 lit_dtables.push(entropy::decode_table_from_encode(&enc));
                 cursor += consumed;
             }
             let (off_enc, off_c) = entropy::deserialize_table(&payload[cursor..])
                 .map_err(|e| std::io::Error::new(e.kind(),
-                    format!("v4 unfold: offset table failed: {}", e)))?;
+                    format!("v3 unfold: offset table failed: {}", e)))?;
             let off_dt = entropy::decode_table_from_encode(&off_enc);
             cursor += off_c;
             let arr: [entropy::DecodeTable; 8] = lit_dtables.try_into()
                 .map_err(|_| std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "v4 unfold: expected exactly 8 literal tables"))?;
-            let tokens = entropy::read_tokens_joint_v4(&payload[cursor..], &arr, &off_dt)?;
+                    "v3 unfold: expected exactly 8 literal tables"))?;
+            let tokens = entropy::read_tokens_v3(&payload[cursor..], &arr, &off_dt)?;
             let rec    = reconstruct(&tokens);
-            println!("Entropy v4 unfold: {} bytes", rec.len());
+            println!("Entropy v3 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
 
-        5 => {
-            let payload = &input[actual_payload_start..];
+        // v4: joint lit/length + slotted offset
+        4 => {
+            let payload = &input[payload_start..];
             let (lit_enc, lit_c) = entropy::deserialize_table(payload)?;
             let (off_enc, off_c) = entropy::deserialize_table(&payload[lit_c..])?;
             let lit_dt = entropy::decode_table_from_encode(&lit_enc);
             let off_dt = entropy::decode_table_from_encode(&off_enc);
-            let tokens = entropy::read_tokens_joint_v2_slotted(
+            let tokens = entropy::read_tokens_v4(
                 &payload[lit_c + off_c..], &lit_dt, &off_dt)?;
             let rec = reconstruct(&tokens);
-            println!("Entropy v5 (v2+slots) unfold: {} bytes", rec.len());
+            println!("Entropy v4 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
 
-        6 => {
-            let payload = &input[actual_payload_start..];
+        // v5: 2-context lit/length + slotted offset
+        5 => {
+            let payload = &input[payload_start..];
             let (enc0, c0) = entropy::deserialize_table(payload)?;
             let (enc1, c1) = entropy::deserialize_table(&payload[c0..])?;
             let (off_enc, c2) = entropy::deserialize_table(&payload[c0 + c1..])?;
             let dt0    = entropy::decode_table_from_encode(&enc0);
             let dt1    = entropy::decode_table_from_encode(&enc1);
             let off_dt = entropy::decode_table_from_encode(&off_enc);
-            let tokens = entropy::read_tokens_joint_v3_slotted(
+            let tokens = entropy::read_tokens_v5(
                 &payload[c0 + c1 + c2..], &dt0, &dt1, &off_dt)?;
             let rec = reconstruct(&tokens);
-            println!("Entropy v6 (v3+slots) unfold: {} bytes", rec.len());
+            println!("Entropy v5 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
 
-        7 => {
-            let payload = &input[actual_payload_start..];
-            let tokens  = entropy::read_tokens_block_split(payload)?;
-            let rec     = reconstruct(&tokens);
-            println!("Entropy v7 (block-split) unfold: {} bytes", rec.len());
-            (rec, fold_count.saturating_sub(1))
-        }
-
+        // 0 or unknown: no entropy, raw payload
         _ => {
-            (input[actual_payload_start..].to_vec(), fold_count)
+            (input[payload_start..].to_vec(), fold_count)
         }
     };
 
@@ -222,18 +156,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     }
 
     // ── Post-filter ───────────────────────────────────────────────────────────
-    if filter_flag == filters::FILTER_PNG {
-        if let Some(blobs) = png_blobs {
-            let mut meta = crate::png_xform::meta_from_blob(&blobs.header_blob)?;
-            meta.original_idat = blobs.original_idat; // restore verbatim IDAT
-            let before = current.len();
-            current = crate::png_xform::repack_png(&current, &meta)?;
-            println!(
-                "PNG repacked: {} filtered bytes → {} PNG bytes",
-                before, current.len()
-            );
-        }
-    } else if filter_flag != filters::FILTER_NONE {
+    if filter_flag != filters::FILTER_NONE {
         let before = current.len();
         current = filters::undo_filter(&current, filter_flag);
         println!(

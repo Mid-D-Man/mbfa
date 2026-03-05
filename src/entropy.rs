@@ -1,6 +1,15 @@
-// src/entropy.rs — full file, pre-slot baseline + v4 byte-category literal contexts
-// + v5 (v2+slots) / v6 (v3+slots) recent-offset slot reuse
-// + v7 block-split per-block v2 Huffman
+// src/entropy.rs
+//
+// Entropy coding variants — all operate on the fold-1 token stream.
+// Variant numbering after cleanup:
+//
+//   v1  entropy_flag=1  joint lit/length Huffman + offset bucket Huffman
+//   v2  entropy_flag=2  2-context lit/length Huffman + offset bucket Huffman
+//   v3  entropy_flag=3  8-context lit/length Huffman + offset bucket Huffman
+//   v4  entropy_flag=4  v1 + recent-offset slot reuse
+//   v5  entropy_flag=5  v2 + recent-offset slot reuse
+//
+// Core algorithm (fold/unfold/LZ/pairing) is untouched by this module.
 
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
@@ -8,7 +17,7 @@ use bitstream_io::{BitWriter, BitReader, BigEndian, BitWrite, BitRead};
 use crate::opcode::Token;
 
 pub const ENTROPY_MIN_BYTES:    usize = 400;
-pub const ENTROPY_V3_MIN_BYTES: usize = 1000;
+pub const ENTROPY_V2_MIN_BYTES: usize = 1000; // v2+ need enough data for 2+ contexts
 
 const SYM_END: u32 = 256;
 #[inline] fn sym_from_length(len: u32) -> u32 { 255 + len }
@@ -19,8 +28,8 @@ pub type DecodeTable = HashMap<(u32, u32), u32>;
 
 // ── Recent-offset slot reuse ──────────────────────────────────────────────────
 
-pub const NUM_SLOTS:         usize = 8;
-pub const SLOT_SYMBOL_BASE:  u32   = 1000;
+pub const NUM_SLOTS:        usize = 8;
+pub const SLOT_SYMBOL_BASE: u32   = 1000;
 
 pub struct OffsetSlots {
     slots: [u32; NUM_SLOTS],
@@ -255,6 +264,78 @@ pub fn decode_table_from_encode(enc: &EncodeTable) -> DecodeTable {
     enc.iter().map(|(&sym, &(code, len))| ((code, len), sym)).collect()
 }
 
+// ── v4 eight-context builder ──────────────────────────────────────────────────
+
+#[inline]
+pub fn byte_category(b: u8) -> usize {
+    match b {
+        b'a' | b'e' | b'i' | b'o' | b'u' => 0,
+        b'A'..=b'Z' => 1,
+        b'b'..=b'z' => 1,
+        9 | 10 | 13 | 32        => 2,
+        33 | 44 | 46 | 58 | 59  => 2,
+        39 | 40 | 41 | 63 | 45  => 2,
+        34 | 91 | 93 | 123 | 125 => 2,
+        _ => 3,
+    }
+}
+
+#[inline]
+pub fn context_idx(after_br: bool, prev_byte: u8) -> usize {
+    (after_br as usize) * 4 + byte_category(prev_byte)
+}
+
+fn count_joint_freq_v3(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32, u64>) {
+    let mut lit_freqs: [HashMap<u32, u64>; 8] = std::array::from_fn(|_| HashMap::new());
+    let mut offset_freq: HashMap<u32, u64> = HashMap::new();
+
+    let mut prev_byte: u8 = b' ';
+    let mut after_br      = false;
+
+    for t in tokens {
+        let ctx = context_idx(after_br, prev_byte);
+        match t {
+            Token::Lit { byte } => {
+                *lit_freqs[ctx].entry(*byte as u32).or_insert(0) += 1;
+                prev_byte = *byte;
+                after_br  = false;
+            }
+            Token::Backref { offset, length } => {
+                *lit_freqs[ctx].entry(sym_from_length(*length)).or_insert(0) += 1;
+                let (bucket, _, _) = offset_to_bucket(*offset);
+                *offset_freq.entry(bucket).or_insert(0) += 1;
+                after_br = true;
+            }
+            Token::End => {
+                *lit_freqs[ctx].entry(SYM_END).or_insert(0) += 1;
+            }
+        }
+    }
+    (lit_freqs, offset_freq)
+}
+
+pub fn build_encode_tables_v3(tokens: &[Token]) -> Option<([EncodeTable; 8], EncodeTable)> {
+    let (lit_freqs, offset_freq) = count_joint_freq_v3(tokens);
+    let has_lits = lit_freqs.iter().any(|f| !f.is_empty());
+    if !has_lits { return None; }
+
+    let lit_tables: [EncodeTable; 8] = std::array::from_fn(|i| {
+        if lit_freqs[i].is_empty() {
+            EncodeTable::new()
+        } else {
+            canonical_codes_from_lengths(&assign_code_lengths(&lit_freqs[i]))
+        }
+    });
+
+    let offset_table = if offset_freq.is_empty() {
+        EncodeTable::new()
+    } else {
+        canonical_codes_from_lengths(&assign_code_lengths(&offset_freq))
+    };
+
+    Some((lit_tables, offset_table))
+}
+
 // ── Table serialisation ───────────────────────────────────────────────────────
 
 pub fn serialize_table(table: &EncodeTable) -> Vec<u8> {
@@ -428,80 +509,12 @@ fn deserialize_fmt2(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
     Ok((canonical_codes_from_lengths(&lengths), needed))
 }
 
-// ── v1 encode/decode ──────────────────────────────────────────────────────────
+// ── v1: joint lit/length Huffman + offset bucket Huffman ─────────────────────
+//
+// entropy_flag = 1
+// Payload: [lit_table][offset_table][bitstream]
 
-pub fn write_tokens_joint(
-    tokens:      &[Token],
-    table:       &EncodeTable,
-    offset_bits: u32,
-    length_bits: u32,
-) -> std::io::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    {
-        let mut w = BitWriter::endian(&mut output, BigEndian);
-        for token in tokens {
-            match token {
-                Token::Lit { byte } => {
-                    let &(code, len) = table.get(&(*byte as u32)).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v1 lit sym missing")
-                    })?;
-                    w.write(len, code)?;
-                }
-                Token::Backref { offset, length } => {
-                    let sym = sym_from_length(*length);
-                    let &(code, len) = table.get(&sym).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v1 length sym {} missing", sym))
-                    })?;
-                    w.write(len, code)?;
-                    w.write(offset_bits, *offset)?;
-                    let _ = length_bits;
-                }
-                Token::End => {
-                    let &(code, len) = table.get(&SYM_END).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v1 END sym missing")
-                    })?;
-                    w.write(len, code)?;
-                }
-            }
-        }
-        w.byte_align()?;
-    }
-    Ok(output)
-}
-
-pub fn read_tokens_joint(
-    input:        &[u8],
-    dtable:       &DecodeTable,
-    offset_bits:  u32,
-    _length_bits: u32,
-) -> std::io::Result<Vec<Token>> {
-    let max_code_len = dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
-    let mut tokens = Vec::new();
-    let mut r = BitReader::endian(std::io::Cursor::new(input), BigEndian);
-
-    loop {
-        let sym = match read_huffman_sym(&mut r, dtable, max_code_len) {
-            Ok(s)  => s,
-            Err(_) => break,
-        };
-        if sym < 256 {
-            tokens.push(Token::Lit { byte: sym as u8 });
-        } else if sym == SYM_END {
-            tokens.push(Token::End);
-            break;
-        } else {
-            let length = length_from_sym(sym);
-            let offset = r.read::<u32>(offset_bits)?;
-            tokens.push(Token::Backref { offset, length });
-        }
-    }
-    Ok(tokens)
-}
-
-// ── v2 encode/decode ──────────────────────────────────────────────────────────
-
-pub fn write_tokens_joint_v2(
+pub fn write_tokens_v1(
     tokens:       &[Token],
     lit_table:    &EncodeTable,
     offset_table: &EncodeTable,
@@ -513,7 +526,7 @@ pub fn write_tokens_joint_v2(
             match token {
                 Token::Lit { byte } => {
                     let &(code, len) = lit_table.get(&(*byte as u32)).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v2 lit sym missing")
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v1 lit sym missing")
                     })?;
                     w.write(len, code)?;
                 }
@@ -521,20 +534,20 @@ pub fn write_tokens_joint_v2(
                     let sym = sym_from_length(*length);
                     let &(code, len) = lit_table.get(&sym).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v2 length sym {} missing", sym))
+                            format!("v1 length sym {} missing", sym))
                     })?;
                     w.write(len, code)?;
                     let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
                     let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v2 offset bucket {} missing", bucket))
+                            format!("v1 offset bucket {} missing", bucket))
                     })?;
                     w.write(blen, bcode)?;
                     if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
                 }
                 Token::End => {
                     let &(code, len) = lit_table.get(&SYM_END).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v2 END sym missing")
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v1 END sym missing")
                     })?;
                     w.write(len, code)?;
                 }
@@ -545,7 +558,7 @@ pub fn write_tokens_joint_v2(
     Ok(output)
 }
 
-pub fn read_tokens_joint_v2(
+pub fn read_tokens_v1(
     input:         &[u8],
     lit_dtable:    &DecodeTable,
     offset_dtable: &DecodeTable,
@@ -577,9 +590,13 @@ pub fn read_tokens_joint_v2(
     Ok(tokens)
 }
 
-// ── v3 encode/decode ──────────────────────────────────────────────────────────
+// ── v2: 2-context lit/length Huffman + offset bucket Huffman ─────────────────
+//
+// entropy_flag = 2
+// Context: after_backref=false vs after_backref=true
+// Payload: [lit_table0][lit_table1][offset_table][bitstream]
 
-pub fn write_tokens_joint_v3(
+pub fn write_tokens_v2(
     tokens:       &[Token],
     lit_table0:   &EncodeTable,
     lit_table1:   &EncodeTable,
@@ -596,7 +613,7 @@ pub fn write_tokens_joint_v3(
                 Token::Lit { byte } => {
                     let &(code, len) = lt.get(&(*byte as u32)).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v3 lit sym missing ctx={}", after_br as u8))
+                            format!("v2 lit sym missing ctx={}", after_br as u8))
                     })?;
                     w.write(len, code)?;
                     after_br = false;
@@ -605,13 +622,13 @@ pub fn write_tokens_joint_v3(
                     let sym = sym_from_length(*length);
                     let &(code, len) = lt.get(&sym).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v3 length sym {} missing ctx={}", sym, after_br as u8))
+                            format!("v2 length sym {} missing ctx={}", sym, after_br as u8))
                     })?;
                     w.write(len, code)?;
                     let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
                     let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v3 offset bucket {} missing", bucket))
+                            format!("v2 offset bucket {} missing", bucket))
                     })?;
                     w.write(blen, bcode)?;
                     if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
@@ -620,7 +637,7 @@ pub fn write_tokens_joint_v3(
                 Token::End => {
                     let &(code, len) = lt.get(&SYM_END).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v3 END sym missing ctx={}", after_br as u8))
+                            format!("v2 END sym missing ctx={}", after_br as u8))
                     })?;
                     w.write(len, code)?;
                 }
@@ -631,7 +648,7 @@ pub fn write_tokens_joint_v3(
     Ok(output)
 }
 
-pub fn read_tokens_joint_v3(
+pub fn read_tokens_v2(
     input:         &[u8],
     lit_dtable0:   &DecodeTable,
     lit_dtable1:   &DecodeTable,
@@ -669,84 +686,19 @@ pub fn read_tokens_joint_v3(
     Ok(tokens)
 }
 
-// ── v4 byte-category literal contexts ────────────────────────────────────────
+// ── v3: 8-context lit/length Huffman + offset bucket Huffman ─────────────────
+//
+// entropy_flag = 3
+// Context: (after_backref × byte_category) = 8 contexts
+// byte_categories: vowel / uppercase+consonant / whitespace+punct / other
+// Payload: [lit_table×8][offset_table][bitstream]
 
-#[inline]
-pub fn byte_category(b: u8) -> usize {
-    match b {
-        b'a' | b'e' | b'i' | b'o' | b'u' => 0,
-        b'A'..=b'Z' => 1,
-        b'b'..=b'z' => 1,
-        9 | 10 | 13 | 32        => 2,
-        33 | 44 | 46 | 58 | 59  => 2,
-        39 | 40 | 41 | 63 | 45  => 2,
-        34 | 91 | 93 | 123 | 125 => 2,
-        _ => 3,
-    }
-}
-
-#[inline]
-pub fn context_idx(after_br: bool, prev_byte: u8) -> usize {
-    (after_br as usize) * 4 + byte_category(prev_byte)
-}
-
-fn count_joint_freq_v4(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32, u64>) {
-    let mut lit_freqs: [HashMap<u32, u64>; 8] = std::array::from_fn(|_| HashMap::new());
-    let mut offset_freq: HashMap<u32, u64> = HashMap::new();
-
-    let mut prev_byte: u8 = b' ';
-    let mut after_br      = false;
-
-    for t in tokens {
-        let ctx = context_idx(after_br, prev_byte);
-        match t {
-            Token::Lit { byte } => {
-                *lit_freqs[ctx].entry(*byte as u32).or_insert(0) += 1;
-                prev_byte = *byte;
-                after_br  = false;
-            }
-            Token::Backref { offset, length } => {
-                *lit_freqs[ctx].entry(sym_from_length(*length)).or_insert(0) += 1;
-                let (bucket, _, _) = offset_to_bucket(*offset);
-                *offset_freq.entry(bucket).or_insert(0) += 1;
-                after_br = true;
-            }
-            Token::End => {
-                *lit_freqs[ctx].entry(SYM_END).or_insert(0) += 1;
-            }
-        }
-    }
-    (lit_freqs, offset_freq)
-}
-
-pub fn build_encode_tables_v4(tokens: &[Token]) -> Option<([EncodeTable; 8], EncodeTable)> {
-    let (lit_freqs, offset_freq) = count_joint_freq_v4(tokens);
-    let has_lits = lit_freqs.iter().any(|f| !f.is_empty());
-    if !has_lits { return None; }
-
-    let lit_tables: [EncodeTable; 8] = std::array::from_fn(|i| {
-        if lit_freqs[i].is_empty() {
-            EncodeTable::new()
-        } else {
-            canonical_codes_from_lengths(&assign_code_lengths(&lit_freqs[i]))
-        }
-    });
-
-    let offset_table = if offset_freq.is_empty() {
-        EncodeTable::new()
-    } else {
-        canonical_codes_from_lengths(&assign_code_lengths(&offset_freq))
-    };
-
-    Some((lit_tables, offset_table))
-}
-
-pub fn write_tokens_joint_v4(
+pub fn write_tokens_v3(
     tokens:       &[Token],
     tables:       &[EncodeTable],
     offset_table: &EncodeTable,
 ) -> std::io::Result<Vec<u8>> {
-    assert!(tables.len() == 8, "v4 requires exactly 8 literal tables");
+    assert!(tables.len() == 8, "v3 requires exactly 8 literal tables");
     let mut output = Vec::new();
     {
         let mut w         = BitWriter::endian(&mut output, BigEndian);
@@ -761,7 +713,7 @@ pub fn write_tokens_joint_v4(
                 Token::Lit { byte } => {
                     let &(code, len) = table.get(&(*byte as u32)).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v4 lit byte {} missing in ctx {}", byte, ctx))
+                            format!("v3 lit byte {} missing in ctx {}", byte, ctx))
                     })?;
                     w.write(len, code)?;
                     prev_byte = *byte;
@@ -771,7 +723,7 @@ pub fn write_tokens_joint_v4(
                     let sym = sym_from_length(*length);
                     let &(code, len) = table.get(&sym).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v4 length sym {} missing in ctx {}", sym, ctx))
+                            format!("v3 length sym {} missing in ctx {}", sym, ctx))
                     })?;
                     w.write(len, code)?;
 
@@ -779,7 +731,7 @@ pub fn write_tokens_joint_v4(
                         let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
                         let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
                             std::io::Error::new(std::io::ErrorKind::InvalidData,
-                                format!("v4 offset bucket {} missing", bucket))
+                                format!("v3 offset bucket {} missing", bucket))
                         })?;
                         w.write(blen, bcode)?;
                         if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
@@ -790,7 +742,7 @@ pub fn write_tokens_joint_v4(
                 Token::End => {
                     let &(code, len) = table.get(&SYM_END).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v4 END sym missing in ctx {}", ctx))
+                            format!("v3 END sym missing in ctx {}", ctx))
                     })?;
                     w.write(len, code)?;
                 }
@@ -801,12 +753,12 @@ pub fn write_tokens_joint_v4(
     Ok(output)
 }
 
-pub fn read_tokens_joint_v4(
+pub fn read_tokens_v3(
     input:         &[u8],
     dtables:       &[DecodeTable],
     offset_dtable: &DecodeTable,
 ) -> std::io::Result<Vec<Token>> {
-    assert!(dtables.len() == 8, "v4 requires exactly 8 decode tables");
+    assert!(dtables.len() == 8, "v3 requires exactly 8 decode tables");
 
     let max_lens: [u32; 8] = std::array::from_fn(|i| {
         dtables[i].keys().map(|&(_, l)| l).max().unwrap_or(1)
@@ -850,9 +802,12 @@ pub fn read_tokens_joint_v4(
     Ok(tokens)
 }
 
-// ── v5: v2 + recent-offset slot reuse ────────────────────────────────────────
+// ── v4: joint lit/length Huffman + slotted offset (v1 + slot reuse) ──────────
+//
+// entropy_flag = 4
+// Payload: [lit_table][offset+slots_table][bitstream]
 
-pub fn write_tokens_joint_v2_slotted(
+pub fn write_tokens_v4(
     tokens:       &[Token],
     lit_table:    &EncodeTable,
     offset_table: &EncodeTable,
@@ -866,7 +821,7 @@ pub fn write_tokens_joint_v2_slotted(
             match token {
                 Token::Lit { byte } => {
                     let &(code, len) = lit_table.get(&(*byte as u32)).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v5 lit sym missing")
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v4 lit sym missing")
                     })?;
                     w.write(len, code)?;
                 }
@@ -874,7 +829,7 @@ pub fn write_tokens_joint_v2_slotted(
                     let sym = sym_from_length(*length);
                     let &(code, len) = lit_table.get(&sym).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v5 length sym {} missing", sym))
+                            format!("v4 length sym {} missing", sym))
                     })?;
                     w.write(len, code)?;
 
@@ -882,14 +837,14 @@ pub fn write_tokens_joint_v2_slotted(
                         let slot_sym = SLOT_SYMBOL_BASE + slot_idx as u32;
                         let &(scode, slen) = offset_table.get(&slot_sym).ok_or_else(|| {
                             std::io::Error::new(std::io::ErrorKind::InvalidData,
-                                format!("v5 slot sym {} missing", slot_sym))
+                                format!("v4 slot sym {} missing", slot_sym))
                         })?;
                         w.write(slen, scode)?;
                     } else {
                         let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
                         let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
                             std::io::Error::new(std::io::ErrorKind::InvalidData,
-                                format!("v5 offset bucket {} missing", bucket))
+                                format!("v4 offset bucket {} missing", bucket))
                         })?;
                         w.write(blen, bcode)?;
                         if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
@@ -897,7 +852,7 @@ pub fn write_tokens_joint_v2_slotted(
                 }
                 Token::End => {
                     let &(code, len) = lit_table.get(&SYM_END).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v5 END sym missing")
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v4 END sym missing")
                     })?;
                     w.write(len, code)?;
                 }
@@ -908,7 +863,7 @@ pub fn write_tokens_joint_v2_slotted(
     Ok(output)
 }
 
-pub fn read_tokens_joint_v2_slotted(
+pub fn read_tokens_v4(
     input:         &[u8],
     lit_dtable:    &DecodeTable,
     offset_dtable: &DecodeTable,
@@ -930,14 +885,14 @@ pub fn read_tokens_joint_v2_slotted(
             tokens.push(Token::End);
             break;
         } else {
-            let length = length_from_sym(sym);
+            let length  = length_from_sym(sym);
             let off_sym = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
 
             let offset = if off_sym >= SLOT_SYMBOL_BASE {
                 let slot_idx = (off_sym - SLOT_SYMBOL_BASE) as usize;
                 slots.access_by_slot(slot_idx).ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData,
-                        format!("v5 invalid slot index {}", slot_idx))
+                        format!("v4 invalid slot index {}", slot_idx))
                 })?
             } else {
                 let extra_cnt = bucket_extra_bits(off_sym);
@@ -952,9 +907,12 @@ pub fn read_tokens_joint_v2_slotted(
     Ok(tokens)
 }
 
-// ── v6: v3 + recent-offset slot reuse ────────────────────────────────────────
+// ── v5: 2-context lit/length Huffman + slotted offset (v2 + slot reuse) ──────
+//
+// entropy_flag = 5
+// Payload: [lit_table0][lit_table1][offset+slots_table][bitstream]
 
-pub fn write_tokens_joint_v3_slotted(
+pub fn write_tokens_v5(
     tokens:       &[Token],
     lit_table0:   &EncodeTable,
     lit_table1:   &EncodeTable,
@@ -972,7 +930,7 @@ pub fn write_tokens_joint_v3_slotted(
                 Token::Lit { byte } => {
                     let &(code, len) = lt.get(&(*byte as u32)).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v6 lit sym missing ctx={}", after_br as u8))
+                            format!("v5 lit sym missing ctx={}", after_br as u8))
                     })?;
                     w.write(len, code)?;
                     after_br = false;
@@ -981,7 +939,7 @@ pub fn write_tokens_joint_v3_slotted(
                     let sym = sym_from_length(*length);
                     let &(code, len) = lt.get(&sym).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v6 length sym {} missing ctx={}", sym, after_br as u8))
+                            format!("v5 length sym {} missing ctx={}", sym, after_br as u8))
                     })?;
                     w.write(len, code)?;
 
@@ -989,14 +947,14 @@ pub fn write_tokens_joint_v3_slotted(
                         let slot_sym = SLOT_SYMBOL_BASE + slot_idx as u32;
                         let &(scode, slen) = offset_table.get(&slot_sym).ok_or_else(|| {
                             std::io::Error::new(std::io::ErrorKind::InvalidData,
-                                format!("v6 slot sym {} missing", slot_sym))
+                                format!("v5 slot sym {} missing", slot_sym))
                         })?;
                         w.write(slen, scode)?;
                     } else {
                         let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
                         let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
                             std::io::Error::new(std::io::ErrorKind::InvalidData,
-                                format!("v6 offset bucket {} missing", bucket))
+                                format!("v5 offset bucket {} missing", bucket))
                         })?;
                         w.write(blen, bcode)?;
                         if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
@@ -1006,7 +964,7 @@ pub fn write_tokens_joint_v3_slotted(
                 Token::End => {
                     let &(code, len) = lt.get(&SYM_END).ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v6 END sym missing ctx={}", after_br as u8))
+                            format!("v5 END sym missing ctx={}", after_br as u8))
                     })?;
                     w.write(len, code)?;
                 }
@@ -1017,7 +975,7 @@ pub fn write_tokens_joint_v3_slotted(
     Ok(output)
 }
 
-pub fn read_tokens_joint_v3_slotted(
+pub fn read_tokens_v5(
     input:         &[u8],
     lit_dtable0:   &DecodeTable,
     lit_dtable1:   &DecodeTable,
@@ -1051,7 +1009,7 @@ pub fn read_tokens_joint_v3_slotted(
                 let slot_idx = (off_sym - SLOT_SYMBOL_BASE) as usize;
                 slots.access_by_slot(slot_idx).ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData,
-                        format!("v6 invalid slot index {}", slot_idx))
+                        format!("v5 invalid slot index {}", slot_idx))
                 })?
             } else {
                 let extra_cnt = bucket_extra_bits(off_sym);
@@ -1065,162 +1023,6 @@ pub fn read_tokens_joint_v3_slotted(
         }
     }
     Ok(tokens)
-}
-
-// ── v7: block-split per-block v2 Huffman ─────────────────────────────────────
-//
-// entropy_flag = 7
-//
-// Splits the token stream into fixed-size blocks. Each block gets its own
-// independent joint lit/length Huffman table and offset bucket Huffman table.
-// Per-block tables track local statistics — beneficial when file statistics
-// shift across sections (spreadsheets, mixed binary, long text).
-//
-// Payload format:
-//   [block_count: u16 LE]
-//   For each block:
-//     [lit_table: serialize_table format]
-//     [offset_table: serialize_table format]
-//     [block_bitstream_len: u32 LE]
-//     [block_bitstream: bytes]
-
-pub fn write_tokens_block_split(
-    tokens:     &[Token],
-    block_size: usize,
-) -> std::io::Result<Vec<u8>> {
-    // Collect non-END tokens, split into chunks of block_size
-    let data: Vec<&Token> = tokens.iter()
-        .filter(|t| !matches!(t, Token::End))
-        .collect();
-
-    if data.is_empty() {
-        // Degenerate: just an END — encode as single block
-        let mut out = Vec::new();
-        out.extend_from_slice(&1u16.to_le_bytes());
-        let end_only = vec![Token::End];
-        let lit_table = build_encode_table(&end_only)
-            .ok_or_else(|| std::io::Error::new(
-                std::io::ErrorKind::InvalidData, "block: cannot build empty lit table"
-            ))?;
-        let empty_offset = EncodeTable::new();
-        let coded = write_tokens_joint_v2(&end_only, &lit_table, &empty_offset)?;
-        out.extend_from_slice(&serialize_table(&lit_table));
-        out.extend_from_slice(&serialize_table(&empty_offset));
-        out.extend_from_slice(&(coded.len() as u32).to_le_bytes());
-        out.extend_from_slice(&coded);
-        return Ok(out);
-    }
-
-    let chunks: Vec<&[&Token]> = data.chunks(block_size).collect();
-    let block_count = chunks.len() as u16;
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&block_count.to_le_bytes());
-
-    for (chunk_idx, chunk) in chunks.iter().enumerate() {
-        // Build a Vec<Token> for this block, appending END
-        let mut block_tokens: Vec<Token> = chunk.iter()
-            .map(|t| (*t).clone())
-            .collect();
-        block_tokens.push(Token::End);
-
-        // Build per-block tables
-        let lit_table = build_encode_table(&block_tokens)
-            .ok_or_else(|| std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("block {}: empty lit table", chunk_idx),
-            ))?;
-
-        // offset table may be absent if block has no backrefs
-        let offset_table = build_offset_encode_table(&block_tokens)
-            .unwrap_or_default();
-
-        let coded = write_tokens_joint_v2(&block_tokens, &lit_table, &offset_table)?;
-
-        out.extend_from_slice(&serialize_table(&lit_table));
-        out.extend_from_slice(&serialize_table(&offset_table));
-        out.extend_from_slice(&(coded.len() as u32).to_le_bytes());
-        out.extend_from_slice(&coded);
-    }
-
-    Ok(out)
-}
-
-pub fn read_tokens_block_split(data: &[u8]) -> std::io::Result<Vec<Token>> {
-    if data.len() < 2 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "block-split: header too short",
-        ));
-    }
-
-    let block_count = u16::from_le_bytes([data[0], data[1]]) as usize;
-    let mut cursor  = 2usize;
-    let mut all_tokens: Vec<Token> = Vec::new();
-
-    for b in 0..block_count {
-        // Deserialize lit table
-        let (lit_enc, lit_c) = deserialize_table(&data[cursor..])
-            .map_err(|e| std::io::Error::new(e.kind(),
-                format!("block {}: lit table: {}", b, e)))?;
-        cursor += lit_c;
-
-        // Deserialize offset table
-        let (off_enc, off_c) = deserialize_table(&data[cursor..])
-            .map_err(|e| std::io::Error::new(e.kind(),
-                format!("block {}: offset table: {}", b, e)))?;
-        cursor += off_c;
-
-        // Read block bitstream length
-        if cursor + 4 > data.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                format!("block {}: length prefix missing", b),
-            ));
-        }
-        let block_len = u32::from_le_bytes([
-            data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
-        ]) as usize;
-        cursor += 4;
-
-        if cursor + block_len > data.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                format!("block {}: bitstream truncated (need {} have {})",
-                    b, block_len, data.len() - cursor),
-            ));
-        }
-
-        let lit_dt = decode_table_from_encode(&lit_enc);
-        let off_dt = decode_table_from_encode(&off_enc);
-
-        let block_tokens = read_tokens_joint_v2(
-            &data[cursor..cursor + block_len],
-            &lit_dt,
-            &off_dt,
-        ).map_err(|e| std::io::Error::new(e.kind(),
-            format!("block {}: decode failed: {}", b, e)))?;
-        cursor += block_len;
-
-        // Collect tokens — strip END from all but last block
-        let is_last = b == block_count - 1;
-        for t in block_tokens {
-            match t {
-                Token::End => {
-                    if is_last { all_tokens.push(Token::End); }
-                    break;
-                }
-                other => all_tokens.push(other),
-            }
-        }
-    }
-
-    // Safety: ensure END is present
-    if !matches!(all_tokens.last(), Some(Token::End)) {
-        all_tokens.push(Token::End);
-    }
-
-    Ok(all_tokens)
 }
 
 // ── Shared Huffman reader ─────────────────────────────────────────────────────

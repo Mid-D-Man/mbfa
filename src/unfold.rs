@@ -1,13 +1,4 @@
 // src/unfold.rs
-//! Reverses N fold passes then undoes any pre-compression filter.
-//!
-//! entropy_flag values:
-//!   0 = raw  1 = v1  2 = v2  3 = v3  4 = v4  5 = v5  6 = v6
-//!   7 = v7 block-split per-block v2 Huffman
-//!
-//! filter_flag values:
-//!   0 = none  1-4 = delta stride 1-4  5 = PNG (png_xform path)
-
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
 use crate::entropy;
@@ -49,40 +40,32 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     let final_ob = ob_for_fold(fold_count);
     let final_lb = lb_for_fold(fold_count);
 
-    // ── PNG prefix parsing ────────────────────────────────────────────────────
-    // If filter_flag == FILTER_PNG, the bytes immediately after the standard
-    // header are: [header_blob_len: u32 LE][header_blob][png_delta_stride: u8]
-    // The actual compressed payload follows after this PNG section.
-    let (png_header_blob, png_delta_stride, actual_payload_start) =
+    // ── PNG prefix: [header_blob_len u32 LE][header_blob bytes] ──────────────
+    // Sits between the standard header and the compressed payload.
+    let (png_header_blob, actual_payload_start) =
         if filter_flag == filters::FILTER_PNG {
             if payload_start + 4 > input.len() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
-                    "PNG unfold: header_blob_len field missing"));
+                    "PNG unfold: header_blob_len missing"));
             }
             let blob_len = u32::from_le_bytes(
                 input[payload_start..payload_start+4].try_into().unwrap()
             ) as usize;
             let blob_end = payload_start + 4 + blob_len;
-            if blob_end + 1 > input.len() {
+            if blob_end > input.len() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "PNG unfold: header_blob truncated"));
             }
-            let blob         = input[payload_start+4..blob_end].to_vec();
-            let delta_stride = input[blob_end];
-            println!(
-                "PNG unfold: header_blob={} B, delta_stride={}",
-                blob_len, delta_stride
-            );
-            (Some(blob), delta_stride, blob_end + 1)
+            let blob = input[payload_start+4..blob_end].to_vec();
+            println!("PNG unfold: header_blob={} B", blob_len);
+            (Some(blob), blob_end)
         } else {
-            (None, 0u8, payload_start)
+            (None, payload_start)
         };
 
     // ── Entropy decode ────────────────────────────────────────────────────────
-    // All branches use actual_payload_start — which equals payload_start for
-    // non-PNG files and skips the PNG metadata prefix for PNG files.
     let (mut current, folds_to_undo) = match entropy_flag {
 
         1 => {
@@ -131,20 +114,19 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             for i in 0..8usize {
                 let (enc, consumed) = entropy::deserialize_table(&payload[cursor..])
                     .map_err(|e| std::io::Error::new(e.kind(),
-                        format!("v4 unfold: lit table {} deserialise failed: {}", i, e)))?;
+                        format!("v4 unfold: lit table {} failed: {}", i, e)))?;
                 lit_dtables.push(entropy::decode_table_from_encode(&enc));
                 cursor += consumed;
             }
             let (off_enc, off_c) = entropy::deserialize_table(&payload[cursor..])
                 .map_err(|e| std::io::Error::new(e.kind(),
-                    format!("v4 unfold: offset table deserialise failed: {}", e)))?;
+                    format!("v4 unfold: offset table failed: {}", e)))?;
             let off_dt = entropy::decode_table_from_encode(&off_enc);
             cursor += off_c;
             let arr: [entropy::DecodeTable; 8] = lit_dtables.try_into()
                 .map_err(|_| std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "v4 unfold: expected exactly 8 literal tables",
-                ))?;
+                    "v4 unfold: expected exactly 8 literal tables"))?;
             let tokens = entropy::read_tokens_joint_v4(&payload[cursor..], &arr, &off_dt)?;
             let rec    = reconstruct(&tokens);
             println!("Entropy v4 unfold: {} bytes", rec.len());
@@ -213,15 +195,13 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
 
     // ── Post-filter ───────────────────────────────────────────────────────────
     if filter_flag == filters::FILTER_PNG {
-        // current = delta-filtered raw pixels
-        // Undo delta, then rebuild the PNG container
         if let Some(blob) = png_header_blob {
-            let raw_pixels = filters::undo_filter(&current, png_delta_stride);
-            let meta = crate::png_xform::meta_from_blob(&blob)?;
-            let before = raw_pixels.len();
-            current = crate::png_xform::repack_png(&raw_pixels, &meta)?;
+            let meta   = crate::png_xform::meta_from_blob(&blob)?;
+            let before = current.len();
+            // current = filtered scanline bytes — just repack into PNG container
+            current = crate::png_xform::repack_png(&current, &meta)?;
             println!(
-                "PNG repacked: {} raw bytes → {} PNG bytes",
+                "PNG repacked: {} filtered bytes → {} PNG bytes",
                 before, current.len()
             );
         }

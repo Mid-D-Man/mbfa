@@ -29,6 +29,8 @@ use std::io;
 ///   --- if filter_flag == 5 (PNG) ---
 ///   Bytes 4+2N..4+2N+4:  header_blob_len u32 LE
 ///   Bytes 4+2N+4..:      header_blob (PNG chunks without IDAT)
+///   Next 4 bytes:        original_idat_len u32 LE
+///   Next N bytes:        original_idat (verbatim compressed IDAT bytes)
 ///   --- end PNG section ---
 ///   Remaining:           compressed payload
 pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
@@ -142,12 +144,19 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     for &ob in &out_ob { output.push(ob as u8); }
     for &lb in &out_lb { output.push(lb as u8); }
 
-    // PNG metadata block — header_blob stored between standard header and payload
+    // PNG metadata block:
+    //   [header_blob_len u32 LE][header_blob]
+    //   [original_idat_len u32 LE][original_idat]
     if filter_flag == filters::FILTER_PNG {
         if let Some(ref meta) = png_meta_opt {
             output.extend_from_slice(&(meta.header_blob.len() as u32).to_le_bytes());
             output.extend_from_slice(&meta.header_blob);
-            println!("PNG header_blob stored: {} B", meta.header_blob.len());
+            output.extend_from_slice(&(meta.original_idat.len() as u32).to_le_bytes());
+            output.extend_from_slice(&meta.original_idat);
+            println!(
+                "PNG header_blob stored: {} B | original_idat stored: {} B",
+                meta.header_blob.len(), meta.original_idat.len()
+            );
         }
     }
 

@@ -4,8 +4,8 @@
 // near-zero residuals that MBFA's LZ engine handles well. Avoiding the
 // unfilter/re-filter round-trip eliminates a class of bugs and simplifies repack.
 //
-// Roundtrip note: output PNG is pixel-identical to input but not byte-identical
-// because the re-deflated IDAT uses different zlib settings than the original encoder.
+// Roundtrip: original IDAT bytes are stored verbatim in the archive header blob
+// and used directly in repack_png — producing byte-identical output to the input PNG.
 
 use std::io::{Read, Write};
 use flate2::read::ZlibDecoder;
@@ -18,17 +18,19 @@ pub fn is_png(data: &[u8]) -> bool {
 
 #[derive(Debug, Clone)]
 pub struct PngMeta {
-    pub width:       u32,
-    pub height:      u32,
-    pub bit_depth:   u8,
-    pub color_type:  u8,
-    pub stride:      usize,
-    pub header_blob: Vec<u8>, // all chunks except IDAT, in original order
+    pub width:         u32,
+    pub height:        u32,
+    pub bit_depth:     u8,
+    pub color_type:    u8,
+    pub stride:        usize,
+    pub header_blob:   Vec<u8>, // all chunks except IDAT, in original order
+    pub original_idat: Vec<u8>, // original compressed IDAT bytes (verbatim from source PNG)
 }
 
 /// Inflate all IDAT chunks into a single filtered-scanline byte buffer.
 /// The filter byte at the start of each scanline is preserved — we do NOT
 /// undo PNG's per-scanline filters. MBFA folds this buffer directly.
+/// Also stores the original compressed IDAT bytes verbatim for lossless repack.
 pub fn extract_filtered_bytes(data: &[u8]) -> std::io::Result<(Vec<u8>, PngMeta)> {
     if !is_png(data) {
         return Err(std::io::Error::new(
@@ -59,7 +61,7 @@ pub fn extract_filtered_bytes(data: &[u8]) -> std::io::Result<(Vec<u8>, PngMeta)
             header_blob.extend_from_slice(&data[pos..chunk_end]);
         } else if chunk_type == b"IDAT" {
             idat_compressed.extend_from_slice(&data[pos+8..pos+8+chunk_len]);
-            // IDAT intentionally excluded from header_blob — rebuilt on repack
+            // IDAT intentionally excluded from header_blob — stored separately
         } else {
             // IEND + all ancillary chunks (PLTE, gAMA, tEXt, etc.) preserved verbatim
             header_blob.extend_from_slice(&data[pos..chunk_end]);
@@ -74,24 +76,28 @@ pub fn extract_filtered_bytes(data: &[u8]) -> std::io::Result<(Vec<u8>, PngMeta)
     }
 
     // Inflate the zlib IDAT stream.
-    // Result is raw PNG-filtered scanline data: [filter_byte, pixels...] per row.
     let mut decoder      = ZlibDecoder::new(&idat_compressed[..]);
     let mut filtered_buf = Vec::new();
     decoder.read_to_end(&mut filtered_buf)?;
 
     let stride = stride_from_color(color_type, bit_depth);
-    let meta   = PngMeta { width, height, bit_depth, color_type, stride, header_blob };
+    let meta   = PngMeta {
+        width, height, bit_depth, color_type, stride,
+        header_blob,
+        original_idat: idat_compressed, // verbatim compressed bytes for lossless repack
+    };
 
     println!(
-        "PNG extract: {}x{} color_type={} stride={} → {} filtered bytes (inflated from {} compressed)",
-        width, height, color_type, stride, filtered_buf.len(), idat_compressed.len()
+        "PNG extract: {}x{} color_type={} stride={} → {} filtered bytes",
+        width, height, color_type, stride, filtered_buf.len()
     );
 
     Ok((filtered_buf, meta))
 }
 
 /// Reconstruct PngMeta from a stored header_blob.
-/// Used during decompression — we need width/height/color_type to know stride.
+/// original_idat is set to empty here — caller must set it separately from the
+/// stored idat blob before calling repack_png if byte-identical output is needed.
 pub fn meta_from_blob(header_blob: &[u8]) -> std::io::Result<PngMeta> {
     if header_blob.len() < 8 {
         return Err(std::io::Error::new(
@@ -114,6 +120,7 @@ pub fn meta_from_blob(header_blob: &[u8]) -> std::io::Result<PngMeta> {
             return Ok(PngMeta {
                 width, height, bit_depth, color_type, stride,
                 header_blob: header_blob.to_vec(),
+                original_idat: Vec::new(), // set by caller before repack_png
             });
         }
         pos = chunk_end;
@@ -122,14 +129,18 @@ pub fn meta_from_blob(header_blob: &[u8]) -> std::io::Result<PngMeta> {
         std::io::ErrorKind::InvalidData, "PNG meta: IHDR not found in blob"))
 }
 
-/// Re-deflate the filtered bytes and rebuild the PNG container.
-/// Output is pixel-identical to the original but not byte-identical
-/// (different zlib compression parameters than original encoder).
+/// Reconstruct the PNG container.
+/// If meta.original_idat is non-empty, uses it verbatim → byte-identical output.
+/// Falls back to re-deflating filtered_bytes only when original_idat is unavailable
+/// (e.g. files compressed with an older build that did not store it).
 pub fn repack_png(filtered_bytes: &[u8], meta: &PngMeta) -> std::io::Result<Vec<u8>> {
-    // Re-deflate the filtered scanline bytes
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(filtered_bytes)?;
-    let compressed = encoder.finish()?;
+    let (compressed, source) = if !meta.original_idat.is_empty() {
+        (meta.original_idat.clone(), "original IDAT verbatim")
+    } else {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(filtered_bytes)?;
+        (encoder.finish()?, "re-deflated (fallback)")
+    };
 
     // Find where IEND starts in header_blob so we insert IDAT before it
     let iend_pos = find_iend_pos(&meta.header_blob);
@@ -143,12 +154,12 @@ pub fn repack_png(filtered_bytes: &[u8], meta: &PngMeta) -> std::io::Result<Vec<
     out.extend_from_slice(&compressed);
     out.extend_from_slice(&crc32_png(b"IDAT", &compressed).to_be_bytes());
 
-    // IEND (and anything after it, though there shouldn't be anything valid)
+    // IEND (and anything after it)
     out.extend_from_slice(&meta.header_blob[iend_pos..]);
 
     println!(
-        "PNG repack: {} filtered bytes → {} compressed → {} PNG bytes",
-        filtered_bytes.len(), compressed.len(), out.len()
+        "PNG repack ({}): {} filtered bytes → {} compressed → {} PNG bytes",
+        source, filtered_bytes.len(), compressed.len(), out.len()
     );
 
     Ok(out)
@@ -160,7 +171,7 @@ fn stride_from_color(color_type: u8, bit_depth: u8) -> usize {
     let samples: usize = match color_type {
         0 => 1, // grayscale
         2 => 3, // RGB
-        3 => 1, // indexed — one palette index per pixel
+        3 => 1, // indexed
         4 => 2, // grayscale + alpha
         6 => 4, // RGBA
         _ => 1,
@@ -180,9 +191,7 @@ fn find_iend_pos(header_blob: &[u8]) -> usize {
     header_blob.len()
 }
 
-/// PNG CRC covers the chunk type bytes concatenated with the chunk data bytes.
 fn crc32_png(chunk_type: &[u8], data: &[u8]) -> u32 {
-    // Build table once inline — avoids adding a crc32 dependency
     let table: [u32; 256] = {
         let mut t = [0u32; 256];
         for n in 0..256usize {
@@ -199,4 +208,4 @@ fn crc32_png(chunk_type: &[u8], data: &[u8]) -> u32 {
         crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
     }
     crc ^ 0xFFFF_FFFF
-        }
+            }

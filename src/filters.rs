@@ -1,5 +1,5 @@
 // src/filters.rs
-//! Pre/post compression delta filters..
+//! Pre/post compression delta filters.
 //!
 //! Applied to the raw input BEFORE folding, reversed AFTER unfolding.
 //! Converts smooth-varying binary data (PCM audio, BMP pixels) into
@@ -11,15 +11,21 @@
 //!   2 = delta stride 2  (16-bit mono PCM / 16-bit pixels)
 //!   3 = delta stride 3  (24-bit RGB pixels)
 //!   4 = delta stride 4  (32-bit RGBA / stereo 16-bit PCM)
+//!   5 = PNG             (IDAT inflate + scanline unfilter → raw pixels → delta)
+//!                       Actual transform is handled in lib.rs via png_xform.
+//!                       apply_filter/undo_filter pass through for this flag.
 
 pub const FILTER_NONE:   u8 = 0;
 pub const FILTER_DELTA1: u8 = 1;
 pub const FILTER_DELTA2: u8 = 2;
 pub const FILTER_DELTA3: u8 = 3;
 pub const FILTER_DELTA4: u8 = 4;
+pub const FILTER_PNG:    u8 = 5;
 
 /// Inspect magic bytes and file headers to determine the best delta stride.
 /// Returns FILTER_NONE for unknown or uncompressible formats.
+/// Returns FILTER_PNG for PNG files — the actual pixel extraction is handled
+/// separately in lib.rs via png_xform, not through apply_filter/undo_filter.
 pub fn detect_filter(input: &[u8]) -> u8 {
     if input.len() < 12 { return FILTER_NONE; }
 
@@ -31,6 +37,12 @@ pub fn detect_filter(input: &[u8]) -> u8 {
     // BMP image
     if &input[0..2] == b"BM" && input.len() >= 30 {
         return detect_bmp_stride(input);
+    }
+
+    // PNG — pixel extraction handled in lib.rs via png_xform
+    if crate::png_xform::is_png(input) {
+        println!("PNG detected — will extract raw pixels before folding");
+        return FILTER_PNG;
     }
 
     FILTER_NONE
@@ -79,6 +91,7 @@ fn detect_bmp_stride(input: &[u8]) -> u8 {
 }
 
 /// Transform input bytes with the chosen filter before compression.
+/// FILTER_PNG (5) passes through here — it is handled upstream in lib.rs.
 pub fn apply_filter(input: &[u8], filter: u8) -> Vec<u8> {
     let stride = filter as usize;
     if stride == 0 || stride > 4 { return input.to_vec(); }
@@ -86,6 +99,7 @@ pub fn apply_filter(input: &[u8], filter: u8) -> Vec<u8> {
 }
 
 /// Reverse the filter applied during compression.
+/// FILTER_PNG (5) passes through here — it is handled upstream in lib.rs.
 pub fn undo_filter(input: &[u8], filter: u8) -> Vec<u8> {
     let stride = filter as usize;
     if stride == 0 || stride > 4 { return input.to_vec(); }
@@ -136,5 +150,15 @@ mod tests {
             "residuals not constant enough: dominant value covers only {:.1}%",
             dominant_pct * 100.0
         );
+    }
+
+    #[test]
+    fn filter_png_passthrough() {
+        // FILTER_PNG must not corrupt data through apply/undo filter —
+        // it is a signal flag only, actual transform is in png_xform.
+        let data: Vec<u8> = (0u8..=255).collect();
+        let enc = apply_filter(&data, FILTER_PNG);
+        let dec = undo_filter(&enc, FILTER_PNG);
+        assert_eq!(dec, data, "FILTER_PNG must pass through apply/undo unchanged");
     }
 }

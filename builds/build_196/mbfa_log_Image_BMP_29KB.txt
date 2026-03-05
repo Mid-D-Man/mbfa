@@ -1,0 +1,14 @@
+BMP: 24 bpp → delta stride 3
+Filter delta3: 30054 bytes in, 30054 bytes filtered (same size — pre-LZ transform)
+Original size: 240432 bits (30054 bytes)
+  Wide scan wins: ob=14 lb=15 cost=4942 < baseline cost=6852 (ob=17 lb=8)
+Window diagnostics: 138/218 tokens BACKREF (63.3%) | offset: 0.0% at max (16383) | 0.7% upper half | length: 0.0% at max (32767) | offset_bits=14 length_bits=15 — OK
+Fold 1 adaptive: offset_bits=14 (window=16383 bytes) length_bits=15 (max_len=32767)
+Fold 1 (LZ): 4944 bits (618 bytes)
+Fold 2 pairing pre-scan: Cantor fallback rate = 68.1% (threshold 77%)
+Fold 2 (PAIR): 4544 bits (568 bytes)
+Fold 3 (LZ): 5608 bits (701 bytes)
+Fold 3 not worth it (ratio 1.234), stopping at fold 2
+  Wide scan wins: ob=14 lb=15 cost=4942 < baseline cost=6852 (ob=17 lb=8)
+PAIR wins over entropy: 568 B
+Done. 30054 bytes → 576 bytes

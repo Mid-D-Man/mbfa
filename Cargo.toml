@@ -22,7 +22,6 @@ path = "src/lib.rs"
 bitstream-io = "2.4"
 sysinfo       = "0.32"
 walkdir       = "2"
-flate2         = "1.0"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -40,10 +40,16 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     let final_ob = ob_for_fold(fold_count);
     let final_lb = lb_for_fold(fold_count);
 
-    // ── PNG prefix: [header_blob_len u32 LE][header_blob bytes] ──────────────
-    // Sits between the standard header and the compressed payload.
-    let (png_header_blob, actual_payload_start) =
+    // ── PNG prefix: [header_blob_len u32][header_blob][idat_len u32][original_idat] ──
+    // Sits between the standard fold header and the compressed payload.
+    struct PngBlobs {
+        header_blob:   Vec<u8>,
+        original_idat: Vec<u8>,
+    }
+
+    let (png_blobs, actual_payload_start) =
         if filter_flag == filters::FILTER_PNG {
+            // Read header_blob
             if payload_start + 4 > input.len() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -58,9 +64,31 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
                     std::io::ErrorKind::UnexpectedEof,
                     "PNG unfold: header_blob truncated"));
             }
-            let blob = input[payload_start+4..blob_end].to_vec();
-            println!("PNG unfold: header_blob={} B", blob_len);
-            (Some(blob), blob_end)
+            let header_blob = input[payload_start+4..blob_end].to_vec();
+
+            // Read original_idat
+            if blob_end + 4 > input.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "PNG unfold: original_idat_len missing"));
+            }
+            let idat_len = u32::from_le_bytes(
+                input[blob_end..blob_end+4].try_into().unwrap()
+            ) as usize;
+            let idat_end = blob_end + 4 + idat_len;
+            if idat_end > input.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "PNG unfold: original_idat truncated"));
+            }
+            let original_idat = input[blob_end+4..idat_end].to_vec();
+
+            println!(
+                "PNG unfold: header_blob={} B | original_idat={} B",
+                blob_len, idat_len
+            );
+
+            (Some(PngBlobs { header_blob, original_idat }), idat_end)
         } else {
             (None, payload_start)
         };
@@ -195,10 +223,10 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
 
     // ── Post-filter ───────────────────────────────────────────────────────────
     if filter_flag == filters::FILTER_PNG {
-        if let Some(blob) = png_header_blob {
-            let meta   = crate::png_xform::meta_from_blob(&blob)?;
+        if let Some(blobs) = png_blobs {
+            let mut meta = crate::png_xform::meta_from_blob(&blobs.header_blob)?;
+            meta.original_idat = blobs.original_idat; // restore verbatim IDAT
             let before = current.len();
-            // current = filtered scanline bytes — just repack into PNG container
             current = crate::png_xform::repack_png(&current, &meta)?;
             println!(
                 "PNG repacked: {} filtered bytes → {} PNG bytes",

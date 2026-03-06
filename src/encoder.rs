@@ -12,8 +12,11 @@
 //!   Computes (wide_ob, wide_lb) without the full scan cost. Token stream
 //!   is discarded — only the discovered ob/lb values are kept.
 //!
-//!   Baseline and discovery scans run IN PARALLEL via rayon::join.
-//!   Both are pure functions over read-only &[u8] — zero shared mutable state.
+//!   Baseline and discovery scans run IN PARALLEL via rayon::join when
+//!   input.len() <= PARALLEL_SCAN_THRESHOLD (1 MB). Above that threshold
+//!   they run sequentially — on large files (3MB+) the combined working set
+//!   (baseline 512KB prev + discovery 2MB prev + 3MB input read twice) blows
+//!   L3 cache and memory bandwidth contention exceeds the parallelism gain.
 //!
 //!   Scan 3 — constrained re-scan: (wide_ob, wide_lb).
 //!   Only runs when wide_ob != BASELINE_OFFSET_BITS or wide_lb != BASELINE_LENGTH_BITS.
@@ -60,17 +63,23 @@ const CHAIN_LIMIT_MIN: usize = 64;
 const CHAIN_LIMIT_MAX: usize = 4096;
 const LAZY_SHORT_LEN:  usize = 6;
 
+/// Input size above which baseline and discovery scans run sequentially.
+/// Below this threshold rayon::join runs them in parallel — both are pure
+/// functions over read-only &[u8] with no shared mutable state.
+///
+/// Above ~1MB the combined working set (baseline 512KB prev + discovery 2MB prev
+/// + full input read twice simultaneously) exceeds L3 on most CPUs.
+/// Measured regression on WarAndPeace (3.3MB, ob=21): +6.7s with parallel,
+/// -125 to -163ms with parallel on 400-500KB files. Crossover is between 1-3MB.
+/// 1MB is the conservative safe threshold.
+const PARALLEL_SCAN_THRESHOLD: usize = 1_048_576;
+
 // ── Discovery scan constants ──────────────────────────────────────────────────
 
 /// Fixed chain walk limit for the wide discovery scan.
-/// 256 steps is sufficient to detect what ob/lb range the data uses
-/// without the full O(chain_limit) cost of a production scan.
 const DISCOVER_CHAIN_LIMIT: usize = 256;
 
 /// Maximum prev array size for the discovery scan (2 MB → ob ≤ 21).
-/// Chosen for max speed — accepts that ob=22 is unreachable via discovery
-/// on files larger than 2MB. The constrained re-scan still runs full quality
-/// at whatever ob is discovered within this cap.
 const DISCOVER_MAX_PREV_SIZE: usize = 2 * 1024 * 1024;
 
 // ── Dynamic chain limit ───────────────────────────────────────────────────────
@@ -191,11 +200,7 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
 ///   - no lazy matching — greedy, any match len >= 2 is taken immediately
 ///   - no backref_worthwhile check — we want to find matches even when they
 ///     don't save bits, to maximise ob/lb coverage for the discovery purpose
-///
-/// These relaxations make discovery ~10x faster on large files while still
-/// correctly identifying the ob/lb range the data uses.
 pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
-    // Cap the lookback window so the prev array never exceeds DISCOVER_MAX_PREV_SIZE.
     let max_off     = max_offset(offset_bits).min(DISCOVER_MAX_PREV_SIZE);
     let max_len     = max_length(length_bits);
     let n           = input.len();
@@ -215,7 +220,6 @@ pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<To
         );
 
         if best_len >= 2 {
-            // Greedy match — no lazy check, no bit-cost check.
             for k in 0..best_len {
                 if i + k + 2 < n {
                     let hk = hash3(input, i + k);
@@ -373,18 +377,25 @@ impl ScanResult {
 
 /// Adaptive scan with apples-to-apples cost comparison.
 ///
-/// Scan 1 (baseline) and scan 2 (wide discovery) run IN PARALLEL via rayon::join.
-/// Both are pure functions over read-only &[u8] — zero shared mutable state.
-/// Scan 3 (constrained re-scan) still waits for discovery result — sequential.
+/// Scans 1 (baseline) and 2 (wide discovery) run in parallel via rayon::join
+/// when input.len() <= PARALLEL_SCAN_THRESHOLD (1 MB). Above that threshold
+/// they run sequentially to avoid L3 cache thrash from concurrent large allocs.
 pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
-    // ── Scans 1 & 2: baseline and discovery in parallel ───────────────────────
-    // rayon::join spawns both closures concurrently.
-    // scan() and scan_discover() are pure: they only read `input` and produce
-    // owned Vec<Token>. No shared mutable state — safe for parallel execution.
-    let (baseline_tokens, wide_discovery) = rayon::join(
-        || scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS),
-        || scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX),
-    );
+    // ── Scans 1 & 2: baseline and discovery ───────────────────────────────────
+    let (baseline_tokens, wide_discovery) = if input.len() <= PARALLEL_SCAN_THRESHOLD {
+        // Both scans are pure functions over read-only &[u8] — safe for rayon::join.
+        rayon::join(
+            || scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS),
+            || scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX),
+        )
+    } else {
+        // Sequential above threshold — memory bandwidth on large files makes
+        // parallel worse. Measured: +6.7s on WarAndPeace (3.3MB, ob=21).
+        (
+            scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS),
+            scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX),
+        )
+    };
 
     let baseline = ScanResult::new(
         baseline_tokens,
@@ -416,7 +427,7 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
         return (baseline.tokens, baseline.ob, baseline.lb);
     }
 
-    // ── Scan 3: constrained re-scan (full quality, sequential) ───────────────
+    // ── Scan 3: constrained re-scan (full quality, always sequential) ─────────
     let constrained = ScanResult::new(
         scan(input, wide_ob, wide_lb),
         wide_ob,

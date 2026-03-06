@@ -15,12 +15,13 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+use rayon::prelude::*;
 use crate::platform::auto_chunk_size;
 
 pub const ARCHIVE_MAGIC: [u8; 5] = [0x4D, 0x42, 0x46, 0x41, 0xAA];
 const ARCHIVE_VERSION:    u8     = 1;
 const HEADER_SIZE:        usize  = 18;
-const INDEX_OFFSET_FIELD: u64    = 10; // byte position of the index_offset u64 in header
+const INDEX_OFFSET_FIELD: u64    = 10;
 
 // ── Public data types ─────────────────────────────────────────────────────────
 
@@ -28,7 +29,7 @@ const INDEX_OFFSET_FIELD: u64    = 10; // byte position of the index_offset u64 
 pub struct FileEntry {
     pub path:            String,
     pub original_size:   u64,
-    pub offset_in_block: u64,   // byte offset within the decompressed block stream
+    pub offset_in_block: u64,
     pub is_split:        bool,
     pub chunk_index:     u32,
     pub total_chunks:    u32,
@@ -97,11 +98,7 @@ fn collect_files(input_dir: &Path) -> io::Result<Vec<RawFile>> {
         files.push(RawFile { rel_path, abs_path, size, group });
     }
 
-    // Sort: group ascending, then size descending within group.
-    // Largest files first in each group — gives smaller files the benefit
-    // of matching against a rich LZ history from the large files.
     files.sort_by(|a, b| a.group.cmp(&b.group).then(b.size.cmp(&a.size)));
-
     Ok(files)
 }
 
@@ -110,7 +107,7 @@ fn collect_files(input_dir: &Path) -> io::Result<Vec<RawFile>> {
 struct PlannedChunk {
     rel_path:     String,
     abs_path:     PathBuf,
-    file_size:    u64,   // total original file size
+    file_size:    u64,
     is_split:     bool,
     chunk_index:  u32,
     total_chunks: u32,
@@ -118,17 +115,15 @@ struct PlannedChunk {
 
 fn plan_blocks(files: Vec<RawFile>, chunk_size: usize) -> Vec<Vec<PlannedChunk>> {
     let mut blocks: Vec<Vec<PlannedChunk>> = Vec::new();
-    let mut current_block: Vec<PlannedChunk>  = Vec::new();
+    let mut current_block: Vec<PlannedChunk> = Vec::new();
     let mut current_size: usize = 0;
 
     for file in files {
         if file.size as usize > chunk_size {
-            // Flush any accumulated small files before splitting
             if !current_block.is_empty() {
                 blocks.push(std::mem::take(&mut current_block));
                 current_size = 0;
             }
-            // Each chunk of a large file gets its own block
             let total_chunks = ((file.size as usize + chunk_size - 1) / chunk_size) as u32;
             for chunk_idx in 0..total_chunks {
                 blocks.push(vec![PlannedChunk {
@@ -141,7 +136,6 @@ fn plan_blocks(files: Vec<RawFile>, chunk_size: usize) -> Vec<Vec<PlannedChunk>>
                 }]);
             }
         } else {
-            // Flush current block if adding this file would exceed chunk_size
             if current_size + file.size as usize > chunk_size && !current_block.is_empty() {
                 blocks.push(std::mem::take(&mut current_block));
                 current_size = 0;
@@ -165,6 +159,15 @@ fn plan_blocks(files: Vec<RawFile>, chunk_size: usize) -> Vec<Vec<PlannedChunk>>
     blocks
 }
 
+// ── Internal block data ───────────────────────────────────────────────────────
+
+/// Raw (uncompressed) block data, ready to be passed to crate::compress.
+struct RawBlock {
+    stream:       Vec<u8>,
+    file_entries: Vec<FileEntry>,
+    orig_size:    u64,
+}
+
 // ── Archive creation ──────────────────────────────────────────────────────────
 
 pub fn create_archive(input_dir: &Path, output_path: &Path) -> io::Result<()> {
@@ -176,38 +179,23 @@ pub fn create_archive(input_dir: &Path, output_path: &Path) -> io::Result<()> {
     let blocks = plan_blocks(files, chunk_size);
     println!("Planned {} block(s)", blocks.len());
 
-    let mut out = File::create(output_path)?;
+    // ── Phase 1: read all blocks sequentially (IO-bound) ─────────────────────
+    let mut raw_blocks: Vec<RawBlock> = Vec::with_capacity(blocks.len());
 
-    // Write header — index_offset is a placeholder (0) for now
-    out.write_all(&ARCHIVE_MAGIC)?;
-    out.write_all(&[ARCHIVE_VERSION])?;
-    out.write_all(&(blocks.len() as u32).to_le_bytes())?;
-    out.write_all(&0u64.to_le_bytes())?; // placeholder
-
-    let mut block_entries: Vec<BlockEntry> = Vec::new();
-
-    for (idx, block_chunks) in blocks.iter().enumerate() {
-        print!("  Block {:>4}/{} ... ", idx + 1, blocks.len());
-        let _ = std::io::stdout().flush();
-
-        // Concatenate chunk data and record per-file offsets
-        let mut stream:        Vec<u8>       = Vec::new();
-        let mut file_entries:  Vec<FileEntry> = Vec::new();
-        let mut block_orig:    u64           = 0;
+    for block_chunks in &blocks {
+        let mut stream:       Vec<u8>       = Vec::new();
+        let mut file_entries: Vec<FileEntry> = Vec::new();
+        let mut orig_size:    u64           = 0;
 
         for chunk in block_chunks {
             let offset_in_block = stream.len() as u64;
-
             let chunk_data = if chunk.is_split {
                 read_file_chunk(&chunk.abs_path, chunk.chunk_index, chunk_size, chunk.file_size)?
             } else {
                 fs::read(&chunk.abs_path)?
             };
-
-            let chunk_len = chunk_data.len() as u64;
+            orig_size += chunk_data.len() as u64;
             stream.extend_from_slice(&chunk_data);
-            block_orig += chunk_len;
-
             file_entries.push(FileEntry {
                 path:            chunk.rel_path.clone(),
                 original_size:   chunk.file_size,
@@ -218,24 +206,56 @@ pub fn create_archive(input_dir: &Path, output_path: &Path) -> io::Result<()> {
             });
         }
 
-        let compressed    = crate::compress(&stream, 8)?;
+        raw_blocks.push(RawBlock { stream, file_entries, orig_size });
+    }
+
+    // ── Phase 2: compress all blocks in parallel (CPU-bound) ─────────────────
+    // Each block is independent — crate::compress takes &[u8] and returns
+    // an owned Vec<u8>. Safe for rayon with no shared mutable state.
+    //
+    // NOTE: compress() internally calls scan_adaptive which emits println!.
+    // With multiple blocks in flight those lines will interleave in stdout.
+    // This is a cosmetic issue only — correctness is unaffected.
+    let compressed_results: Vec<io::Result<Vec<u8>>> = raw_blocks
+        .par_iter()
+        .map(|rb| crate::compress(&rb.stream, 8))
+        .collect();
+
+    // ── Phase 3: write sequentially (IO-bound, needs sequential offsets) ──────
+    let mut out = File::create(output_path)?;
+
+    out.write_all(&ARCHIVE_MAGIC)?;
+    out.write_all(&[ARCHIVE_VERSION])?;
+    out.write_all(&(raw_blocks.len() as u32).to_le_bytes())?;
+    out.write_all(&0u64.to_le_bytes())?; // index_offset placeholder
+
+    let mut block_entries: Vec<BlockEntry> = Vec::with_capacity(raw_blocks.len());
+
+    for (idx, (rb, comp_result)) in raw_blocks.into_iter()
+        .zip(compressed_results.into_iter())
+        .enumerate()
+    {
+        print!("  Block {:>4}/{} ... ", idx + 1, blocks.len());
+        let _ = std::io::stdout().flush();
+
+        let compressed    = comp_result?;
         let block_offset  = out.seek(SeekFrom::Current(0))?;
-        let compressed_sz = compressed.len() as u32;
+        let comp_len      = compressed.len();
 
         out.write_all(&compressed)?;
 
         println!(
             "{} bytes → {} bytes ({:.1}%)",
-            block_orig,
-            compressed_sz,
-            compressed_sz as f64 / block_orig.max(1) as f64 * 100.0
+            rb.orig_size, comp_len,
+            comp_len as f64 / rb.orig_size.max(1) as f64 * 100.0
         );
 
+        // file_entries moved out of rb — no clone needed
         block_entries.push(BlockEntry {
             block_offset,
-            compressed_size: compressed_sz,
-            original_size:   block_orig,
-            files:           file_entries,
+            compressed_size: comp_len as u32,
+            original_size:   rb.orig_size,
+            files:           rb.file_entries,
         });
     }
 
@@ -288,7 +308,6 @@ fn extract_all(
             if let Some(p) = out_path.parent() { fs::create_dir_all(p)?; }
 
             let chunk_data = slice_file_from_block(&decompressed, file, block);
-
             write_file_chunk(&out_path, chunk_data, file.is_split, file.chunk_index)?;
         }
 
@@ -304,7 +323,6 @@ fn extract_one_file(
     target:        &str,
     output_dir:    &Path,
 ) -> io::Result<()> {
-    // Gather all chunks for this file (may be split across multiple blocks)
     let mut hits: Vec<(&BlockEntry, &FileEntry)> = block_entries.iter()
         .flat_map(|b| b.files.iter().map(move |fe| (b, fe)))
         .filter(|(_, fe)| fe.path == target)
@@ -323,8 +341,8 @@ fn extract_one_file(
     if let Some(p) = out_path.parent() { fs::create_dir_all(p)?; }
 
     for (block, file) in hits {
-        let decompressed  = read_and_decompress_block(f, block)?;
-        let chunk_data    = slice_file_from_block(&decompressed, file, block);
+        let decompressed = read_and_decompress_block(f, block)?;
+        let chunk_data   = slice_file_from_block(&decompressed, file, block);
         write_file_chunk(&out_path, chunk_data, file.is_split, file.chunk_index)?;
     }
 
@@ -371,8 +389,6 @@ pub fn list_archive(input_path: &Path) -> io::Result<()> {
 
 // ── Detection ─────────────────────────────────────────────────────────────────
 
-/// Returns true if the first 5 bytes match the MBFA archive magic.
-/// Used by the CLI to distinguish archive files from single-file .mbfa.
 pub fn is_archive(data: &[u8]) -> bool {
     data.len() >= 5 && data[0..5] == ARCHIVE_MAGIC
 }
@@ -413,14 +429,11 @@ fn slice_file_from_block<'a>(
     block:        &BlockEntry,
 ) -> &'a [u8] {
     let start = file.offset_in_block as usize;
-
-    // End = next file's offset_in_block, or end of decompressed stream
-    let end = block.files.iter()
+    let end   = block.files.iter()
         .filter(|f| f.offset_in_block > file.offset_in_block)
         .map(|f| f.offset_in_block as usize)
         .min()
         .unwrap_or(decompressed.len());
-
     &decompressed[start..end.min(decompressed.len())]
 }
 
@@ -431,7 +444,6 @@ fn write_file_chunk(
     chunk_index: u32,
 ) -> io::Result<()> {
     if is_split && chunk_index > 0 {
-        // Append subsequent chunks
         let mut f = OpenOptions::new().append(true).open(path)?;
         f.write_all(data)
     } else {
@@ -461,4 +473,4 @@ fn fmt_bytes(n: u64) -> String {
     else if n >= 1_048_576     { format!("{:.1}MB", n as f64 / 1_048_576.0) }
     else if n >= 1_024         { format!("{:.1}KB", n as f64 / 1_024.0) }
     else                       { format!("{}B",     n) }
-                }
+}

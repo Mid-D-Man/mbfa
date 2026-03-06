@@ -16,6 +16,36 @@ pub mod platform;
 use std::io;
 use rayon::prelude::*;
 
+/// Entropy threshold above which data is treated as incompressible.
+/// 7.8 bits/byte leaves a safe margin — truly random data hits ~8.0,
+/// compressed formats (PNG, JPEG, zst) typically land 7.8-8.0.
+const INCOMPRESSIBLE_ENTROPY_THRESHOLD: f64 = 7.8;
+
+/// Minimum input size before the incompressible check fires.
+/// Small files are skipped — small gradient BMPs CAN compress well in MBFA
+/// (verified: MBFA beats gzip on small gradient BMPs at ~2.15%).
+/// 50 KB keeps those paths alive while catching large incompressible blobs.
+const INCOMPRESSIBLE_MIN_BYTES: usize = 50_000;
+
+/// Sample Shannon entropy from the first 8 KB of data.
+/// Returns bits-per-byte in [0.0, 8.0]. Cost: O(8192), essentially free.
+fn sample_entropy(data: &[u8]) -> f64 {
+    const SAMPLE_SIZE: usize = 8192;
+    let sample = if data.len() > SAMPLE_SIZE { &data[..SAMPLE_SIZE] } else { data };
+    let mut freq = [0u32; 256];
+    for &b in sample {
+        freq[b as usize] += 1;
+    }
+    let n = sample.len() as f64;
+    freq.iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / n;
+            -p * p.log2()
+        })
+        .sum()
+}
+
 /// File header layout:
 ///   Byte 0:          fold_count
 ///   Byte 1:          pair_flag    (1 = fold 2 used pair encoding)
@@ -24,8 +54,15 @@ use rayon::prelude::*;
 ///   Bytes 4..4+N:    offset_bits[0..N]  N = fold_count
 ///   Bytes 4+N..4+2N: length_bits[0..N]
 ///   Remaining:       compressed payload
+///
+/// Special case — fold_count=0:
+///   Passthrough header. Payload is the original uncompressed bytes verbatim.
+///   Emitted when incompressible early exit fires. Decompressor sees fold_count=0,
+///   runs zero unfold passes, returns payload unchanged.
 pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     // ── Pre-filter ────────────────────────────────────────────────────────────
+    // Filter detection runs before the incompressible check so that WAV/BMP files
+    // are evaluated on their filtered (low-entropy residual) form, not raw bytes.
     let filter_flag = filters::detect_filter(input);
 
     let filter_buf: Option<Vec<u8>> = if filter_flag != filters::FILTER_NONE {
@@ -41,9 +78,31 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
 
     let to_fold: &[u8] = filter_buf.as_deref().unwrap_or(input);
 
+    // ── Incompressible early exit ─────────────────────────────────────────────
+    // Evaluated on `to_fold` (post-filter) so WAV/BMP delta-filtered residuals
+    // get their correct (low) entropy. If a WAV file somehow produced high-entropy
+    // residuals, we still bail correctly and return the ORIGINAL unfiltered bytes.
+    if input.len() > INCOMPRESSIBLE_MIN_BYTES {
+        let ent = sample_entropy(to_fold);
+        if ent > INCOMPRESSIBLE_ENTROPY_THRESHOLD {
+            println!(
+                "Incompressible early exit: entropy={:.3} bits/byte, {} bytes — passthrough",
+                ent, input.len()
+            );
+            // Header: fold_count=0, pair=0, entropy=0, filter=NONE
+            // Payload: original input (unfiltered) — decompressor returns it unchanged.
+            let mut out = Vec::with_capacity(4 + input.len());
+            out.push(0u8);                  // fold_count = 0
+            out.push(0u8);                  // pair_flag  = 0
+            out.push(0u8);                  // entropy_flag = 0
+            out.push(filters::FILTER_NONE); // filter_flag  = 0
+            out.extend_from_slice(input);
+            return Ok(out);
+        }
+    }
+
     // ── Fold passes ───────────────────────────────────────────────────────────
-    // fold1_tokens_opt: the fold 1 token stream, cached to avoid re-scanning
-    // in pair_vs_entropy (which previously called scan_adaptive from scratch).
+    // fold1_tokens_opt: cached fold 1 token stream to avoid re-scan in pair_vs_entropy.
     let (compressed, folds_done, used_pairing, offset_bits_per_fold, length_bits_per_fold, fold1_tokens_opt) =
         fold::fold(to_fold, max_folds)?;
 
@@ -127,7 +186,7 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
         };
 
     // ── Serialise header ──────────────────────────────────────────────────────
-    let mut output = Vec::new();
+    let mut output = Vec::with_capacity(4 + 2 * out_folds as usize + final_payload.len());
     output.push(out_folds);
     output.push(out_pair_flag as u8);
     output.push(entropy_flag);
@@ -285,4 +344,4 @@ fn pair_vs_entropy(
 
 pub fn decompress(input: &[u8]) -> io::Result<Vec<u8>> {
     unfold::unfold(input)
-}
+            }

@@ -63,10 +63,11 @@ const LAZY_SHORT_LEN:  usize = 6;
 /// without the full O(chain_limit) cost of a production scan.
 const DISCOVER_CHAIN_LIMIT: usize = 256;
 
-/// Maximum prev array size for the discovery scan (4 MB → ob ≤ 22).
-/// Caps memory thrashing on large files while covering ob up to 22.
-/// The constrained re-scan (full quality) runs at whatever ob is discovered.
-const DISCOVER_MAX_PREV_SIZE: usize = 4 * 1024 * 1024;
+/// Maximum prev array size for the discovery scan (2 MB → ob ≤ 21).
+/// Chosen for max speed — accepts that ob=22 is unreachable via discovery
+/// on files larger than 2MB. The constrained re-scan still runs full quality
+/// at whatever ob is discovered within this cap.
+const DISCOVER_MAX_PREV_SIZE: usize = 2 * 1024 * 1024;
 
 // ── Dynamic chain limit ───────────────────────────────────────────────────────
 

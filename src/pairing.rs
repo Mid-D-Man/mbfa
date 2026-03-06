@@ -48,7 +48,6 @@ fn write_backref_operand<W: std::io::Write>(
         w.write(1, 0u32)?;
         w.write(16, c as u32)?;
     } else {
-        // Raw fallback — use the actual field widths from the enclosing fold.
         w.write(1, 1u32)?;
         w.write(offset_bits, offset)?;
         w.write(length_bits, length)?;
@@ -80,13 +79,20 @@ fn read_backref_operand<R: std::io::Read>(
 }
 
 pub fn pair_encode(tokens: &[Token], offset_bits: u32, length_bits: u32) -> std::io::Result<Vec<u8>> {
-    let mut output = Vec::new();
+    // Task 4: pre-allocate output buffer.
+    // Worst case per pair: PREFIX_BITS + 2 × (1 flag + offset_bits + length_bits) bits.
+    // With ob=24, lb=24: 3 + 2×(1+24+24) = 101 bits ≈ 13 bytes per 2 tokens.
+    // Using 14 bytes per pair as ceiling, plus a few bytes for END + alignment.
+    let bits_per_pair = PREFIX_BITS + 2 * (1 + offset_bits + length_bits);
+    let est_bytes = ((tokens.len() as u64 / 2 + 2) * (bits_per_pair as u64 + 7) / 8 + 2) as usize;
+    let mut output = Vec::with_capacity(est_bytes);
     {
         let mut w = BitWriter::endian(&mut output, BigEndian);
 
-        let data: Vec<&Token> = tokens.iter()
-            .filter(|t| !matches!(t, Token::End))
-            .collect();
+        // Task 4: pre-allocate the data vec to tokens.len() — filter iter's
+        // lower size_hint is 0 so collect() won't pre-allocate without this.
+        let mut data: Vec<&Token> = Vec::with_capacity(tokens.len());
+        data.extend(tokens.iter().filter(|t| !matches!(t, Token::End)));
 
         let mut i = 0;
         while i < data.len() {
@@ -193,4 +199,4 @@ pub fn pair_decode(input: &[u8], offset_bits: u32, length_bits: u32) -> std::io:
     }
 
     Ok(tokens)
-                }
+}

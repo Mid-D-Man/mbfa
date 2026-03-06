@@ -10,6 +10,14 @@
 //   v5  entropy_flag=5  v2 + recent-offset slot reuse
 //
 // Core algorithm (fold/unfold/LZ/pairing) is untouched by this module.
+//
+// Frequency counting uses fixed arrays instead of HashMap:
+//   - Lit/length channel: vec![0u64; 65536] — covers all syms when entropy is safe
+//     (literals 0-255, SYM_END=256, length syms 257-65535 via 255+length)
+//   - Offset bucket channel: [u64; 64] — max bucket=47 for ob=24
+//   - Slot channel: [u64; NUM_SLOTS] — 8 slots, combined with bucket array
+// These are converted to HashMap<u32,u64> (non-zero entries only) before
+// passing to assign_code_lengths, which is unchanged.
 
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
@@ -17,11 +25,21 @@ use bitstream_io::{BitWriter, BitReader, BigEndian, BitWrite, BitRead};
 use crate::opcode::Token;
 
 pub const ENTROPY_MIN_BYTES:    usize = 400;
-pub const ENTROPY_V2_MIN_BYTES: usize = 1000; // v2+ need enough data for 2+ contexts
+pub const ENTROPY_V2_MIN_BYTES: usize = 1000;
 
 const SYM_END: u32 = 256;
 #[inline] fn sym_from_length(len: u32) -> u32 { 255 + len }
 #[inline] fn length_from_sym(sym: u32)  -> u32 { sym - 255 }
+
+/// Size of the lit/length frequency array.
+/// Covers: 0-255 literals, 256 END, 257-65535 length syms (255 + length).
+/// Only populated when tokens_safe_for_entropy passes (all lengths ≤ 65280),
+/// so max sym = 255 + 65280 = 65535 which fits exactly.
+const LIT_LEN_FREQ_SIZE: usize = 65536;
+
+/// Size of the offset bucket frequency array.
+/// Max bucket for ob=24: offset=2^24-1 → extra_bits=22 → bucket=47. 64 gives safe margin.
+const BUCKET_FREQ_SIZE: usize = 64;
 
 pub type EncodeTable = HashMap<u32, (u32, u32)>;
 pub type DecodeTable = HashMap<(u32, u32), u32>;
@@ -91,69 +109,117 @@ pub fn bucket_extra_bits(bucket: u32) -> u32 {
     if bucket < 4 { 0 } else { (bucket - 2) >> 1 }
 }
 
-// ── Frequency counting ────────────────────────────────────────────────────────
+// ── Frequency counting — fixed array implementations ─────────────────────────
+//
+// All functions build frequency tables using direct-indexed arrays instead of
+// HashMap. Array writes are O(1) with no hashing overhead. After counting, only
+// non-zero entries are collected into a HashMap<u32, u64> for assign_code_lengths.
+// This is strictly faster than HashMap for large token streams.
 
-fn count_joint_freq(tokens: &[Token]) -> HashMap<u32, u64> {
-    let mut freq: HashMap<u32, u64> = HashMap::new();
-    for t in tokens {
-        match t {
-            Token::Lit { byte }           => { *freq.entry(*byte as u32).or_insert(0) += 1; }
-            Token::Backref { length, .. } => { *freq.entry(sym_from_length(*length)).or_insert(0) += 1; }
-            Token::End                    => { *freq.entry(SYM_END).or_insert(0) += 1; }
-        }
-    }
-    freq.entry(SYM_END).or_insert(1);
-    freq
+/// Build a HashMap from a lit/length frequency array (non-zero entries only).
+/// Ensures SYM_END always has at least count 1 (Huffman tree requires END symbol).
+#[inline]
+fn lit_len_array_to_map(freq: &[u64]) -> HashMap<u32, u64> {
+    let mut map: HashMap<u32, u64> = freq.iter()
+        .enumerate()
+        .filter(|(_, &c)| c > 0)
+        .map(|(i, &c)| (i as u32, c))
+        .collect();
+    map.entry(SYM_END).or_insert(1);
+    map
 }
 
+/// Build a HashMap from a bucket frequency array (non-zero entries only).
+#[inline]
+fn bucket_array_to_map(freq: &[u64; BUCKET_FREQ_SIZE]) -> HashMap<u32, u64> {
+    freq.iter()
+        .enumerate()
+        .filter(|(_, &c)| c > 0)
+        .map(|(i, &c)| (i as u32, c))
+        .collect()
+}
+
+/// Joint lit/length frequency counting — vec![0u64; 65536] indexed by symbol.
+/// SYM_END guaranteed present with count >= 1 in returned map.
+fn count_joint_freq(tokens: &[Token]) -> HashMap<u32, u64> {
+    let mut freq = vec![0u64; LIT_LEN_FREQ_SIZE];
+    for t in tokens {
+        match t {
+            Token::Lit { byte }           => freq[*byte as usize] += 1,
+            Token::Backref { length, .. } => freq[(255 + length) as usize] += 1,
+            Token::End                    => freq[SYM_END as usize] += 1,
+        }
+    }
+    lit_len_array_to_map(&freq)
+}
+
+/// Offset bucket frequency counting — [u64; 64] indexed by bucket.
 pub fn count_offset_bucket_freq(tokens: &[Token]) -> HashMap<u32, u64> {
-    let mut freq: HashMap<u32, u64> = HashMap::new();
+    let mut freq = [0u64; BUCKET_FREQ_SIZE];
     for t in tokens {
         if let Token::Backref { offset, .. } = t {
             let (bucket, _, _) = offset_to_bucket(*offset);
-            *freq.entry(bucket).or_insert(0) += 1;
+            // bucket <= 47 for ob <= 24, always within [u64; 64]
+            freq[bucket as usize] += 1;
         }
     }
-    freq
+    bucket_array_to_map(&freq)
 }
 
+/// Slotted offset frequency counting — buckets [u64; 64] + slots [u64; NUM_SLOTS].
+/// Slot symbols are combined into the returned HashMap as SLOT_SYMBOL_BASE + idx.
 pub fn count_offset_bucket_freq_slotted(tokens: &[Token]) -> HashMap<u32, u64> {
-    let mut freq  = HashMap::new();
-    let mut slots = OffsetSlots::new();
+    let mut bucket_freq = [0u64; BUCKET_FREQ_SIZE];
+    let mut slot_freq   = [0u64; NUM_SLOTS];
+    let mut slots       = OffsetSlots::new();
+
     for t in tokens {
         if let Token::Backref { offset, .. } = t {
             if let Some(slot_idx) = slots.access(*offset) {
-                *freq.entry(SLOT_SYMBOL_BASE + slot_idx as u32).or_insert(0) += 1;
+                slot_freq[slot_idx] += 1;
             } else {
                 let (bucket, _, _) = offset_to_bucket(*offset);
-                *freq.entry(bucket).or_insert(0) += 1;
+                bucket_freq[bucket as usize] += 1;
             }
         }
     }
-    freq
+
+    let mut map = bucket_array_to_map(&bucket_freq);
+    for (i, &c) in slot_freq.iter().enumerate() {
+        if c > 0 {
+            map.insert(SLOT_SYMBOL_BASE + i as u32, c);
+        }
+    }
+    map
 }
 
+/// 2-context lit/length frequency counting.
+/// context 0: position after literal or at stream start
+/// context 1: position after backref
+/// Both vecs are vec![0u64; 65536]. SYM_END ensured in freq0.
 fn count_joint_freq_by_context(tokens: &[Token]) -> (HashMap<u32, u64>, HashMap<u32, u64>) {
-    let mut freq0: HashMap<u32, u64> = HashMap::new();
-    let mut freq1: HashMap<u32, u64> = HashMap::new();
+    let mut freq0 = vec![0u64; LIT_LEN_FREQ_SIZE];
+    let mut freq1 = vec![0u64; LIT_LEN_FREQ_SIZE];
     let mut after_br = false;
 
     for t in tokens {
         let freq = if after_br { &mut freq1 } else { &mut freq0 };
         match t {
             Token::Lit { byte } => {
-                *freq.entry(*byte as u32).or_insert(0) += 1;
+                freq[*byte as usize] += 1;
                 after_br = false;
             }
             Token::Backref { length, .. } => {
-                *freq.entry(sym_from_length(*length)).or_insert(0) += 1;
+                freq[(255 + length) as usize] += 1;
                 after_br = true;
             }
-            Token::End => { *freq.entry(SYM_END).or_insert(0) += 1; }
+            Token::End => {
+                freq[SYM_END as usize] += 1;
+            }
         }
     }
-    freq0.entry(SYM_END).or_insert(1);
-    (freq0, freq1)
+
+    (lit_len_array_to_map(&freq0), lit_len_array_to_map(&freq1))
 }
 
 // ── Huffman tree ──────────────────────────────────────────────────────────────
@@ -264,7 +330,7 @@ pub fn decode_table_from_encode(enc: &EncodeTable) -> DecodeTable {
     enc.iter().map(|(&sym, &(code, len))| ((code, len), sym)).collect()
 }
 
-// ── v4 eight-context builder ──────────────────────────────────────────────────
+// ── v3 eight-context builder ──────────────────────────────────────────────────
 
 #[inline]
 pub fn byte_category(b: u8) -> usize {
@@ -285,9 +351,13 @@ pub fn context_idx(after_br: bool, prev_byte: u8) -> usize {
     (after_br as usize) * 4 + byte_category(prev_byte)
 }
 
+/// 8-context lit/length frequency counting.
+/// Each context gets its own vec![0u64; 65536]. Total heap: 8 × 512KB = 4MB.
+/// Only allocated when v3 entropy is being attempted on a large enough stream.
 fn count_joint_freq_v3(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32, u64>) {
-    let mut lit_freqs: [HashMap<u32, u64>; 8] = std::array::from_fn(|_| HashMap::new());
-    let mut offset_freq: HashMap<u32, u64> = HashMap::new();
+    // 8 independent lit/length frequency vecs
+    let mut lit_freqs: [Vec<u64>; 8] = std::array::from_fn(|_| vec![0u64; LIT_LEN_FREQ_SIZE]);
+    let mut bucket_freq = [0u64; BUCKET_FREQ_SIZE];
 
     let mut prev_byte: u8 = b' ';
     let mut after_br      = false;
@@ -296,22 +366,27 @@ fn count_joint_freq_v3(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32
         let ctx = context_idx(after_br, prev_byte);
         match t {
             Token::Lit { byte } => {
-                *lit_freqs[ctx].entry(*byte as u32).or_insert(0) += 1;
+                lit_freqs[ctx][*byte as usize] += 1;
                 prev_byte = *byte;
                 after_br  = false;
             }
             Token::Backref { offset, length } => {
-                *lit_freqs[ctx].entry(sym_from_length(*length)).or_insert(0) += 1;
+                lit_freqs[ctx][(255 + length) as usize] += 1;
                 let (bucket, _, _) = offset_to_bucket(*offset);
-                *offset_freq.entry(bucket).or_insert(0) += 1;
+                bucket_freq[bucket as usize] += 1;
                 after_br = true;
             }
             Token::End => {
-                *lit_freqs[ctx].entry(SYM_END).or_insert(0) += 1;
+                lit_freqs[ctx][SYM_END as usize] += 1;
             }
         }
     }
-    (lit_freqs, offset_freq)
+
+    let lit_maps: [HashMap<u32, u64>; 8] = std::array::from_fn(|i| {
+        lit_len_array_to_map(&lit_freqs[i])
+    });
+
+    (lit_maps, bucket_array_to_map(&bucket_freq))
 }
 
 pub fn build_encode_tables_v3(tokens: &[Token]) -> Option<([EncodeTable; 8], EncodeTable)> {
@@ -510,9 +585,6 @@ fn deserialize_fmt2(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
 }
 
 // ── v1: joint lit/length Huffman + offset bucket Huffman ─────────────────────
-//
-// entropy_flag = 1
-// Payload: [lit_table][offset_table][bitstream]
 
 pub fn write_tokens_v1(
     tokens:       &[Token],
@@ -591,10 +663,6 @@ pub fn read_tokens_v1(
 }
 
 // ── v2: 2-context lit/length Huffman + offset bucket Huffman ─────────────────
-//
-// entropy_flag = 2
-// Context: after_backref=false vs after_backref=true
-// Payload: [lit_table0][lit_table1][offset_table][bitstream]
 
 pub fn write_tokens_v2(
     tokens:       &[Token],
@@ -687,11 +755,6 @@ pub fn read_tokens_v2(
 }
 
 // ── v3: 8-context lit/length Huffman + offset bucket Huffman ─────────────────
-//
-// entropy_flag = 3
-// Context: (after_backref × byte_category) = 8 contexts
-// byte_categories: vowel / uppercase+consonant / whitespace+punct / other
-// Payload: [lit_table×8][offset_table][bitstream]
 
 pub fn write_tokens_v3(
     tokens:       &[Token],
@@ -802,10 +865,7 @@ pub fn read_tokens_v3(
     Ok(tokens)
 }
 
-// ── v4: joint lit/length Huffman + slotted offset (v1 + slot reuse) ──────────
-//
-// entropy_flag = 4
-// Payload: [lit_table][offset+slots_table][bitstream]
+// ── v4: joint lit/length Huffman + slotted offset ────────────────────────────
 
 pub fn write_tokens_v4(
     tokens:       &[Token],
@@ -907,10 +967,7 @@ pub fn read_tokens_v4(
     Ok(tokens)
 }
 
-// ── v5: 2-context lit/length Huffman + slotted offset (v2 + slot reuse) ──────
-//
-// entropy_flag = 5
-// Payload: [lit_table0][lit_table1][offset+slots_table][bitstream]
+// ── v5: 2-context lit/length Huffman + slotted offset ────────────────────────
 
 pub fn write_tokens_v5(
     tokens:       &[Token],

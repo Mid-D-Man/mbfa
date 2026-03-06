@@ -2,15 +2,15 @@
 {
   "name": "Source_Tree",
   "file_count": 97,
-  "original_bytes": 823206,
+  "original_bytes": 855954,
   "mbfa_rank": 3,
   "mbfa_roundtrip": "PASS",
-  "mbfa_bytes":  32720,  "mbfa_pct":  3.97,  "mbfa_c_ms":  402,  "mbfa_d_ms":  12,
-  "zip_bytes":   211436,   "zip_pct":   25.68,   "zip_c_ms":   64,   "zip_d_ms":   12,
-  "tgz_bytes":   148119,   "tgz_pct":   17.99,   "tgz_c_ms":   27,   "tgz_d_ms":   8,
-  "tzst_bytes":  33034,  "tzst_pct":  4.01,  "tzst_c_ms":  13,  "tzst_d_ms":  7,
-  "txz_bytes":   27188,   "txz_pct":   3.30,   "txz_c_ms":   115,   "txz_d_ms":   8,
-  "tbr_bytes":   28553,   "tbr_pct":   3.46,   "tbr_c_ms":   69,   "tbr_d_ms":   7
+  "mbfa_bytes":  34586,  "mbfa_pct":  4.04,  "mbfa_c_ms":  392,  "mbfa_d_ms":  12,
+  "zip_bytes":   223784,   "zip_pct":   26.14,   "zip_c_ms":   67,   "zip_d_ms":   12,
+  "tgz_bytes":   158593,   "tgz_pct":   18.52,   "tgz_c_ms":   28,   "tgz_d_ms":   9,
+  "tzst_bytes":  35007,  "tzst_pct":  4.08,  "tzst_c_ms":  16,  "tzst_d_ms":  9,
+  "txz_bytes":   28900,   "txz_pct":   3.37,   "txz_c_ms":   119,   "txz_d_ms":   8,
+  "tbr_bytes":   30479,   "tbr_pct":   3.56,   "tbr_c_ms":   128,   "tbr_d_ms":   7
 }
 ,
 {
@@ -19,12 +19,12 @@
   "original_bytes": 3653924,
   "mbfa_rank": 2,
   "mbfa_roundtrip": "PASS",
-  "mbfa_bytes":  1133864,  "mbfa_pct":  31.03,  "mbfa_c_ms":  25357,  "mbfa_d_ms":  128,
+  "mbfa_bytes":  1133880,  "mbfa_pct":  31.03,  "mbfa_c_ms":  23135,  "mbfa_d_ms":  130,
   "zip_bytes":   1326143,   "zip_pct":   36.29,   "zip_c_ms":   231,   "zip_d_ms":   30,
-  "tgz_bytes":   1325088,   "tgz_pct":   36.26,   "tgz_c_ms":   240,   "tgz_d_ms":   27,
-  "tzst_bytes":  1281024,  "tzst_pct":  35.05,  "tzst_c_ms":  35,  "tzst_d_ms":  13,
-  "txz_bytes":   1014120,   "txz_pct":   27.75,   "txz_c_ms":   1602,   "txz_d_ms":   54,
-  "tbr_bytes":   1205472,   "tbr_pct":   32.99,   "tbr_c_ms":   190,   "tbr_d_ms":   17
+  "tgz_bytes":   1325081,   "tgz_pct":   36.26,   "tgz_c_ms":   240,   "tgz_d_ms":   27,
+  "tzst_bytes":  1281021,  "tzst_pct":  35.05,  "tzst_c_ms":  35,  "tzst_d_ms":  11,
+  "txz_bytes":   1014180,   "txz_pct":   27.75,   "txz_c_ms":   1427,   "txz_d_ms":   51,
+  "tbr_bytes":   1205467,   "tbr_pct":   32.99,   "tbr_c_ms":   196,   "tbr_d_ms":   17
 }
 ,
 {
@@ -33,12 +33,12 @@
   "original_bytes": 550142,
   "mbfa_rank": 3,
   "mbfa_roundtrip": "PASS",
-  "mbfa_bytes":  57224,  "mbfa_pct":  10.40,  "mbfa_c_ms":  637,  "mbfa_d_ms":  12,
-  "zip_bytes":   68469,   "zip_pct":   12.44,   "zip_c_ms":   14,   "zip_d_ms":   6,
-  "tgz_bytes":   69195,   "tgz_pct":   12.57,   "tgz_c_ms":   17,   "tgz_d_ms":   6,
-  "tzst_bytes":  69353,  "tzst_pct":  12.60,  "tzst_c_ms":  9,  "tzst_d_ms":  4,
-  "txz_bytes":   48996,   "txz_pct":   8.90,   "txz_c_ms":   159,   "txz_d_ms":   7,
-  "tbr_bytes":   56505,   "tbr_pct":   10.27,   "tbr_c_ms":   16,   "tbr_d_ms":   4
+  "mbfa_bytes":  57224,  "mbfa_pct":  10.40,  "mbfa_c_ms":  564,  "mbfa_d_ms":  12,
+  "zip_bytes":   68469,   "zip_pct":   12.44,   "zip_c_ms":   13,   "zip_d_ms":   6,
+  "tgz_bytes":   69196,   "tgz_pct":   12.57,   "tgz_c_ms":   16,   "tgz_d_ms":   5,
+  "tzst_bytes":  69352,  "tzst_pct":  12.60,  "tzst_c_ms":  8,  "tzst_d_ms":  4,
+  "txz_bytes":   49176,   "txz_pct":   8.93,   "txz_c_ms":   160,   "txz_d_ms":   8,
+  "tbr_bytes":   56506,   "tbr_pct":   10.27,   "tbr_c_ms":   16,   "tbr_d_ms":   4
 }
 ,
 {
@@ -47,39 +47,39 @@
   "original_bytes": 557204,
   "mbfa_rank": 6,
   "mbfa_roundtrip": "PASS",
-  "mbfa_bytes":  557595,  "mbfa_pct":  100.07,  "mbfa_c_ms":  120,  "mbfa_d_ms":  3,
+  "mbfa_bytes":  557595,  "mbfa_pct":  100.07,  "mbfa_c_ms":  5,  "mbfa_d_ms":  3,
   "zip_bytes":   486836,   "zip_pct":   87.37,   "zip_c_ms":   18,   "zip_d_ms":   7,
-  "tgz_bytes":   488153,   "tgz_pct":   87.60,   "tgz_c_ms":   21,   "tgz_d_ms":   7,
-  "tzst_bytes":  483535,  "tzst_pct":  86.77,  "tzst_c_ms":  9,  "tzst_d_ms":  5,
-  "txz_bytes":   268672,   "txz_pct":   48.21,   "txz_c_ms":   86,   "txz_d_ms":   24,
-  "tbr_bytes":   445312,   "tbr_pct":   79.91,   "tbr_c_ms":   19,   "tbr_d_ms":   7
+  "tgz_bytes":   488151,   "tgz_pct":   87.60,   "tgz_c_ms":   22,   "tgz_d_ms":   7,
+  "tzst_bytes":  483537,  "tzst_pct":  86.77,  "tzst_c_ms":  9,  "tzst_d_ms":  4,
+  "txz_bytes":   272200,   "txz_pct":   48.85,   "txz_c_ms":   75,   "txz_d_ms":   24,
+  "tbr_bytes":   445884,   "tbr_pct":   80.02,   "tbr_c_ms":   19,   "tbr_d_ms":   7
 }
 ,
 {
   "name": "Mixed_Directory",
   "file_count": 6,
-  "original_bytes": 376718,
+  "original_bytes": 376789,
   "mbfa_rank": 6,
   "mbfa_roundtrip": "PASS",
-  "mbfa_bytes":  172047,  "mbfa_pct":  45.66,  "mbfa_c_ms":  305,  "mbfa_d_ms":  32,
-  "zip_bytes":   166411,   "zip_pct":   44.17,   "zip_c_ms":   17,   "zip_d_ms":   5,
-  "tgz_bytes":   168369,   "tgz_pct":   44.69,   "tgz_c_ms":   20,   "tgz_d_ms":   5,
-  "tzst_bytes":  166960,  "tzst_pct":  44.31,  "tzst_c_ms":  8,  "tzst_d_ms":  4,
-  "txz_bytes":   150636,   "txz_pct":   39.98,   "txz_c_ms":   92,   "txz_d_ms":   12,
-  "tbr_bytes":   159070,   "tbr_pct":   42.22,   "tbr_c_ms":   16,   "tbr_d_ms":   4
+  "mbfa_bytes":  172118,  "mbfa_pct":  45.68,  "mbfa_c_ms":  268,  "mbfa_d_ms":  33,
+  "zip_bytes":   166484,   "zip_pct":   44.18,   "zip_c_ms":   18,   "zip_d_ms":   5,
+  "tgz_bytes":   168846,   "tgz_pct":   44.81,   "tgz_c_ms":   20,   "tgz_d_ms":   5,
+  "tzst_bytes":  167027,  "tzst_pct":  44.32,  "tzst_c_ms":  8,  "tzst_d_ms":  4,
+  "txz_bytes":   150680,   "txz_pct":   39.99,   "txz_c_ms":   91,   "txz_d_ms":   12,
+  "tbr_bytes":   159077,   "tbr_pct":   42.21,   "tbr_c_ms":   16,   "tbr_d_ms":   5
 }
 ,
 {
   "name": "Full_Corpus",
   "file_count": 127,
-  "original_bytes": 5961194,
+  "original_bytes": 5994013,
   "mbfa_rank": 3,
   "mbfa_roundtrip": "PASS",
-  "mbfa_bytes":  1911364,  "mbfa_pct":  32.06,  "mbfa_c_ms":  51499,  "mbfa_d_ms":  282,
-  "zip_bytes":   2263325,   "zip_pct":   37.96,   "zip_c_ms":   283,   "zip_d_ms":   50,
-  "tgz_bytes":   2205347,   "tgz_pct":   36.99,   "tgz_c_ms":   298,   "tgz_d_ms":   41,
-  "tzst_bytes":  1982566,  "tzst_pct":  33.25,  "tzst_c_ms":  42,  "tzst_d_ms":  18,
-  "txz_bytes":   1361148,   "txz_pct":   22.83,   "txz_c_ms":   1889,   "txz_d_ms":   76,
-  "tbr_bytes":   1742163,   "tbr_pct":   29.22,   "tbr_c_ms":   235,   "tbr_d_ms":   27
+  "mbfa_bytes":  1913625,  "mbfa_pct":  31.92,  "mbfa_c_ms":  55020,  "mbfa_d_ms":  286,
+  "zip_bytes":   2275746,   "zip_pct":   37.96,   "zip_c_ms":   285,   "zip_d_ms":   49,
+  "tgz_bytes":   2214364,   "tgz_pct":   36.94,   "tgz_c_ms":   299,   "tgz_d_ms":   41,
+  "tzst_bytes":  1984628,  "tzst_pct":  33.11,  "tzst_c_ms":  42,  "tzst_d_ms":  18,
+  "txz_bytes":   1362232,   "txz_pct":   22.72,   "txz_c_ms":   1826,   "txz_d_ms":   74,
+  "tbr_bytes":   1724080,   "tbr_pct":   28.76,   "tbr_c_ms":   230,   "tbr_d_ms":   26
 }
 ]

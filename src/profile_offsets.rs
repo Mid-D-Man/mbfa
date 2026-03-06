@@ -1,4 +1,4 @@
-// src/profile_offsets.rs — updated for new fold() return type
+// src/profile_offsets.rs — updated for fold() 6-tuple return type
 use std::collections::VecDeque;
 use std::env;
 use std::fs;
@@ -32,8 +32,9 @@ fn main() {
             .and_then(|n| n.to_str())
             .unwrap_or(path.as_str());
 
-        // fold() now returns 5-tuple — destructure with length_bits discarded.
-        let (compressed, _folds, _paired, ob_per_fold, lb_per_fold) =
+        // fold() returns a 6-tuple — _fold1_tokens is the cached token stream,
+        // not needed for offset profiling.
+        let (compressed, _folds, _paired, ob_per_fold, lb_per_fold, _fold1_tokens) =
             match mbfa::fold::fold(&data, 1) {
                 Ok(r)  => r,
                 Err(e) => { eprintln!("{}: fold error: {}", name, e); continue; }
@@ -101,4 +102,4 @@ fn profile_tokens(tokens: &[mbfa::opcode::Token]) -> (u64, u64, u64, u64) {
         }
     }
     (total, hit1, hit2, hit3)
-    }
+}

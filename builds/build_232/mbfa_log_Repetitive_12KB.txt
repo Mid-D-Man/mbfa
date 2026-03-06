@@ -1,0 +1,16 @@
+Original size: 96008 bits (12001 bytes)
+  chain_limit (baseline ob=17): 109  raw_cost=1356
+  discovery (capped 2MB/chain=256): discovered ob=7 lb=14
+  chain_limit (constrained ob=7): 109  raw_cost=148
+  constrained wins: ob=7 lb=14 raw_cost=148 vs baseline raw_cost=1356
+Window diagnostics: 3/11 tokens BACKREF (27.3%) | offset: 0.0% at max (127) | 0.0% upper half | length: 0.0% at max (16383) | offset_bits=7 length_bits=14 — OK
+Fold 1 adaptive: offset_bits=7 (window=127 bytes) length_bits=14 (max_len=16383)
+Fold 1 (LZ): 152 bits (19 bytes)
+  chain_limit (baseline ob=17): 64  raw_cost=192
+  discovery (capped 2MB/chain=256): discovered ob=7 lb=8
+  chain_limit (constrained ob=7): 64  raw_cost=192
+  entropy tiebreaker: constrained est=86b vs baseline est=86b → baseline wins
+  baseline wins: ob=17 lb=8 raw_cost=192 vs constrained raw_cost=192
+Fold 2 (LZ): 192 bits (24 bytes)
+Fold 2 not worth it (ratio 1.263), stopping at fold 1
+Done. 12001 bytes → 25 bytes

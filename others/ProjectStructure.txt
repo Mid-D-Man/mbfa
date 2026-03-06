@@ -34,4 +34,4 @@ README.md
 
 Counts:
   src: 16 files
-  benches: 1 files
+  benches: 1 files..

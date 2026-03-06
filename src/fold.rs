@@ -73,21 +73,25 @@ fn log_window_diagnostics(tokens: &[Token], offset_bits: u32, length_bits: u32) 
     );
 }
 
-/// Returns (compressed_bytes, folds_done, used_pairing, offset_bits_per_fold, length_bits_per_fold)
+/// Returns (compressed_bytes, folds_done, used_pairing,
+///          offset_bits_per_fold, length_bits_per_fold, fold1_tokens)
+///
+/// fold1_tokens is Some when fold 1 succeeded (folds_done >= 1).
+/// It is passed through to lib.rs so pair_vs_entropy can use it
+/// directly without re-running scan_adaptive from scratch.
 pub fn fold(input: &[u8], max_folds: u8)
-    -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>, Vec<u32>)>
+    -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>, Vec<u32>, Option<Vec<Token>>)>
 {
-    let mut current       = input.to_vec();
-    let mut folds_done: u8 = 0;
-    let mut prev_size      = input.len() * 8;
-    let original_size      = input.len() * 8;
+    let mut current            = input.to_vec();
+    let mut folds_done: u8     = 0;
+    let mut prev_size          = input.len() * 8;
+    let original_size          = input.len() * 8;
     let mut final_used_pairing = false;
+    let mut fold1_tokens: Option<Vec<Token>> = None;
 
     let mut offset_bits_per_fold: Vec<u32> = Vec::new();
     let mut length_bits_per_fold: Vec<u32> = Vec::new();
 
-    // Tracks the field widths of the current encoded bytes so the next fold
-    // can decode them correctly (e.g. for the pairing pre-scan).
     let mut current_ob: u32 = OFFSET_BITS_MIN;
     let mut current_lb: u32 = LENGTH_BITS_MIN;
 
@@ -113,6 +117,7 @@ pub fn fold(input: &[u8], max_folds: u8)
             let ratio = folded_bits as f64 / prev_size as f64;
             if ratio >= MIN_IMPROVEMENT_RATIO {
                 println!("Fold 1 not worth it (ratio {:.3}), stopping at fold 0", ratio);
+                // fold1_tokens stays None — used_pairing will be false
                 break;
             }
             if folded_bits <= MIN_FOLD_BITS {
@@ -123,13 +128,15 @@ pub fn fold(input: &[u8], max_folds: u8)
                 folds_done = 1;
                 offset_bits_per_fold.push(ob);
                 length_bits_per_fold.push(lb);
+                fold1_tokens = Some(tokens);
                 break;
             }
-            current_ob = ob;
-            current_lb = lb;
-            current    = folded;
-            folds_done = 1;
-            prev_size  = folded_bits;
+            current_ob   = ob;
+            current_lb   = lb;
+            current      = folded;
+            folds_done   = 1;
+            prev_size    = folded_bits;
+            fold1_tokens = Some(tokens);
             offset_bits_per_fold.push(ob);
             length_bits_per_fold.push(lb);
             continue;
@@ -170,7 +177,6 @@ pub fn fold(input: &[u8], max_folds: u8)
         }
 
         let (folded, candidate_ob, candidate_lb) = if use_pairing {
-            // PAIR fold — sentinel ob=0, lb=0 in header for pair folds.
             let tokens = read_tokens(&current, current_ob, current_lb)?;
             (pair_encode(&tokens, current_ob, current_lb)?, 0u32, 0u32)
         } else {
@@ -215,5 +221,5 @@ pub fn fold(input: &[u8], max_folds: u8)
         if use_pairing { final_used_pairing = true; }
     }
 
-    Ok((current, folds_done, final_used_pairing, offset_bits_per_fold, length_bits_per_fold))
-    }
+    Ok((current, folds_done, final_used_pairing, offset_bits_per_fold, length_bits_per_fold, fold1_tokens))
+}

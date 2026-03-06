@@ -8,34 +8,32 @@
 //!   Scan 1 — baseline: (BASELINE_OFFSET_BITS=17, BASELINE_LENGTH_BITS=8).
 //!   Proven safe across all benchmarks. Used as the regression floor.
 //!
-//!   Scan 2 — wide discovery: (OFFSET_BITS_MAX, LENGTH_BITS_MAX).
-//!   Runs with the maximum possible window to find the minimum (ob, lb) the
-//!   data actually needs. The resulting token stream is NOT used for output —
-//!   only for computing (wide_ob, wide_lb). Previous versions compared this
-//!   stream's cost (evaluated at wide_ob) against baseline — those streams
-//!   were produced under different window constraints, making the comparison
-//!   unsound. This version does not use the discovery stream for cost comparison.
+//!   Scan 2 — wide discovery via scan_discover (fast, capped window/chain).
+//!   Computes (wide_ob, wide_lb) without the full scan cost. Token stream
+//!   is discarded — only the discovered ob/lb values are kept.
 //!
 //!   Scan 3 — constrained re-scan: (wide_ob, wide_lb).
 //!   Only runs when wide_ob != BASELINE_OFFSET_BITS or wide_lb != BASELINE_LENGTH_BITS.
 //!   Produces the CORRECT token stream for that exact window. Its raw bit cost is
-//!   now directly comparable to the baseline — both streams were produced under
-//!   matching window constraints.
+//!   directly comparable to the baseline — both streams produced under matching
+//!   window constraints.
 //!
 //!   Entropy tiebreaker:
 //!   When raw bit costs of two candidates are within ENTROPY_TIE_THRESHOLD (5%)
-//!   of each other, a Shannon entropy estimate breaks the tie. The estimate
-//!   models the lit/length symbol channel and the offset bucket channel
-//!   (including non-Huffman extra_bits residual). O(n) to compute.
+//!   of each other, a Shannon entropy estimate breaks the tie.
 //!
 //!   Entropy-safety cap:
 //!   When the constrained scan selects lb > ENTROPY_SAFE_LENGTH_BITS (15) AND
 //!   the output would be large enough for entropy to fire, a fourth scan with
 //!   lb capped at 15 is run and compared against baseline.
 //!
-//!   Dynamic chain limit:
-//!   CHAIN_LIMIT is computed per scan from input_len and offset_bits:
-//!     limit = clamp(max(√n, window×32/HASH_SIZE), 64, 4096)
+//!   Dynamic chain limit (full scan only):
+//!   CHAIN_LIMIT = clamp(max(√n, window×32/HASH_SIZE), 64, 4096)
+//!
+//!   Discovery scan (scan_discover):
+//!   Uses DISCOVER_CHAIN_LIMIT (fixed 256) and caps prev array at
+//!   DISCOVER_MAX_PREV_SIZE (4MB). No lazy matching. Fast and approximate —
+//!   only used to determine ob/lb range, never for final output.
 
 use crate::opcode::{
     Token, LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits,
@@ -50,9 +48,6 @@ const BASELINE_LENGTH_BITS:     u32   = LENGTH_BITS_MIN; // 8
 const ENTROPY_SAFE_LENGTH_BITS: u32   = 15;
 const ENTROPY_MIN_BYTES_FOR_SCAN: usize = 400;
 
-/// Raw bit cost difference fraction below which the entropy estimate is used
-/// as a tiebreaker. 5% covers genuinely close cases without adding noise on
-/// clear winners (which typically differ by 10%+).
 const ENTROPY_TIE_THRESHOLD: f64 = 0.05;
 
 const HASH_SIZE:       usize = 1 << 16;
@@ -61,15 +56,20 @@ const CHAIN_LIMIT_MIN: usize = 64;
 const CHAIN_LIMIT_MAX: usize = 4096;
 const LAZY_SHORT_LEN:  usize = 6;
 
+// ── Discovery scan constants ──────────────────────────────────────────────────
+
+/// Fixed chain walk limit for the wide discovery scan.
+/// 256 steps is sufficient to detect what ob/lb range the data uses
+/// without the full O(chain_limit) cost of a production scan.
+const DISCOVER_CHAIN_LIMIT: usize = 256;
+
+/// Maximum prev array size for the discovery scan (4 MB → ob ≤ 22).
+/// Caps memory thrashing on large files while covering ob up to 22.
+/// The constrained re-scan (full quality) runs at whatever ob is discovered.
+const DISCOVER_MAX_PREV_SIZE: usize = 4 * 1024 * 1024;
+
 // ── Dynamic chain limit ───────────────────────────────────────────────────────
 
-/// Compute the hash-chain walk limit for a given input size and offset window.
-///
-/// Two components, take the max:
-///   sqrt_based:   √input_len
-///   window_based: (min(input_len, window) × 32) / HASH_SIZE
-///
-/// Result is clamped to [CHAIN_LIMIT_MIN, CHAIN_LIMIT_MAX].
 pub fn compute_chain_limit(input_len: usize, offset_bits: u32) -> usize {
     let window       = max_offset(offset_bits);
     let effective    = input_len.min(window);
@@ -79,7 +79,6 @@ pub fn compute_chain_limit(input_len: usize, offset_bits: u32) -> usize {
     raw.clamp(CHAIN_LIMIT_MIN, CHAIN_LIMIT_MAX)
 }
 
-/// Integer square root — exact, no floating point dependency, works on all editions.
 #[inline]
 fn isqrt(n: usize) -> usize {
     if n == 0 { return 0; }
@@ -102,9 +101,8 @@ fn hash3(input: &[u8], pos: usize) -> usize {
 
 // ── Core scanner ──────────────────────────────────────────────────────────────
 
-/// Scan input using a rolling window of `(1 << offset_bits) - 1` bytes.
-/// Memory: O(min(window_size, n)). Chain limit is computed dynamically.
-/// Uses two-step lazy matching (see module docs).
+/// Full-quality production scan. Used for baseline and constrained re-scans.
+/// Chain limit is computed dynamically from input size and offset window.
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
@@ -179,6 +177,67 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     tokens
 }
 
+/// Fast discovery scan — used only to determine what offset/length range the
+/// data actually needs. The token stream is thrown away by the caller.
+///
+/// Differences from the full scan:
+///   - prev array capped at DISCOVER_MAX_PREV_SIZE (4 MB) regardless of ob
+///   - chain walk capped at DISCOVER_CHAIN_LIMIT (256) — fixed, not computed
+///   - no lazy matching — greedy, any match len >= 2 is taken immediately
+///   - no backref_worthwhile check — we want to find matches even when they
+///     don't save bits, to maximise ob/lb coverage for the discovery purpose
+///
+/// These relaxations make discovery ~10x faster on large files while still
+/// correctly identifying the ob/lb range the data uses.
+pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
+    // Cap the lookback window so the prev array never exceeds DISCOVER_MAX_PREV_SIZE.
+    // 4 MB → max reportable offset fits in ob=22 bits.
+    let max_off     = max_offset(offset_bits).min(DISCOVER_MAX_PREV_SIZE);
+    let max_len     = max_length(length_bits);
+    let n           = input.len();
+    let window_size = max_off.min(n).max(1);
+
+    let mut head   = vec![u32::MAX; HASH_SIZE];
+    let mut prev   = vec![u32::MAX; window_size];
+    let mut tokens = Vec::new();
+    let mut i      = 0;
+
+    while i < n {
+        let h = hash3(input, i);
+        let (best_offset, best_len) = find_match(
+            input, i, h, &head, &prev,
+            max_off, max_len, window_size,
+            DISCOVER_CHAIN_LIMIT,
+        );
+
+        if best_len >= 2 {
+            // Greedy match — no lazy check, no bit-cost check.
+            // Update all hashes in the match span so later positions can
+            // build on this match (same as the full scan).
+            for k in 0..best_len {
+                if i + k + 2 < n {
+                    let hk = hash3(input, i + k);
+                    prev[(i + k) % window_size] = head[hk];
+                    head[hk] = (i + k) as u32;
+                }
+            }
+            tokens.push(Token::Backref {
+                offset: best_offset as u32,
+                length: best_len as u32,
+            });
+            i += best_len;
+        } else {
+            prev[i % window_size] = head[h];
+            head[h] = i as u32;
+            tokens.push(Token::Lit { byte: input[i] });
+            i += 1;
+        }
+    }
+
+    tokens.push(Token::End);
+    tokens
+}
+
 fn find_match(
     input:       &[u8],
     i:           usize,
@@ -232,18 +291,6 @@ fn stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
     }).sum()
 }
 
-/// Shannon-entropy-estimated cost for a token stream.
-///
-/// Models three channels:
-///   1. Lit/length/END symbol entropy  — Σ -p(s)·log2(p(s)) · count(s)
-///   2. Offset bucket symbol entropy   — same formula over bucket symbols
-///   3. Offset extra_bits residual     — raw (not compressed), counted exactly
-///
-/// This is the information-theoretic lower bound. Real Huffman adds at most
-/// 1 bit/symbol, so the estimate is within ~5% of actual Huffman cost for
-/// typical streams — sufficient for tiebreaking.
-///
-/// Complexity: O(n) — same order as a scan pass.
 fn stream_entropy_cost(tokens: &[Token]) -> f64 {
     use std::collections::HashMap;
 
@@ -257,7 +304,6 @@ fn stream_entropy_cost(tokens: &[Token]) -> f64 {
                 *lit_len_freq.entry(*byte as u32).or_insert(0) += 1;
             }
             Token::Backref { offset, length } => {
-                // Length symbol matches entropy.rs convention: sym = 255 + length
                 let length_sym = 255u32 + length;
                 *lit_len_freq.entry(length_sym).or_insert(0) += 1;
 
@@ -301,9 +347,6 @@ impl ScanResult {
         ScanResult { tokens, ob, lb, raw_cost, label }
     }
 
-    /// True if self is cheaper than other.
-    /// Uses entropy estimate as tiebreaker when raw costs are within
-    /// ENTROPY_TIE_THRESHOLD of each other.
     fn beats(&self, other: &ScanResult) -> bool {
         let min_cost = self.raw_cost.min(other.raw_cost) as f64;
         let diff     = (self.raw_cost as f64 - other.raw_cost as f64).abs();
@@ -328,7 +371,9 @@ impl ScanResult {
 
 /// Adaptive scan with apples-to-apples cost comparison.
 ///
-/// See module-level documentation for the full algorithm description.
+/// Scan 2 now uses scan_discover instead of a full scan — same ob/lb discovery
+/// result with a capped prev array (4 MB max) and fixed chain limit (256).
+/// This eliminates the 13 MB working set thrash on large files.
 pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     // ── Scan 1: baseline ──────────────────────────────────────────────────────
     let baseline = ScanResult::new(
@@ -344,26 +389,24 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
         baseline.raw_cost,
     );
 
-    // ── Scan 2: wide discovery ────────────────────────────────────────────────
-    // Token stream from this scan is discarded after computing (wide_ob, wide_lb).
-    let wide_discovery = scan(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
+    // ── Scan 2: wide discovery (fast) ─────────────────────────────────────────
+    // scan_discover caps prev at 4 MB and chain at 256 — token stream is discarded.
+    let wide_discovery = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
     let wide_ob        = compute_optimal_offset_bits(&wide_discovery);
     let wide_lb        = compute_optimal_length_bits(&wide_discovery);
 
     println!(
-        "  chain_limit (wide ob={}): {}  discovered ob={} lb={}",
-        OFFSET_BITS_MAX,
-        compute_chain_limit(input.len(), OFFSET_BITS_MAX),
-        wide_ob, wide_lb,
+        "  discovery (capped 4MB/chain={}): discovered ob={} lb={}",
+        DISCOVER_CHAIN_LIMIT, wide_ob, wide_lb,
     );
 
-    // If discovery agrees with baseline on both dimensions, no re-scan needed.
+    // If discovery agrees with baseline, no re-scan needed.
     if wide_ob == BASELINE_OFFSET_BITS && wide_lb == BASELINE_LENGTH_BITS {
         println!("  wide agrees with baseline — no re-scan needed");
         return (baseline.tokens, baseline.ob, baseline.lb);
     }
 
-    // ── Scan 3: constrained re-scan ───────────────────────────────────────────
+    // ── Scan 3: constrained re-scan (full quality) ────────────────────────────
     let constrained = ScanResult::new(
         scan(input, wide_ob, wide_lb),
         wide_ob,

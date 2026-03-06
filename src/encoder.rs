@@ -12,6 +12,9 @@
 //!   Computes (wide_ob, wide_lb) without the full scan cost. Token stream
 //!   is discarded — only the discovered ob/lb values are kept.
 //!
+//!   Baseline and discovery scans run IN PARALLEL via rayon::join.
+//!   Both are pure functions over read-only &[u8] — zero shared mutable state.
+//!
 //!   Scan 3 — constrained re-scan: (wide_ob, wide_lb).
 //!   Only runs when wide_ob != BASELINE_OFFSET_BITS or wide_lb != BASELINE_LENGTH_BITS.
 //!   Produces the CORRECT token stream for that exact window. Its raw bit cost is
@@ -32,7 +35,7 @@
 //!
 //!   Discovery scan (scan_discover):
 //!   Uses DISCOVER_CHAIN_LIMIT (fixed 256) and caps prev array at
-//!   DISCOVER_MAX_PREV_SIZE (4MB). No lazy matching. Fast and approximate —
+//!   DISCOVER_MAX_PREV_SIZE (2MB). No lazy matching. Fast and approximate —
 //!   only used to determine ob/lb range, never for final output.
 
 use crate::opcode::{
@@ -42,6 +45,7 @@ use crate::opcode::{
     compute_optimal_offset_bits, compute_optimal_length_bits,
 };
 use crate::entropy::{offset_to_bucket, bucket_extra_bits};
+use rayon;
 
 const BASELINE_OFFSET_BITS:     u32   = 17;
 const BASELINE_LENGTH_BITS:     u32   = LENGTH_BITS_MIN; // 8
@@ -115,7 +119,7 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
 
     let mut head   = vec![u32::MAX; HASH_SIZE];
     let mut prev   = vec![u32::MAX; window_size];
-    let mut tokens = Vec::new();
+    let mut tokens = Vec::with_capacity(n / 2 + 1);
     let mut i      = 0;
 
     while i < n {
@@ -182,7 +186,7 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
 /// data actually needs. The token stream is thrown away by the caller.
 ///
 /// Differences from the full scan:
-///   - prev array capped at DISCOVER_MAX_PREV_SIZE (4 MB) regardless of ob
+///   - prev array capped at DISCOVER_MAX_PREV_SIZE (2 MB) regardless of ob
 ///   - chain walk capped at DISCOVER_CHAIN_LIMIT (256) — fixed, not computed
 ///   - no lazy matching — greedy, any match len >= 2 is taken immediately
 ///   - no backref_worthwhile check — we want to find matches even when they
@@ -192,7 +196,6 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
 /// correctly identifying the ob/lb range the data uses.
 pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     // Cap the lookback window so the prev array never exceeds DISCOVER_MAX_PREV_SIZE.
-    // 4 MB → max reportable offset fits in ob=22 bits.
     let max_off     = max_offset(offset_bits).min(DISCOVER_MAX_PREV_SIZE);
     let max_len     = max_length(length_bits);
     let n           = input.len();
@@ -200,7 +203,7 @@ pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<To
 
     let mut head   = vec![u32::MAX; HASH_SIZE];
     let mut prev   = vec![u32::MAX; window_size];
-    let mut tokens = Vec::new();
+    let mut tokens = Vec::with_capacity(n / 2 + 1);
     let mut i      = 0;
 
     while i < n {
@@ -213,8 +216,6 @@ pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<To
 
         if best_len >= 2 {
             // Greedy match — no lazy check, no bit-cost check.
-            // Update all hashes in the match span so later positions can
-            // build on this match (same as the full scan).
             for k in 0..best_len {
                 if i + k + 2 < n {
                     let hk = hash3(input, i + k);
@@ -372,17 +373,26 @@ impl ScanResult {
 
 /// Adaptive scan with apples-to-apples cost comparison.
 ///
-/// Scan 2 now uses scan_discover instead of a full scan — same ob/lb discovery
-/// result with a capped prev array (4 MB max) and fixed chain limit (256).
-/// This eliminates the 13 MB working set thrash on large files.
+/// Scan 1 (baseline) and scan 2 (wide discovery) run IN PARALLEL via rayon::join.
+/// Both are pure functions over read-only &[u8] — zero shared mutable state.
+/// Scan 3 (constrained re-scan) still waits for discovery result — sequential.
 pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
-    // ── Scan 1: baseline ──────────────────────────────────────────────────────
+    // ── Scans 1 & 2: baseline and discovery in parallel ───────────────────────
+    // rayon::join spawns both closures concurrently.
+    // scan() and scan_discover() are pure: they only read `input` and produce
+    // owned Vec<Token>. No shared mutable state — safe for parallel execution.
+    let (baseline_tokens, wide_discovery) = rayon::join(
+        || scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS),
+        || scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX),
+    );
+
     let baseline = ScanResult::new(
-        scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS),
+        baseline_tokens,
         BASELINE_OFFSET_BITS,
         BASELINE_LENGTH_BITS,
         "baseline",
     );
+
     println!(
         "  chain_limit (baseline ob={}): {}  raw_cost={}",
         BASELINE_OFFSET_BITS,
@@ -390,14 +400,13 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
         baseline.raw_cost,
     );
 
-    // ── Scan 2: wide discovery (fast) ─────────────────────────────────────────
-    // scan_discover caps prev at 4 MB and chain at 256 — token stream is discarded.
-    let wide_discovery = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
-    let wide_ob        = compute_optimal_offset_bits(&wide_discovery);
-    let wide_lb        = compute_optimal_length_bits(&wide_discovery);
+    // Discovery token stream is discarded — only ob/lb values are kept.
+    let wide_ob = compute_optimal_offset_bits(&wide_discovery);
+    let wide_lb = compute_optimal_length_bits(&wide_discovery);
+    drop(wide_discovery);
 
     println!(
-        "  discovery (capped 4MB/chain={}): discovered ob={} lb={}",
+        "  discovery (capped 2MB/chain={}): discovered ob={} lb={}",
         DISCOVER_CHAIN_LIMIT, wide_ob, wide_lb,
     );
 
@@ -407,7 +416,7 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
         return (baseline.tokens, baseline.ob, baseline.lb);
     }
 
-    // ── Scan 3: constrained re-scan (full quality) ────────────────────────────
+    // ── Scan 3: constrained re-scan (full quality, sequential) ───────────────
     let constrained = ScanResult::new(
         scan(input, wide_ob, wide_lb),
         wide_ob,

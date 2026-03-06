@@ -6,7 +6,15 @@ use bitstream_io::{BitWriter, BigEndian, BitWrite};
 use crate::opcode::*;
 
 pub fn write_tokens(tokens: &[Token], offset_bits: u32, length_bits: u32) -> std::io::Result<Vec<u8>> {
-    let mut output = Vec::new();
+    // Task 4: pre-allocate output buffer.
+    // Worst case: every token is a Backref → (1 + offset_bits + length_bits) bits each.
+    // +2 bytes: 1 for the END token, 1 for byte_align padding.
+    // This is a safe overestimate — Lit tokens are only 10 bits vs up to 49 bits
+    // for a max Backref (ob=24, lb=24), so real output is always smaller.
+    let est_bytes = (tokens.len() as u64
+        * (1 + offset_bits + length_bits) as u64
+        / 8 + 2) as usize;
+    let mut output = Vec::with_capacity(est_bytes);
     {
         let mut writer = BitWriter::endian(&mut output, BigEndian);
 

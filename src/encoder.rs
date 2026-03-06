@@ -3,31 +3,36 @@
 //! O(n) time, O(window) memory — safe for large files.
 //! Both offset_bits and length_bits are adaptive at runtime.
 //!
-//! scan_adaptive runs two scans:
+//! scan_adaptive runs up to three scans:
 //!   1. Baseline at (17, 8) — matches previous proven behaviour
 //!   2. Wide at (OFFSET_BITS_MAX, LENGTH_BITS_MAX) — finds minimum fields
 //!      that cover actual values used, costs the stream
-//!  Whichever scan produces lower total bit cost wins.
-//!  This guarantees zero regression vs prior builds on any file.
+//!   Whichever scan produces lower total bit cost wins.
+//!   This guarantees zero regression vs prior builds on any file.
 //!
-//!  Length cap for entropy safety:
-//!  Entropy table serialisation uses u16 for symbol values (sym = 255 + length).
-//!  Max safe length = 65535 - 255 = 65280, requiring length_bits <= 15.
-//!  When the wide scan selects lb > 15 AND the fold-1 output is large enough
-//!  that entropy would fire (>= ENTROPY_MIN_BYTES), a third scan is run with
-//!  lb capped at ENTROPY_SAFE_LENGTH_BITS. This recovers the entropy path for
-//!  files like Source_1MB without affecting files like Repetitive_2MB whose
-//!  fold-1 output is far too small to hit the entropy threshold.
+//!   Length cap for entropy safety:
+//!   Entropy table serialisation uses u16 for symbol values (sym = 255 + length).
+//!   Max safe length = 65535 - 255 = 65280, requiring length_bits <= 15.
+//!   When the wide scan selects lb > 15 AND the fold-1 output is large enough
+//!   that entropy would fire (>= ENTROPY_MIN_BYTES), a third scan is run with
+//!   lb capped at ENTROPY_SAFE_LENGTH_BITS. This recovers the entropy path for
+//!   files like Source_1MB without affecting files like Repetitive_2MB whose
+//!   fold-1 output is far too small to hit the entropy threshold.
 //!
-//!  Lazy matching (two-step):
-//!  Before committing a BACKREF at position i, the encoder peeks ahead:
-//!    1-step: if i+1 yields a strictly longer match, emit LIT[i] and defer.
-//!    2-step: for short matches (≤ LAZY_SHORT_LEN), also check i+2. If i+2
-//!            yields a substantially longer match (> best_len + 2), defer by
-//!            emitting LIT[i]. The cascade naturally reaches i+2 on the next
-//!            iteration via 1-step lazy at i+1.
-//!  This catches the missed case where i+1's match is shorter than i's but
-//!  i+2's match is much longer — greedy commits at i and never sees i+2.
+//!   Lazy matching (two-step):
+//!   Before committing a BACKREF at position i, the encoder peeks ahead:
+//!     1-step: if i+1 yields a strictly longer match, emit LIT[i] and defer.
+//!     2-step: for short matches (≤ LAZY_SHORT_LEN), also check i+2. If i+2
+//!             yields a substantially longer match (> best_len + 2), defer by
+//!             emitting LIT[i]. The cascade naturally reaches i+2 on the next
+//!             iteration via 1-step lazy at i+1.
+//!
+//!   Dynamic chain limit:
+//!   CHAIN_LIMIT is computed per scan from input_len and offset_bits:
+//!     limit = clamp(max(√n, window×32/HASH_SIZE), 64, 4096)
+//!   Small files get a lower limit (less wasted work on short chains).
+//!   Large files with big windows get a higher limit (better deep matches).
+//!   The flat constant 1024 is replaced entirely.
 
 use crate::opcode::{
     Token, LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits,
@@ -47,15 +52,59 @@ const ENTROPY_SAFE_LENGTH_BITS: u32 = 15;
 // to fire. Defined here to avoid a circular module dependency.
 const ENTROPY_MIN_BYTES_FOR_SCAN: usize = 400;
 
-const HASH_SIZE:   usize = 1 << 16;
-const HASH_MASK:   usize = HASH_SIZE - 1;
-const CHAIN_LIMIT: usize = 1024;
+const HASH_SIZE: usize = 1 << 16;
+const HASH_MASK: usize = HASH_SIZE - 1;
+
+// Bounds on the dynamic chain limit.
+const CHAIN_LIMIT_MIN: usize = 64;
+const CHAIN_LIMIT_MAX: usize = 4096;
 
 // Two-step lazy matching threshold.
-// Only attempt the 2-step lookahead for matches shorter than or equal to this.
-// Long matches are almost always the right greedy choice, and the extra
-// find_match calls are wasteful when best_len is already high.
 const LAZY_SHORT_LEN: usize = 6;
+
+// ── Dynamic chain limit ───────────────────────────────────────────────────────
+
+/// Compute the hash-chain walk limit for a given input size and offset window.
+///
+/// Two components, take the max:
+///   sqrt_based:   √input_len — scales with input size. Larger inputs have
+///                 denser hash chains and benefit from deeper search.
+///   window_based: (min(input_len, window) × 32) / HASH_SIZE — scales with
+///                 how densely the window fills the hash table. A 22-bit window
+///                 on a 3 MB file fills each bucket ~48× on average; the ×32
+///                 headroom handles common 3-gram collisions.
+///
+/// Result is clamped to [CHAIN_LIMIT_MIN, CHAIN_LIMIT_MAX].
+///
+/// Representative values:
+///   grammar.lsp   3.7 KB  ob=12  →   64  (chain naturally < 64; no wasted steps)
+///   alice29.txt   152 KB  ob=17  →  389  (down from 1024; lazy matching covers the gap)
+///   kennedy.xls   1.0 MB  ob=17  → 1014  (≈ current, no regression)
+///   WarAndPeace   3.3 MB  ob=17  → 1832  (up from 1024; better deep matches on long text)
+///   JSON_2MB      3.1 MB  ob=22  → 1773  (up from 1024; 22-bit window benefits most)
+pub fn compute_chain_limit(input_len: usize, offset_bits: u32) -> usize {
+    let window     = max_offset(offset_bits);          // (1 << offset_bits) - 1
+    let effective  = input_len.min(window);
+    let window_based = effective.saturating_mul(32) / HASH_SIZE;
+    let sqrt_based   = isqrt(input_len);
+    let raw = window_based.max(sqrt_based);
+    raw.clamp(CHAIN_LIMIT_MIN, CHAIN_LIMIT_MAX)
+}
+
+/// Integer square root — exact, no floating point, works on all Rust editions.
+#[inline]
+fn isqrt(n: usize) -> usize {
+    if n == 0 { return 0; }
+    // Initial estimate via float — may be off by 1 due to rounding.
+    let mut s = (n as f64).sqrt() as usize;
+    // Correct downward if overshoot.
+    while s > 0 && s.saturating_mul(s) > n { s -= 1; }
+    // Correct upward if undershoot.
+    while (s + 1).saturating_mul(s + 1) <= n { s += 1; }
+    s
+}
+
+// ── Hash ──────────────────────────────────────────────────────────────────────
 
 #[inline]
 fn hash3(input: &[u8], pos: usize) -> usize {
@@ -66,68 +115,51 @@ fn hash3(input: &[u8], pos: usize) -> usize {
     v & HASH_MASK
 }
 
+// ── Core scanner ──────────────────────────────────────────────────────────────
+
 /// Scan input using a rolling window of `(1 << offset_bits) - 1` bytes.
 /// Memory usage is O(min(window_size, n)) — safe for any input size.
 ///
-/// Uses two-step lazy matching: before committing to a BACKREF at i,
-/// checks if i+1 yields a strictly longer match (1-step), and for short
-/// matches also checks if i+2 yields a substantially longer match (2-step).
-/// The 2-step check defers via emitting LIT[i]; the cascade at i+1 then
-/// naturally defers again to i+2 via 1-step lazy. Recovers ~2-5pp on text
-/// and source code vs pure greedy.
+/// Chain limit is computed dynamically from input length and offset_bits.
+/// Uses two-step lazy matching (see module docs).
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
-    let max_off = max_offset(offset_bits);
-    let max_len = max_length(length_bits);
+    let max_off     = max_offset(offset_bits);
+    let max_len     = max_length(length_bits);
     let backref_bits = backref_total_bits(offset_bits, length_bits);
+    let chain_limit  = compute_chain_limit(input.len(), offset_bits);
 
     let n = input.len();
 
     // Cap window at actual input size — avoids giant allocations on small files
-    // when called with large offset_bits (e.g. wide scan on a 4KB file).
+    // when called with large offset_bits (e.g. wide scan on a 4 KB file).
     let window_size = max_off.min(n).max(1);
 
-    let mut head = vec![u32::MAX; HASH_SIZE];
-    let mut prev = vec![u32::MAX; window_size];
+    let mut head   = vec![u32::MAX; HASH_SIZE];
+    let mut prev   = vec![u32::MAX; window_size];
     let mut tokens = Vec::new();
-    let mut i = 0;
+    let mut i      = 0;
 
     while i < n {
         let h = hash3(input, i);
         let (best_offset, best_len) =
-            find_match(input, i, h, &head, &prev, max_off, max_len, window_size);
+            find_match(input, i, h, &head, &prev, max_off, max_len, window_size, chain_limit);
 
         let backref_worthwhile = best_len >= 2
             && backref_bits < (best_len as u32 * LIT_TOTAL_BITS);
 
         if backref_worthwhile {
             // Lazy matching: check ahead before committing.
-            //
-            // 1-step (unchanged): if i+1 has a strictly longer match, defer.
-            //
-            // 2-step (new): for short matches (≤ LAZY_SHORT_LEN), also probe i+2.
-            // If i+2 has a substantially longer match (> best_len + 2), defer by
-            // emitting LIT[i]. On the next iteration (at i+1), the 1-step check
-            // will probe i+2 and defer again if appropriate — naturally cascading
-            // to the better match without requiring explicit 2-literal emission here.
-            //
-            // Threshold best_len + 2: each deferred literal costs LIT_TOTAL_BITS=10
-            // bits. For the cascade to reach i+2, we'll emit 1 extra literal (10 bits
-            // at i) and then possibly another at i+1. Requiring len2 > best_len + 2
-            // ensures the longer match at i+2 covers at least 2 extra bytes (≥20 bits
-            // savings) beyond what we'd have gotten committing at i.
             let lazy = if i + 1 < n {
                 let h1 = hash3(input, i + 1);
                 let (_, len1) =
-                    find_match(input, i + 1, h1, &head, &prev, max_off, max_len, window_size);
+                    find_match(input, i + 1, h1, &head, &prev, max_off, max_len, window_size, chain_limit);
 
                 if len1 > best_len {
-                    // Standard 1-step lazy: i+1 is strictly better.
                     true
                 } else if best_len <= LAZY_SHORT_LEN && i + 2 < n {
-                    // 2-step lazy: i+1 isn't better, but maybe i+2 is much better.
                     let h2 = hash3(input, i + 2);
                     let (_, len2) =
-                        find_match(input, i + 2, h2, &head, &prev, max_off, max_len, window_size);
+                        find_match(input, i + 2, h2, &head, &prev, max_off, max_len, window_size, chain_limit);
                     len2 > best_len + 2
                 } else {
                     false
@@ -137,14 +169,11 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
             };
 
             if lazy {
-                // Emit literal at i, insert into chain, advance.
-                // The cascade will re-evaluate i+1 on the next iteration.
                 prev[i % window_size] = head[h];
                 head[h] = i as u32;
                 tokens.push(Token::Lit { byte: input[i] });
                 i += 1;
             } else {
-                // Commit to match — update chain for all covered positions.
                 for k in 0..best_len {
                     if i + k + 2 < n {
                         let hk = hash3(input, i + k);
@@ -179,6 +208,7 @@ fn find_match(
     max_off:     usize,
     max_len:     usize,
     window_size: usize,
+    chain_limit: usize,
 ) -> (usize, usize) {
     let n = input.len();
     let mut best_offset = 0;
@@ -186,7 +216,7 @@ fn find_match(
     let mut steps       = 0;
 
     let mut cur = head[h];
-    while cur != u32::MAX && steps < CHAIN_LIMIT {
+    while cur != u32::MAX && steps < chain_limit {
         let j = cur as usize;
         if i <= j || i - j > max_off { break; }
 
@@ -226,7 +256,7 @@ fn stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Two-scan adaptive selection with entropy-safety cap:
+/// Two-scan adaptive selection with entropy-safety cap.
 ///
 /// 1. Baseline scan at (BASELINE_OFFSET_BITS=17, BASELINE_LENGTH_BITS=8).
 ///
@@ -237,31 +267,47 @@ fn stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
 ///    fold-1 output would be large enough for entropy to fire, run a third
 ///    scan with lb capped at ENTROPY_SAFE_LENGTH_BITS.
 ///
-/// Returns whichever scan produces the lowest raw token stream bit cost
-/// among the eligible candidates. Ties go to baseline (proven safe).
+/// Returns whichever scan produces the lowest raw token stream bit cost.
+/// Ties go to baseline (proven safe).
+///
+/// Each scan uses its own dynamically computed chain limit derived from
+/// input_len and the scan's offset_bits.
 pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     // ── Baseline scan ─────────────────────────────────────────────────────────
+    let baseline_limit  = compute_chain_limit(input.len(), BASELINE_OFFSET_BITS);
     let baseline_tokens = scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS);
     let baseline_cost   = stream_bit_cost(&baseline_tokens, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS);
 
+    println!(
+        "  chain_limit (baseline ob={}): {}",
+        BASELINE_OFFSET_BITS, baseline_limit
+    );
+
     // ── Wide scan ─────────────────────────────────────────────────────────────
+    let wide_limit  = compute_chain_limit(input.len(), OFFSET_BITS_MAX);
     let wide_tokens = scan(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
     let wide_ob     = compute_optimal_offset_bits(&wide_tokens);
     let wide_lb     = compute_optimal_length_bits(&wide_tokens);
     let wide_cost   = stream_bit_cost(&wide_tokens, wide_ob, wide_lb);
 
+    println!(
+        "  chain_limit (wide ob={}): {}",
+        OFFSET_BITS_MAX, wide_limit
+    );
+
     // ── Entropy-safety cap ────────────────────────────────────────────────────
     if wide_lb > ENTROPY_SAFE_LENGTH_BITS {
         let wide_output_bytes = (wide_cost as usize + 7) / 8;
         if wide_output_bytes >= ENTROPY_MIN_BYTES_FOR_SCAN {
+            let capped_limit  = compute_chain_limit(input.len(), wide_ob);
             let capped_tokens = scan(input, wide_ob, ENTROPY_SAFE_LENGTH_BITS);
             let capped_cost   = stream_bit_cost(&capped_tokens, wide_ob, ENTROPY_SAFE_LENGTH_BITS);
 
             println!(
                 "  lb cap applied: wide lb={} output={}B >= entropy threshold {}B \
-                 — re-scanned at lb={} (cost {} vs wide cost {})",
+                 — re-scanned at lb={} chain_limit={} (cost {} vs wide cost {})",
                 wide_lb, wide_output_bytes, ENTROPY_MIN_BYTES_FOR_SCAN,
-                ENTROPY_SAFE_LENGTH_BITS, capped_cost, wide_cost
+                ENTROPY_SAFE_LENGTH_BITS, capped_limit, capped_cost, wide_cost
             );
 
             return if capped_cost < baseline_cost {
@@ -283,4 +329,4 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     } else {
         (baseline_tokens, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS)
     }
-        }
+                }

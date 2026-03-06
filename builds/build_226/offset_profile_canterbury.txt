@@ -1,0 +1,107 @@
+File                       BACKREFs     Hit@1     Hit@2     Hit@3       Pct@1       Pct@2       Pct@3
+---------------------------------------------------------------------------------------------------------
+Original size: 1216712 bits (152089 bytes)
+  chain_limit (baseline ob=17): 389  raw_cost=551694
+  discovery (capped 4MB/chain=256): discovered ob=18 lb=8
+  chain_limit (constrained ob=18): 389  raw_cost=569080
+  entropy tiebreaker: constrained est=417250b vs baseline est=417001b → baseline wins
+  baseline wins: ob=17 lb=8 raw_cost=551694 vs constrained raw_cost=569080
+Window diagnostics: 17807/26678 tokens BACKREF (66.7%) | offset: 0.0% at max (131071) | 8.7% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 551696 bits (68962 bytes)
+alice29.txt                   17807         9        23        31       0.05%       0.13%       0.17%   est saving ~0.2% of offset bits
+Original size: 1001432 bits (125179 bytes)
+  chain_limit (baseline ob=17): 353  raw_cost=516996
+  discovery (capped 4MB/chain=256): discovered ob=17 lb=8
+  wide agrees with baseline — no re-scan needed
+Window diagnostics: 16544/25229 tokens BACKREF (65.6%) | offset: 0.0% at max (131071) | 6.3% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 517000 bits (64625 bytes)
+asyoulik.txt                  16544         3        14        17       0.02%       0.08%       0.10%   est saving ~0.1% of offset bits
+Original size: 196824 bits (24603 bytes)
+  chain_limit (baseline ob=17): 156  raw_cost=91918
+  discovery (capped 4MB/chain=256): discovered ob=15 lb=8
+  chain_limit (constrained ob=15): 156  raw_cost=87376
+  constrained wins: ob=15 lb=8 raw_cost=87376 vs baseline raw_cost=91918
+Window diagnostics: 2271/5558 tokens BACKREF (40.9%) | offset: 0.0% at max (32767) | 1.8% upper half | length: 0.0% at max (255) | offset_bits=15 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=15 (window=32767 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 87376 bits (10922 bytes)
+cp.html                        2271        13        19        20       0.57%       0.84%       0.88%   est saving ~0.8% of offset bits
+Original size: 89200 bits (11150 bytes)
+  chain_limit (baseline ob=17): 105  raw_cost=37416
+  discovery (capped 4MB/chain=256): discovered ob=14 lb=8
+  chain_limit (constrained ob=14): 105  raw_cost=34449
+  constrained wins: ob=14 lb=8 raw_cost=34449 vs baseline raw_cost=37416
+Window diagnostics: 989/2159 tokens BACKREF (45.8%) | offset: 0.0% at max (16383) | 0.6% upper half | length: 0.0% at max (255) | offset_bits=14 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=14 (window=16383 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 34456 bits (4307 bytes)
+fields.c                        989        31        45        50       3.13%       4.55%       5.06%   est saving ~4.3% of offset bits
+Original size: 29768 bits (3721 bytes)
+  chain_limit (baseline ob=17): 64  raw_cost=15530
+  discovery (capped 4MB/chain=256): discovered ob=12 lb=8
+  chain_limit (constrained ob=12): 64  raw_cost=13790
+  constrained wins: ob=12 lb=8 raw_cost=13790 vs baseline raw_cost=15530
+Window diagnostics: 348/996 tokens BACKREF (34.9%) | offset: 0.0% at max (4095) | 1.1% upper half | length: 0.0% at max (255) | offset_bits=12 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 13792 bits (1724 bytes)
+grammar.lsp                     348         5        11        11       1.44%       3.16%       3.16%   est saving ~2.6% of offset bits
+Original size: 8237952 bits (1029744 bytes)
+  chain_limit (baseline ob=17): 1014  raw_cost=2908518
+  discovery (capped 4MB/chain=256): discovered ob=20 lb=8
+  chain_limit (constrained ob=20): 1014  raw_cost=3135506
+  baseline wins: ob=17 lb=8 raw_cost=2908518 vs constrained raw_cost=3135506
+Window diagnostics: 80566/161946 tokens BACKREF (49.7%) | offset: 0.0% at max (131071) | 1.4% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 2908520 bits (363565 bytes)
+kennedy.xls                   80566     56225     61423     63936      69.79%      76.24%      79.36%   est saving ~70.0% of offset bits
+Original size: 3414032 bits (426754 bytes)
+  chain_limit (baseline ob=17): 653  raw_cost=1379240
+  discovery (capped 4MB/chain=256): discovered ob=19 lb=8
+  chain_limit (constrained ob=19): 653  raw_cost=1382698
+  entropy tiebreaker: constrained est=1048286b vs baseline est=1073579b → constrained wins
+  constrained wins: ob=19 lb=8 raw_cost=1382698 vs baseline raw_cost=1379240
+Window diagnostics: 43082/60722 tokens BACKREF (70.9%) | offset: 0.0% at max (524287) | 3.2% upper half | length: 0.0% at max (255) | offset_bits=19 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=19 (window=524287 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 1382704 bits (172838 bytes)
+lcet10.txt                    43082        29        78        92       0.07%       0.18%       0.21%   est saving ~0.2% of offset bits
+Original size: 3854888 bits (481861 bytes)
+  chain_limit (baseline ob=17): 694  raw_cost=1913674
+  discovery (capped 4MB/chain=256): discovered ob=19 lb=8
+  chain_limit (constrained ob=19): 694  raw_cost=1926116
+  entropy tiebreaker: constrained est=1447751b vs baseline est=1464442b → constrained wins
+  constrained wins: ob=19 lb=8 raw_cost=1926116 vs baseline raw_cost=1913674
+Window diagnostics: 59198/86055 tokens BACKREF (68.8%) | offset: 0.0% at max (524287) | 5.3% upper half | length: 0.0% at max (255) | offset_bits=19 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=19 (window=524287 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 1926120 bits (240765 bytes)
+plrabn12.txt                  59198        17        24        27       0.03%       0.04%       0.05%   est saving ~0.0% of offset bits
+Original size: 4105728 bits (513216 bytes)
+  chain_limit (baseline ob=17): 716  raw_cost=589682
+  discovery (capped 4MB/chain=256): discovered ob=19 lb=16
+  chain_limit (constrained ob=19): 716  raw_cost=698206
+  lb cap: constrained lb=16 output=87276B >= threshold 400B — capped raw_cost=686187 chain_limit=716
+  baseline wins over capped
+Window diagnostics: 16015/33344 tokens BACKREF (48.0%) | offset: 0.0% at max (131071) | 13.1% upper half | length: 3.1% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 589688 bits (73711 bytes)
+ptt5                          16015      1237      2022      2571       7.72%      12.63%      16.05%   est saving ~14.2% of offset bits
+Original size: 305920 bits (38240 bytes)
+  chain_limit (baseline ob=17): 195  raw_cost=149002
+  discovery (capped 4MB/chain=256): discovered ob=16 lb=10
+  chain_limit (constrained ob=16): 195  raw_cost=152225
+  entropy tiebreaker: constrained est=101369b vs baseline est=101767b → constrained wins
+  constrained wins: ob=16 lb=10 raw_cost=152225 vs baseline raw_cost=149002
+Window diagnostics: 3649/9019 tokens BACKREF (40.5%) | offset: 0.0% at max (65535) | 0.0% upper half | length: 0.0% at max (1023) | offset_bits=16 length_bits=10 — OK
+Fold 1 adaptive: offset_bits=16 (window=65535 bytes) length_bits=10 (max_len=1023)
+Fold 1 (LZ): 152232 bits (19029 bytes)
+sum                            3649       526       732       811      14.41%      20.06%      22.23%   est saving ~19.4% of offset bits
+Original size: 33816 bits (4227 bytes)
+  chain_limit (baseline ob=17): 65  raw_cost=21932
+  discovery (capped 4MB/chain=256): discovered ob=12 lb=8
+  chain_limit (constrained ob=12): 65  raw_cost=19482
+  constrained wins: ob=12 lb=8 raw_cost=19482 vs baseline raw_cost=21932
+Window diagnostics: 490/1409 tokens BACKREF (34.8%) | offset: 0.0% at max (4095) | 8.2% upper half | length: 0.0% at max (255) | offset_bits=12 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 19488 bits (2436 bytes)
+xargs.1                         490        14        17        17       2.86%       3.47%       3.47%   est saving ~2.9% of offset bits
+---------------------------------------------------------------------------------------------------------
+TOTAL                        240959     58109     64408     67583      24.12%      26.73%      28.05%

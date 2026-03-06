@@ -22,8 +22,11 @@ path = "src/lib.rs"
 bitstream-io = "2.4"
 sysinfo       = "0.32"
 walkdir       = "2"
+rayon         = "1"
 
 [dev-dependencies]
+# NOTE: html_reports pulls in `plotters` which adds 30-60s to a clean build.
+# Remove the feature flag during active dev, re-add only for benchmark/publish runs.
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]

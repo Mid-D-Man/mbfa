@@ -2,15 +2,15 @@
 {
   "name": "Source_Tree",
   "file_count": 97,
-  "original_bytes": 855954,
+  "original_bytes": 891738,
   "mbfa_rank": 3,
   "mbfa_roundtrip": "PASS",
-  "mbfa_bytes":  34586,  "mbfa_pct":  4.04,  "mbfa_c_ms":  392,  "mbfa_d_ms":  12,
-  "zip_bytes":   223784,   "zip_pct":   26.14,   "zip_c_ms":   67,   "zip_d_ms":   12,
-  "tgz_bytes":   158593,   "tgz_pct":   18.52,   "tgz_c_ms":   28,   "tgz_d_ms":   9,
-  "tzst_bytes":  35007,  "tzst_pct":  4.08,  "tzst_c_ms":  16,  "tzst_d_ms":  9,
-  "txz_bytes":   28900,   "txz_pct":   3.37,   "txz_c_ms":   119,   "txz_d_ms":   8,
-  "tbr_bytes":   30479,   "tbr_pct":   3.56,   "tbr_c_ms":   128,   "tbr_d_ms":   7
+  "mbfa_bytes":  35757,  "mbfa_pct":  4.00,  "mbfa_c_ms":  411,  "mbfa_d_ms":  12,
+  "zip_bytes":   231974,   "zip_pct":   26.01,   "zip_c_ms":   60,   "zip_d_ms":   12,
+  "tgz_bytes":   167251,   "tgz_pct":   18.75,   "tgz_c_ms":   28,   "tgz_d_ms":   8,
+  "tzst_bytes":  36482,  "tzst_pct":  4.09,  "tzst_c_ms":  20,  "tzst_d_ms":  6,
+  "txz_bytes":   30008,   "txz_pct":   3.36,   "txz_c_ms":   130,   "txz_d_ms":   8,
+  "tbr_bytes":   31575,   "tbr_pct":   3.54,   "tbr_c_ms":   87,   "tbr_d_ms":   7
 }
 ,
 {
@@ -19,12 +19,12 @@
   "original_bytes": 3653924,
   "mbfa_rank": 2,
   "mbfa_roundtrip": "PASS",
-  "mbfa_bytes":  1133880,  "mbfa_pct":  31.03,  "mbfa_c_ms":  23135,  "mbfa_d_ms":  130,
+  "mbfa_bytes":  1133880,  "mbfa_pct":  31.03,  "mbfa_c_ms":  22476,  "mbfa_d_ms":  128,
   "zip_bytes":   1326143,   "zip_pct":   36.29,   "zip_c_ms":   231,   "zip_d_ms":   30,
-  "tgz_bytes":   1325081,   "tgz_pct":   36.26,   "tgz_c_ms":   240,   "tgz_d_ms":   27,
-  "tzst_bytes":  1281021,  "tzst_pct":  35.05,  "tzst_c_ms":  35,  "tzst_d_ms":  11,
-  "txz_bytes":   1014180,   "txz_pct":   27.75,   "txz_c_ms":   1427,   "txz_d_ms":   51,
-  "tbr_bytes":   1205467,   "tbr_pct":   32.99,   "tbr_c_ms":   196,   "tbr_d_ms":   17
+  "tgz_bytes":   1325079,   "tgz_pct":   36.26,   "tgz_c_ms":   241,   "tgz_d_ms":   27,
+  "tzst_bytes":  1281018,  "tzst_pct":  35.05,  "tzst_c_ms":  35,  "tzst_d_ms":  11,
+  "txz_bytes":   1014156,   "txz_pct":   27.75,   "txz_c_ms":   1305,   "txz_d_ms":   54,
+  "tbr_bytes":   1205460,   "tbr_pct":   32.99,   "tbr_c_ms":   184,   "tbr_d_ms":   17
 }
 ,
 {
@@ -33,11 +33,11 @@
   "original_bytes": 550142,
   "mbfa_rank": 3,
   "mbfa_roundtrip": "PASS",
-  "mbfa_bytes":  57224,  "mbfa_pct":  10.40,  "mbfa_c_ms":  564,  "mbfa_d_ms":  12,
+  "mbfa_bytes":  57224,  "mbfa_pct":  10.40,  "mbfa_c_ms":  554,  "mbfa_d_ms":  12,
   "zip_bytes":   68469,   "zip_pct":   12.44,   "zip_c_ms":   13,   "zip_d_ms":   6,
-  "tgz_bytes":   69196,   "tgz_pct":   12.57,   "tgz_c_ms":   16,   "tgz_d_ms":   5,
+  "tgz_bytes":   69195,   "tgz_pct":   12.57,   "tgz_c_ms":   16,   "tgz_d_ms":   6,
   "tzst_bytes":  69352,  "tzst_pct":  12.60,  "tzst_c_ms":  8,  "tzst_d_ms":  4,
-  "txz_bytes":   49176,   "txz_pct":   8.93,   "txz_c_ms":   160,   "txz_d_ms":   8,
+  "txz_bytes":   49064,   "txz_pct":   8.91,   "txz_c_ms":   157,   "txz_d_ms":   7,
   "tbr_bytes":   56506,   "tbr_pct":   10.27,   "tbr_c_ms":   16,   "tbr_d_ms":   4
 }
 ,
@@ -49,37 +49,37 @@
   "mbfa_roundtrip": "PASS",
   "mbfa_bytes":  557595,  "mbfa_pct":  100.07,  "mbfa_c_ms":  5,  "mbfa_d_ms":  3,
   "zip_bytes":   486836,   "zip_pct":   87.37,   "zip_c_ms":   18,   "zip_d_ms":   7,
-  "tgz_bytes":   488151,   "tgz_pct":   87.60,   "tgz_c_ms":   22,   "tgz_d_ms":   7,
+  "tgz_bytes":   488129,   "tgz_pct":   87.60,   "tgz_c_ms":   21,   "tgz_d_ms":   7,
   "tzst_bytes":  483537,  "tzst_pct":  86.77,  "tzst_c_ms":  9,  "tzst_d_ms":  4,
-  "txz_bytes":   272200,   "txz_pct":   48.85,   "txz_c_ms":   75,   "txz_d_ms":   24,
-  "tbr_bytes":   445884,   "tbr_pct":   80.02,   "tbr_c_ms":   19,   "tbr_d_ms":   7
+  "txz_bytes":   270012,   "txz_pct":   48.45,   "txz_c_ms":   71,   "txz_d_ms":   24,
+  "tbr_bytes":   445630,   "tbr_pct":   79.97,   "tbr_c_ms":   18,   "tbr_d_ms":   7
 }
 ,
 {
   "name": "Mixed_Directory",
   "file_count": 6,
-  "original_bytes": 376789,
+  "original_bytes": 377286,
   "mbfa_rank": 6,
   "mbfa_roundtrip": "PASS",
-  "mbfa_bytes":  172118,  "mbfa_pct":  45.68,  "mbfa_c_ms":  268,  "mbfa_d_ms":  33,
-  "zip_bytes":   166484,   "zip_pct":   44.18,   "zip_c_ms":   18,   "zip_d_ms":   5,
-  "tgz_bytes":   168846,   "tgz_pct":   44.81,   "tgz_c_ms":   20,   "tgz_d_ms":   5,
-  "tzst_bytes":  167027,  "tzst_pct":  44.32,  "tzst_c_ms":  8,  "tzst_d_ms":  4,
-  "txz_bytes":   150680,   "txz_pct":   39.99,   "txz_c_ms":   91,   "txz_d_ms":   12,
-  "tbr_bytes":   159077,   "tbr_pct":   42.21,   "tbr_c_ms":   16,   "tbr_d_ms":   5
+  "mbfa_bytes":  172258,  "mbfa_pct":  45.65,  "mbfa_c_ms":  257,  "mbfa_d_ms":  32,
+  "zip_bytes":   166589,   "zip_pct":   44.15,   "zip_c_ms":   17,   "zip_d_ms":   5,
+  "tgz_bytes":   168943,   "tgz_pct":   44.77,   "tgz_c_ms":   20,   "tgz_d_ms":   5,
+  "tzst_bytes":  167153,  "tzst_pct":  44.30,  "tzst_c_ms":  8,  "tzst_d_ms":  4,
+  "txz_bytes":   150776,   "txz_pct":   39.96,   "txz_c_ms":   88,   "txz_d_ms":   12,
+  "tbr_bytes":   159281,   "tbr_pct":   42.21,   "tbr_c_ms":   16,   "tbr_d_ms":   4
 }
 ,
 {
   "name": "Full_Corpus",
   "file_count": 127,
-  "original_bytes": 5994013,
+  "original_bytes": 6030294,
   "mbfa_rank": 3,
   "mbfa_roundtrip": "PASS",
-  "mbfa_bytes":  1913625,  "mbfa_pct":  31.92,  "mbfa_c_ms":  55020,  "mbfa_d_ms":  286,
-  "zip_bytes":   2275746,   "zip_pct":   37.96,   "zip_c_ms":   285,   "zip_d_ms":   49,
-  "tgz_bytes":   2214364,   "tgz_pct":   36.94,   "tgz_c_ms":   299,   "tgz_d_ms":   41,
-  "tzst_bytes":  1984628,  "tzst_pct":  33.11,  "tzst_c_ms":  42,  "tzst_d_ms":  18,
-  "txz_bytes":   1362232,   "txz_pct":   22.72,   "txz_c_ms":   1826,   "txz_d_ms":   74,
-  "tbr_bytes":   1724080,   "tbr_pct":   28.76,   "tbr_c_ms":   230,   "tbr_d_ms":   26
+  "mbfa_bytes":  1915526,  "mbfa_pct":  31.76,  "mbfa_c_ms":  49919,  "mbfa_d_ms":  278,
+  "zip_bytes":   2284041,   "zip_pct":   37.87,   "zip_c_ms":   284,   "zip_d_ms":   49,
+  "tgz_bytes":   2222164,   "tgz_pct":   36.85,   "tgz_c_ms":   298,   "tgz_d_ms":   39,
+  "tzst_bytes":  1982989,  "tzst_pct":  32.88,  "tzst_c_ms":  42,  "tzst_d_ms":  18,
+  "txz_bytes":   1364452,   "txz_pct":   22.62,   "txz_c_ms":   2002,   "txz_d_ms":   75,
+  "tbr_bytes":   1723574,   "tbr_pct":   28.58,   "tbr_c_ms":   249,   "tbr_d_ms":   28
 }
 ]

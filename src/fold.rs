@@ -1,7 +1,10 @@
 // src/fold.rs
+// read_tokens import removed — fold1_tokens cache eliminates both decode
+// passes that previously occurred here (Task 6):
+//   1. cantor_fallback_rate pre-scan — now reads fold1_tokens directly
+//   2. pair_encode input — now reads fold1_tokens directly
 use crate::encoder::scan_adaptive;
 use crate::bitwriter::write_tokens;
-use crate::bitreader::read_tokens;
 use crate::pairing::pair_encode;
 use crate::opcode::{Token, OFFSET_BITS_MIN, LENGTH_BITS_MIN};
 
@@ -75,10 +78,6 @@ fn log_window_diagnostics(tokens: &[Token], offset_bits: u32, length_bits: u32) 
 
 /// Returns (compressed_bytes, folds_done, used_pairing,
 ///          offset_bits_per_fold, length_bits_per_fold, fold1_tokens)
-///
-/// fold1_tokens is Some when fold 1 succeeded (folds_done >= 1).
-/// It is passed through to lib.rs so pair_vs_entropy can use it
-/// directly without re-running scan_adaptive from scratch.
 pub fn fold(input: &[u8], max_folds: u8)
     -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>, Vec<u32>, Option<Vec<Token>>)>
 {
@@ -89,8 +88,9 @@ pub fn fold(input: &[u8], max_folds: u8)
     let mut final_used_pairing = false;
     let mut fold1_tokens: Option<Vec<Token>> = None;
 
-    let mut offset_bits_per_fold: Vec<u32> = Vec::new();
-    let mut length_bits_per_fold: Vec<u32> = Vec::new();
+    // Task 4: pre-allocate — max_folds is the hard upper bound on entries
+    let mut offset_bits_per_fold: Vec<u32> = Vec::with_capacity(max_folds as usize);
+    let mut length_bits_per_fold: Vec<u32> = Vec::with_capacity(max_folds as usize);
 
     let mut current_ob: u32 = OFFSET_BITS_MIN;
     let mut current_lb: u32 = LENGTH_BITS_MIN;
@@ -150,8 +150,14 @@ pub fn fold(input: &[u8], max_folds: u8)
             && current.len() >= MIN_PAIR_BYTES;
 
         let use_pairing = if consider_pairing {
-            let tokens = read_tokens(&current, current_ob, current_lb)?;
-            let fallback_rate = cantor_fallback_rate(&tokens);
+            // Task 6: fold1_tokens is guaranteed Some here — consider_pairing
+            // requires folds_done == 1, which means fold 1 succeeded and always
+            // sets fold1_tokens. Using the cached stream eliminates a full
+            // read_tokens decode pass that the old code performed just to compute
+            // cantor_fallback_rate then immediately discard the tokens.
+            let tokens = fold1_tokens.as_ref()
+                .expect("fold1_tokens must be Some when folds_done == 1");
+            let fallback_rate = cantor_fallback_rate(tokens);
             println!(
                 "Fold {} pairing pre-scan: Cantor fallback rate = {:.1}% (threshold {}%)",
                 fold_num, fallback_rate * 100.0,
@@ -177,8 +183,13 @@ pub fn fold(input: &[u8], max_folds: u8)
         }
 
         let (folded, candidate_ob, candidate_lb) = if use_pairing {
-            let tokens = read_tokens(&current, current_ob, current_lb)?;
-            (pair_encode(&tokens, current_ob, current_lb)?, 0u32, 0u32)
+            // Task 6: fold1_tokens guaranteed Some — same guarantee as above.
+            // Using the cached stream eliminates a second read_tokens decode pass
+            // that the old code performed to feed pair_encode. Two full bitstream
+            // decode passes eliminated total when pairing fires.
+            let tokens = fold1_tokens.as_ref()
+                .expect("fold1_tokens must be Some when use_pairing is true");
+            (pair_encode(tokens, current_ob, current_lb)?, 0u32, 0u32)
         } else {
             let (tokens, ob, lb) = scan_adaptive(&current);
             let encoded = write_tokens(&tokens, ob, lb)?;
@@ -222,4 +233,4 @@ pub fn fold(input: &[u8], max_folds: u8)
     }
 
     Ok((current, folds_done, final_used_pairing, offset_bits_per_fold, length_bits_per_fold, fold1_tokens))
-}
+            }

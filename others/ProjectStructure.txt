@@ -15,7 +15,7 @@ src/bitwriter.rs
 src/decoder.rs
 src/encoder.rs
 src/entropy.rs
-src/filters.rs
+src/filters.rs...
 src/fold.rs
 src/lib.rs
 src/main.rs

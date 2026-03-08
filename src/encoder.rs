@@ -3,35 +3,34 @@
 //! O(n) time, O(window) memory — safe for large files.
 //! Both offset_bits and length_bits are adaptive at runtime.
 //!
-//! scan_adaptive: up to four scans, always apples-to-apples.
+//! scan_adaptive: Phase A (fingerprint) → Phase B (single scan + ceiling check)
+//!                → Phase C (discovery path).
 //!
-//!   Scan 1 — baseline: (BASELINE_OFFSET_BITS=17, BASELINE_LENGTH_BITS=8).
-//!   Proven safe across all benchmarks. Used as the regression floor.
+//!   Phase A — fingerprint_predict:
+//!     Rule 1: entropy < 2.0 (highly repetitive) → defer to Phase C.
+//!             lb will saturate at lb=8; ceiling check would fire immediately
+//!             anyway. Skipping Phase B saves one full quality scan on large
+//!             repetitive inputs (e.g. rep_2MB).
+//!     Rule 2: size < 32 KB → predict ob = ceil(log2(size)) clamped [7,24], lb = 8.
+//!             Minimum ob that covers the whole file; provably bounded lookback.
+//!     Rule 3: default → predict ob = BASELINE_OFFSET_BITS(17), lb = BASELINE_LENGTH_BITS(8).
 //!
-//!   Scan 2 — wide discovery via scan_discover (fast, capped window/chain).
-//!   Computes (wide_ob, wide_lb) without the full scan cost. Token stream
-//!   is discarded — only the discovered ob/lb values are kept.
+//!   Phase B — single scan at predicted (ob, lb):
+//!     Run scan() at full quality (lazy matching, dynamic chain limit).
+//!     ceiling_saturated() checks whether any backref offset or length reached
+//!     >= CEILING_SATURATION_THRESHOLD (90%) of the field maximum. Saturated
+//!     means the window is nearly exhausted and wider parameters are needed.
+//!       Not saturated → return immediately (1 scan total, zero regression).
+//!       Saturated     → fall through to Phase C.
+//!     When pred == BASELINE params and ceiling fires, Phase B tokens are
+//!     reused as the baseline in Phase C (saves one scan in that case).
 //!
-//!   Baseline and discovery scans run IN PARALLEL via rayon::join when
-//!   input.len() <= PARALLEL_SCAN_THRESHOLD (1 MB). Above that threshold
-//!   they run sequentially — on large files (3MB+) the combined working set
-//!   (baseline 512KB prev + discovery 2MB prev + 3MB input read twice) blows
-//!   L3 cache and memory bandwidth contention exceeds the parallelism gain.
-//!
-//!   Scan 3 — constrained re-scan: (wide_ob, wide_lb).
-//!   Only runs when wide_ob != BASELINE_OFFSET_BITS or wide_lb != BASELINE_LENGTH_BITS.
-//!   Produces the CORRECT token stream for that exact window. Its raw bit cost is
-//!   directly comparable to the baseline — both streams produced under matching
-//!   window constraints.
-//!
-//!   Entropy tiebreaker:
-//!   When raw bit costs of two candidates are within ENTROPY_TIE_THRESHOLD (5%)
-//!   of each other, a Shannon entropy estimate breaks the tie.
-//!
-//!   Entropy-safety cap:
-//!   When the constrained scan selects lb > ENTROPY_SAFE_LENGTH_BITS (15) AND
-//!   the output would be large enough for entropy to fire, a fourth scan with
-//!   lb capped at 15 is run and compared against baseline.
+//!   Phase C — discovery path (original logic, unchanged):
+//!     Run scan_discover() → compute wide_ob/wide_lb → constrained re-scan if
+//!     different from baseline → entropy safety cap check → pick best result.
+//!     Baseline and discovery scans run IN PARALLEL via rayon::join when
+//!     input.len() <= PARALLEL_SCAN_THRESHOLD (1 MB) and Phase B did not
+//!     supply a reusable baseline.
 //!
 //!   Dynamic chain limit (full scan only):
 //!   CHAIN_LIMIT = clamp(max(√n, window×32/HASH_SIZE), 64, 4096)
@@ -44,18 +43,31 @@
 use crate::opcode::{
     Token, LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits,
     max_offset, max_length,
-    OFFSET_BITS_MAX, LENGTH_BITS_MAX, LENGTH_BITS_MIN,
+    OFFSET_BITS_MIN, OFFSET_BITS_MAX, LENGTH_BITS_MAX, LENGTH_BITS_MIN,
     compute_optimal_offset_bits, compute_optimal_length_bits,
 };
 use crate::entropy::{offset_to_bucket, bucket_extra_bits};
 use rayon;
 
-const BASELINE_OFFSET_BITS:     u32   = 17;
-const BASELINE_LENGTH_BITS:     u32   = LENGTH_BITS_MIN; // 8
-const ENTROPY_SAFE_LENGTH_BITS: u32   = 15;
+const BASELINE_OFFSET_BITS:       u32   = 17;
+const BASELINE_LENGTH_BITS:       u32   = LENGTH_BITS_MIN; // 8
+const ENTROPY_SAFE_LENGTH_BITS:   u32   = 15;
 const ENTROPY_MIN_BYTES_FOR_SCAN: usize = 400;
+const ENTROPY_TIE_THRESHOLD:      f64   = 0.05;
 
-const ENTROPY_TIE_THRESHOLD: f64 = 0.05;
+// ── Fingerprint constants ─────────────────────────────────────────────────────
+
+/// Below this entropy, data is highly repetitive — lb will saturate at lb=8
+/// in Phase B's ceiling check, making Phase B wasteful. Skip to Phase C.
+const FINGERPRINT_ENTROPY_REPETITIVE: f64   = 2.0;
+
+/// Below this size in bytes, predict ob = minimum bits to span the whole file.
+const FINGERPRINT_SMALL_FILE_BYTES:   usize = 32768;
+
+/// Fraction of a field's maximum value at which it is considered saturated.
+/// Conservative (90%): a false trigger costs 1 extra scan (cheap); a missed
+/// trigger costs ratio quality (expensive). Asymmetry justifies the bias.
+const CEILING_SATURATION_THRESHOLD:   f64   = 0.9;
 
 const HASH_SIZE:       usize = 1 << 16;
 const HASH_MASK:       usize = HASH_SIZE - 1;
@@ -77,7 +89,7 @@ const PARALLEL_SCAN_THRESHOLD: usize = 1_048_576;
 // ── Discovery scan constants ──────────────────────────────────────────────────
 
 /// Fixed chain walk limit for the wide discovery scan.
-const DISCOVER_CHAIN_LIMIT: usize = 256;
+const DISCOVER_CHAIN_LIMIT:   usize = 256;
 
 /// Maximum prev array size for the discovery scan (2 MB → ob ≤ 21).
 const DISCOVER_MAX_PREV_SIZE: usize = 2 * 1024 * 1024;
@@ -115,8 +127,8 @@ fn hash3(input: &[u8], pos: usize) -> usize {
 
 // ── Core scanner ──────────────────────────────────────────────────────────────
 
-/// Full-quality production scan. Used for baseline and constrained re-scans.
-/// Chain limit is computed dynamically from input size and offset window.
+/// Full-quality production scan. Used for Phase B, baseline, and constrained
+/// re-scans. Chain limit is computed dynamically from input size and offset window.
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
@@ -373,36 +385,152 @@ impl ScanResult {
     }
 }
 
+// ── Fingerprint helpers ───────────────────────────────────────────────────────
+
+/// Sample Shannon entropy from the first 8 KB of `data`. Returns 0.0 for
+/// empty input. Private to this module — intentionally not shared with
+/// lib.rs::sample_entropy to keep encoder.rs self-contained.
+fn sample_entropy_fingerprint(data: &[u8]) -> f64 {
+    const SAMPLE: usize = 8192;
+    let sample = if data.len() > SAMPLE { &data[..SAMPLE] } else { data };
+    if sample.is_empty() { return 0.0; }
+    let mut freq = [0u32; 256];
+    for &b in sample { freq[b as usize] += 1; }
+    let n = sample.len() as f64;
+    freq.iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| { let p = c as f64 / n; -p * p.log2() })
+        .sum()
+}
+
+/// Predict (offset_bits, length_bits) for a Phase B single scan, or return
+/// None to defer directly to Phase C.
+///
+/// Rule 1 — highly repetitive (entropy < FINGERPRINT_ENTROPY_REPETITIVE = 2.0):
+///   lb will saturate at lb=8; the Phase B ceiling check would fire immediately
+///   anyway. Skip Phase B entirely to avoid a wasted full-quality scan.
+///
+/// Rule 2 — small file (size < FINGERPRINT_SMALL_FILE_BYTES = 32 KB):
+///   ob = ceil(log2(size)) — the minimum field width to address the whole file.
+///   Formula: (usize::BITS - size.leading_zeros()) as u32, clamped to [7,24].
+///   lb = 8 (baseline default).
+///
+/// Rule 3 — default:
+///   Predict baseline parameters (ob=17, lb=8). Correct for the majority of
+///   real-world inputs (prose, source code, HTML, structured binary).
+fn fingerprint_predict(data: &[u8]) -> Option<(u32, u32)> {
+    let ent = sample_entropy_fingerprint(data);
+    println!("  fingerprint: entropy={:.2} size={}", ent, data.len());
+
+    // Rule 1: highly repetitive — defer to Phase C
+    if ent < FINGERPRINT_ENTROPY_REPETITIVE {
+        println!("  fingerprint Rule 1: repetitive → defer to Phase C");
+        return None;
+    }
+
+    // Rule 2: small file — predict exact covering ob
+    if data.len() < FINGERPRINT_SMALL_FILE_BYTES {
+        let ob = if data.is_empty() {
+            OFFSET_BITS_MIN
+        } else {
+            let bits = (usize::BITS - data.len().leading_zeros()) as u32;
+            bits.clamp(OFFSET_BITS_MIN, OFFSET_BITS_MAX)
+        };
+        println!("  fingerprint Rule 2: small file → ob={} lb={}", ob, LENGTH_BITS_MIN);
+        return Some((ob, LENGTH_BITS_MIN));
+    }
+
+    // Rule 3: default — baseline parameters
+    println!("  fingerprint Rule 3: default → ob={} lb={}", BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS);
+    Some((BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS))
+}
+
+/// Returns true when any Backref token has an offset or length that is >=
+/// CEILING_SATURATION_THRESHOLD (90%) of the maximum encodable value for
+/// the given field widths. This indicates the window or length range is nearly
+/// exhausted and wider parameters would likely improve compression.
+fn ceiling_saturated(tokens: &[Token], ob: u32, lb: u32) -> bool {
+    let ob_ceil = ((max_offset(ob) as f64) * CEILING_SATURATION_THRESHOLD) as u32;
+    let lb_ceil = ((max_length(lb) as f64) * CEILING_SATURATION_THRESHOLD) as u32;
+    tokens.iter().any(|t| {
+        if let Token::Backref { offset, length } = t {
+            *offset >= ob_ceil || *length >= lb_ceil
+        } else {
+            false
+        }
+    })
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Adaptive scan with apples-to-apples cost comparison.
 ///
-/// Scans 1 (baseline) and 2 (wide discovery) run in parallel via rayon::join
-/// when input.len() <= PARALLEL_SCAN_THRESHOLD (1 MB). Above that threshold
-/// they run sequentially to avoid L3 cache thrash from concurrent large allocs.
+/// Phase A+B: fingerprint predicts (ob, lb); single full-quality scan;
+/// ceiling check gates whether Phase B result is returned or Phase C runs.
+/// Phase C: discovery + constrained re-scan (original logic, unchanged).
 pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
-    // ── Scans 1 & 2: baseline and discovery ───────────────────────────────────
-    let (baseline_tokens, wide_discovery) = if input.len() <= PARALLEL_SCAN_THRESHOLD {
-        // Both scans are pure functions over read-only &[u8] — safe for rayon::join.
-        rayon::join(
-            || scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS),
-            || scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX),
-        )
-    } else {
-        // Sequential above threshold — memory bandwidth on large files makes
-        // parallel worse. Measured: +6.7s on WarAndPeace (3.3MB, ob=21).
-        (
-            scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS),
-            scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX),
-        )
+
+    // ── Phase A & B: fingerprint + single scan ────────────────────────────────
+    let reusable_baseline: Option<ScanResult> = match fingerprint_predict(input) {
+        None => {
+            // Rule 1: highly repetitive — skip Phase B, go straight to Phase C.
+            None
+        }
+        Some((pred_ob, pred_lb)) => {
+            let tokens = scan(input, pred_ob, pred_lb);
+            let result = ScanResult::new(tokens, pred_ob, pred_lb, "phase_b");
+
+            println!(
+                "  Phase B scan: ob={} lb={} chain_limit={} raw_cost={}",
+                pred_ob, pred_lb,
+                compute_chain_limit(input.len(), pred_ob),
+                result.raw_cost,
+            );
+
+            if !ceiling_saturated(&result.tokens, pred_ob, pred_lb) {
+                println!("  ceiling check: ok — Phase B wins (1 scan total)");
+                return (result.tokens, result.ob, result.lb);
+            }
+
+            println!("  ceiling check: saturated → falling through to Phase C");
+
+            // Reuse as baseline in Phase C only when the predicted params match
+            // baseline. Rule 2 small-file predictions with different ob values
+            // are on small inputs and cheap to re-scan, so we discard them.
+            if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
+                Some(ScanResult { label: "baseline", ..result })
+            } else {
+                None
+            }
+        }
     };
 
-    let baseline = ScanResult::new(
-        baseline_tokens,
-        BASELINE_OFFSET_BITS,
-        BASELINE_LENGTH_BITS,
-        "baseline",
-    );
+    // ── Phase C: discovery path ───────────────────────────────────────────────
+    //
+    // If Phase B produced a reusable baseline (pred matched BASELINE params but
+    // ceiling fired), we skip the baseline scan and only run discovery.
+    // Otherwise both baseline and discovery run fresh, in parallel when the
+    // input fits within PARALLEL_SCAN_THRESHOLD.
+    let (baseline, wide_discovery) = match reusable_baseline {
+        Some(r) => {
+            // Baseline already computed in Phase B — only run discovery.
+            let disc = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
+            (r, disc)
+        }
+        None => {
+            if input.len() <= PARALLEL_SCAN_THRESHOLD {
+                let (bt, disc) = rayon::join(
+                    || scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS),
+                    || scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX),
+                );
+                (ScanResult::new(bt, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, "baseline"), disc)
+            } else {
+                let bt   = scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS);
+                let disc = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
+                (ScanResult::new(bt, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, "baseline"), disc)
+            }
+        }
+    };
 
     println!(
         "  chain_limit (baseline ob={}): {}  raw_cost={}",
@@ -427,7 +555,7 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
         return (baseline.tokens, baseline.ob, baseline.lb);
     }
 
-    // ── Scan 3: constrained re-scan (full quality, always sequential) ─────────
+    // ── Constrained re-scan (full quality, always sequential) ─────────────────
     let constrained = ScanResult::new(
         scan(input, wide_ob, wide_lb),
         wide_ob,
@@ -483,4 +611,4 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
         );
         (baseline.tokens, baseline.ob, baseline.lb)
     }
-}
+    }

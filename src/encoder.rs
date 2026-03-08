@@ -1,48 +1,47 @@
 // src/encoder.rs
-//! LZ-style scanner with rolling-window hash chain.
-//! O(n) time, O(window) memory — safe for large files.
-//! Both offset_bits and length_bits are adaptive at runtime.
-//!
-//! scan_adaptive: Phase A/B/C fingerprint pipeline.
-//!
-//!   Phase A/B — fingerprint + single scan (LARGE FILES ONLY, > 1 MB):
-//!     Phase A fingerprint_predict classifies the input and predicts (ob, lb).
-//!     Phase B runs one full-quality scan at the predicted parameters, then
-//!     ceiling_saturated() checks whether the window was sufficient.
-//!       Not saturated → return immediately (1 scan total).
-//!       Saturated, pred matches baseline → reuse tokens as baseline in Phase C,
-//!         skip the baseline re-scan (saves 1 scan).
-//!       Saturated, pred differs from baseline → fall through to Phase C fresh.
-//!
-//!     Phase A/B is skipped entirely for files <= PARALLEL_SCAN_THRESHOLD (1 MB).
-//!     On small/medium files rayon::join(baseline, discovery) is already optimal —
-//!     Phase B runs sequentially before discovery, killing the parallel speedup
-//!     whenever ceiling fires (which it does on most medium prose/source/binary
-//!     files with diverse offsets).
-//!
-//!   Phase A fingerprint rules (applied only when input > 1 MB):
-//!     Rule 1: entropy < 2.0 (highly repetitive) → defer to Phase C.
-//!             lb will saturate at lb=8; ceiling check fires immediately anyway.
-//!             Skipping Phase B saves a wasted full-quality scan.
-//!     Rule 2: size < 32 KB → predict ob = ceil(log2(size)), lb = 8.
-//!             Not reached in practice (gated behind > 1 MB check), kept for
-//!             correctness if threshold changes.
-//!     Rule 3: default → predict baseline (ob=17, lb=8).
-//!
-//!   Phase C — discovery path (original logic, unchanged):
-//!     Run scan_discover() → compute wide_ob/wide_lb → constrained re-scan if
-//!     different → entropy safety cap check → pick best result.
-//!     Baseline and discovery run IN PARALLEL via rayon::join when
-//!     input.len() <= PARALLEL_SCAN_THRESHOLD (1 MB).
-//!
-//!   Dynamic chain limit (full scan only):
-//!   CHAIN_LIMIT = clamp(max(√n, window×32/HASH_SIZE), 64, 4096)
-//!
-//!   Discovery scan (scan_discover):
-//!   Uses DISCOVER_CHAIN_LIMIT (fixed 256) and caps prev array at
-//!   DISCOVER_MAX_PREV_SIZE (2MB). No lazy matching. Fast and approximate —
-//!   only used to determine ob/lb range, never for final output.
-
+// LZ-style scanner with rolling-window hash chain.
+// O(n) time, O(window) memory — safe for large files.
+// Both offset_bits and length_bits are adaptive at runtime.
+//
+// scan_adaptive: Phase A/B/C fingerprint pipeline.
+//
+//   Phase A/B — fingerprint + single scan (LARGE FILES ONLY, > 1 MB):
+//     Phase A fingerprint_predict classifies the input and predicts (ob, lb).
+//     Phase B runs one full-quality scan at the predicted parameters, then
+//     ceiling_saturated() checks whether the window was sufficient.
+//       Not saturated -> return immediately (1 scan total).
+//       Saturated, pred matches baseline -> reuse tokens as baseline in Phase C,
+//         skip the baseline re-scan (saves 1 scan).
+//       Saturated, pred differs from baseline -> fall through to Phase C fresh.
+//
+//     Phase A/B is skipped entirely for files <= PARALLEL_SCAN_THRESHOLD (1 MB).
+//     On small/medium files rayon::join(baseline, discovery) is already optimal.
+//     Phase B runs sequentially before discovery, killing the parallel speedup
+//     whenever ceiling fires (which it does on most medium prose/source/binary
+//     files with diverse offsets).
+//
+//   Phase A fingerprint rules (applied only when input > 1 MB):
+//     Rule 1: entropy < 2.0 (highly repetitive) -> defer to Phase C.
+//             lb will saturate at lb=8; ceiling check fires immediately anyway.
+//             Skipping Phase B saves a wasted full-quality scan.
+//     Rule 2: size < 32 KB -> predict ob = ceil(log2(size)), lb = 8.
+//             Not reached in practice (gated behind > 1 MB check), kept for
+//             correctness if threshold changes.
+//     Rule 3: default -> predict baseline (ob=17, lb=8).
+//
+//   Phase C -- discovery path (original logic, unchanged):
+//     Run scan_discover() -> compute wide_ob/wide_lb -> constrained re-scan if
+//     different -> entropy safety cap check -> pick best result.
+//     Baseline and discovery run IN PARALLEL via rayon::join when
+//     input.len() <= PARALLEL_SCAN_THRESHOLD (1 MB).
+//
+//   Dynamic chain limit (full scan only):
+//   CHAIN_LIMIT = clamp(max(sqrt(n), window*32/HASH_SIZE), 64, 4096)
+//
+//   Discovery scan (scan_discover):
+//   Uses DISCOVER_CHAIN_LIMIT (fixed 256) and caps prev array at
+//   DISCOVER_MAX_PREV_SIZE (2MB). No lazy matching. Fast and approximate --
+//   only used to determine ob/lb range, never for final output.
 use crate::opcode::{
     Token, LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits,
     max_offset, max_length,

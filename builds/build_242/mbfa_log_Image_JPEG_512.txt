@@ -1,0 +1,2 @@
+Incompressible early exit: entropy=7.865 bits/byte, 65679 bytes — passthrough
+Done. 65679 bytes → 65683 bytes

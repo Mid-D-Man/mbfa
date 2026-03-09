@@ -36,10 +36,10 @@
 //     input.len() <= PARALLEL_SCAN_THRESHOLD (1 MB).
 //
 //   Dynamic chain limit (full scan only):
-//   CHAIN_LIMIT = clamp(window*32/HASH_SIZE, 64, 4096)
-//   Driven by window density only -- not input length.
-//   window*32/HASH_SIZE is the expected chain depth at full window fill.
-//   Searching deeper than this chases progressively sparse/worse matches.
+//   Cache-aware tiered cap — ob <= 16: 256, ob 17-18: 512, ob 19-20: 256, ob >= 21: 128
+//   Driven by cache residency of the prev array, not input length or window density alone.
+//   ob <= 18 windows fit comfortably in L2/L3 — deep chains are cheap.
+//   ob >= 21 windows (>= 2MB prev array) live in DRAM — every chain step costs ~30-100ns.
 //
 //   Discovery scan (scan_discover):
 //   Uses DISCOVER_CHAIN_LIMIT (fixed 256) and caps prev array at
@@ -75,11 +75,9 @@ const FINGERPRINT_SMALL_FILE_BYTES:   usize = 32768;
 /// missed trigger costs ratio quality (expensive).
 const CEILING_SATURATION_THRESHOLD:   f64   = 0.9;
 
-const HASH_SIZE:       usize = 1 << 16;
-const HASH_MASK:       usize = HASH_SIZE - 1;
-const CHAIN_LIMIT_MIN: usize = 64;
-const CHAIN_LIMIT_MAX: usize = 4096;
-const LAZY_SHORT_LEN:  usize = 6;
+const HASH_SIZE:              usize = 1 << 16;
+const HASH_MASK:              usize = HASH_SIZE - 1;
+const LAZY_SHORT_LEN:         usize = 6;
 
 /// Input size above which baseline and discovery scans run sequentially,
 /// AND above which Phase A/B fingerprint optimisation is enabled.
@@ -98,32 +96,33 @@ const PARALLEL_SCAN_THRESHOLD: usize = 1_048_576;
 const DISCOVER_CHAIN_LIMIT:   usize = 256;
 const DISCOVER_MAX_PREV_SIZE: usize = 2 * 1024 * 1024;
 
-// -- Dynamic chain limit ------------------------------------------------------
+// -- Tiered chain limit -------------------------------------------------------
 
-/// Chain limit driven by window density only -- NOT input length.
+/// Cache-aware tiered chain depth limit for full-quality scans.
 ///
-/// window*32/HASH_SIZE is the expected hash chain depth when the window is
-/// fully populated. Searching deeper than this means chasing progressively
-/// sparse, lower-quality matches for diminishing ratio return. Tying the limit
-/// to input length (old: sqrt(n)) caused O(n^1.5) complexity -- files above
-/// 1 MB were walking chains 2-10x longer than the window density warranted,
-/// burning cycles on cache-cold DRAM lookups with near-zero match yield.
+/// The prev array is allocated at window size. Whether that array is
+/// L2/L3-resident or DRAM-resident determines how expensive each chain
+/// step is. The tier boundaries are chosen at natural cache size boundaries:
 ///
-/// Per-window tier at full density:
-///   ob=12 (4KB)   -> window*32/65536 =   2 -> clamp to 64
-///   ob=14 (16KB)  -> window*32/65536 =   8 -> clamp to 64
-///   ob=15 (32KB)  -> window*32/65536 =  16 -> clamp to 64
-///   ob=16 (64KB)  -> window*32/65536 =  32 -> clamp to 64
-///   ob=17 (128KB) -> window*32/65536 =  64
-///   ob=18 (256KB) -> window*32/65536 = 128
-///   ob=19 (512KB) -> window*32/65536 = 256
-///   ob=20 (1MB)   -> window*32/65536 = 512
-///   ob=21 (2MB)   -> window*32/65536 = 1024
-///   ob=24 (16MB)  -> window*32/65536 = 8192 -> clamp to 4096
+///   ob <= 16   window <=  64KB   prev <=   64KB   L2-resident  → 256
+///   ob 17–18   window <= 256KB   prev <=  256KB   L3-resident  → 512
+///   ob 19–20   window <=   1MB   prev <=    1MB   L3-tight     → 256
+///   ob >= 21   window >=   2MB   prev >=    2MB   DRAM         → 128
+///
+/// W3 density baseline (window*32/HASH_SIZE clamped [64,4096]) at key points:
+///   ob=17  density=64   → tier=512  (+depth recovers prose/binary ratio regression)
+///   ob=18  density=127  → tier=512  (+depth recovers ratio)
+///   ob=19  density=255  → tier=256  (unchanged — density already correct)
+///   ob=20  density=511  → tier=256  (cut — borderline DRAM, deep chains waste time)
+///   ob=21  density=1023 → tier=128  (hard cut — 8MB prev, every step ~30–100ns DRAM)
+///   ob=24  density=4096 → tier=128  (hard cut)
 pub fn compute_chain_limit(_input_len: usize, offset_bits: u32) -> usize {
-    let window       = max_offset(offset_bits);
-    let window_based = window.saturating_mul(32) / HASH_SIZE;
-    window_based.clamp(CHAIN_LIMIT_MIN, CHAIN_LIMIT_MAX)
+    match offset_bits {
+        0..=16 => 256,
+        17..=18 => 512,
+        19..=20 => 256,
+        _ => 128,
+    }
 }
 
 // -- Hash ---------------------------------------------------------------------
@@ -139,7 +138,7 @@ fn hash3(input: &[u8], pos: usize) -> usize {
 
 // -- Core scanner -------------------------------------------------------------
 
-/// Full-quality production scan. Chain limit computed by window density.
+/// Full-quality production scan. Chain limit computed by cache tier.
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
@@ -615,4 +614,4 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     };
 
     phase_c_from_baseline(baseline, wide_discovery, input)
-            }
+        }

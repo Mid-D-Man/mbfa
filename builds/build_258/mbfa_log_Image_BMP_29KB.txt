@@ -1,0 +1,21 @@
+BMP: 24 bpp → delta stride 3
+Filter delta3: 30054 bytes in, 30054 bytes filtered
+Original size: 240432 bits (30054 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=7586
+  discovery (capped 2MB/chain=256): discovered ob=14 lb=15
+  chain_limit (constrained ob=14): 256  raw_cost=5462
+  constrained wins: ob=14 lb=15 raw_cost=5462 vs baseline raw_cost=7586
+Window diagnostics: 149/248 tokens BACKREF (60.1%) | offset: 0.0% at max (16383) | 0.7% upper half | length: 0.0% at max (32767) | offset_bits=14 length_bits=15 — OK
+Fold 1 adaptive: offset_bits=14 (window=16383 bytes) length_bits=15 (max_len=32767)
+Fold 1 (LZ): 5464 bits (683 bytes)
+Fold 2 pairing pre-scan: Cantor fallback rate = 64.4% (threshold 77%)
+Fold 2 (PAIR): 4952 bits (619 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=6098
+  discovery (capped 2MB/chain=256): discovered ob=9 lb=8
+  chain_limit (constrained ob=9): 256  raw_cost=5970
+  entropy tiebreaker: constrained est=4177b vs baseline est=4177b -> baseline wins
+  baseline wins: ob=17 lb=8 raw_cost=6098 vs constrained raw_cost=5970
+Fold 3 (LZ): 6104 bits (763 bytes)
+Fold 3 not worth it (ratio 1.233), stopping at fold 2
+PAIR wins over entropy: 619 B
+Done. 30054 bytes → 627 bytes

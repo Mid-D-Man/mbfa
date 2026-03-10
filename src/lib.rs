@@ -39,7 +39,7 @@ fn sample_entropy(data: &[u8]) -> f64 {
 /// File header layout:
 ///   Byte 0:          fold_count
 ///   Byte 1:          pair_flag    (1 = fold 2 used pair encoding)
-///   Byte 2:          entropy_flag (0 = none, 1-5 = entropy variant)
+///   Byte 2:          entropy_flag (0 = none, 1-6 = entropy variant)
 ///   Byte 3:          filter_flag  (0 = none, 1-4 = delta stride 1-4)
 ///   Bytes 4..4+N:    offset_bits[0..N]  N = fold_count
 ///   Bytes 4+N..4+2N: length_bits[0..N]
@@ -141,9 +141,21 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                 None
             };
 
+            // v6: separate literal stream + sequence stream. Independent of
+            // v1-v5 tables — lit_table is byte-only (no length symbols),
+            // seq_table covers only {SYM_V6_LIT, SYM_END, length_syms}.
+            // Only built when entropy_ok to share the same length-safety guard.
+            let v6_arc: Option<(Arc<entropy::EncodeTable>, Arc<entropy::EncodeTable>, Arc<entropy::EncodeTable>)> =
+                if entropy_ok {
+                    entropy::build_v6_tables(&tokens)
+                        .map(|(lt, st, ot)| (Arc::new(lt), Arc::new(st), Arc::new(ot)))
+                } else {
+                    None
+                };
+
             // Run encoding variants in parallel — each variant receives
             // Arc clones (pointer copies) of its pre-built tables.
-            let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5]
+            let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6]
                 .into_par_iter()
                 .map(|flag| {
                     let payload = match flag {
@@ -167,6 +179,10 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                             (Some((t0, t1)), Some(ost)) if v2_ok =>
                                 encode_v5_shared(&tokens, t0, t1, ost),
                             _ => None,
+                        },
+                        6 => match &v6_arc {
+                            Some((lt, st, ot)) => encode_v6_shared(&tokens, lt, st, ot),
+                            None => None,
                         },
                         _ => None,
                     };
@@ -302,6 +318,19 @@ fn encode_v5_shared(
     Some(payload)
 }
 
+/// v6: separate literal stream + sequence stream. Pack as:
+///   [lit_table][seq_table][offset_table][lit_count: u32][lit_bitstream_len: u32]
+///   [lit_bitstream][seq_bitstream]
+/// The write_tokens_v6 call produces everything after the three table headers.
+fn encode_v6_shared(
+    tokens:       &[opcode::Token],
+    lit_table:    &entropy::EncodeTable,
+    seq_table:    &entropy::EncodeTable,
+    offset_table: &entropy::EncodeTable,
+) -> Option<Vec<u8>> {
+    entropy::write_tokens_v6(tokens, lit_table, seq_table, offset_table).ok()
+}
+
 // ── pair_vs_entropy — shared tables applied here too (Task 5) ────────────────
 
 fn pair_vs_entropy(
@@ -362,7 +391,16 @@ fn pair_vs_entropy(
         None
     };
 
-    let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5]
+    // v6 tables for pair_vs_entropy path.
+    let v6_arc: Option<(Arc<entropy::EncodeTable>, Arc<entropy::EncodeTable>, Arc<entropy::EncodeTable>)> =
+        if entropy_ok {
+            entropy::build_v6_tables(&fold1_tokens)
+                .map(|(lt, st, ot)| (Arc::new(lt), Arc::new(st), Arc::new(ot)))
+        } else {
+            None
+        };
+
+    let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6]
         .into_par_iter()
         .map(|flag| {
             let payload = match flag {
@@ -386,6 +424,10 @@ fn pair_vs_entropy(
                     (Some((t0, t1)), Some(ost)) if v2_ok =>
                         encode_v5_shared(&fold1_tokens, t0, t1, ost),
                     _ => None,
+                },
+                6 => match &v6_arc {
+                    Some((lt, st, ot)) => encode_v6_shared(&fold1_tokens, lt, st, ot),
+                    None => None,
                 },
                 _ => None,
             };

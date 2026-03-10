@@ -9,7 +9,7 @@
 //   v4  entropy_flag=4  v1 + recent-offset slot reuse
 //   v5  entropy_flag=5  v2 + recent-offset slot reuse
 //   v6  entropy_flag=6  separate literal stream + sequence stream Huffman
-//   v7  entropy_flag=7  8-context MSB lit/length Huffman + offset bucket Huffman
+//   v7  entropy_flag=7  8-context prose-tuned lit/length Huffman + offset bucket Huffman
 //
 // v6 architecture (zstd-style literal separation):
 //   Literal bytes are extracted from the token stream, Huffman-coded as a
@@ -29,11 +29,21 @@
 //     [lit_bitstream]
 //     [seq_bitstream]
 //
-// v7 architecture (MSB context split):
-//   8 lit/length tables indexed by (prev_byte >> 5). No after_br flag.
-//   For ASCII prose this naturally separates word-initial, post-capital,
-//   word-continuation, and high-byte contexts without heuristics.
-//   Same payload layout as v3: 8 lit tables + 1 offset table + bitstream.
+// v7 architecture (prose-tuned category split):
+//   8 lit/length tables indexed by (after_br * 4 + prose_category(prev_byte)).
+//   prose_category splits:
+//     0 = whitespace (0x09, 0x0A, 0x0D, 0x20) — pure word-boundary signal
+//     1 = uppercase A–Z — sentence/proper-noun starters
+//     2 = lowercase vowels a,e,i,o,u — high-frequency connectors
+//     3 = everything else (lowercase consonants, digits, punct, binary)
+//
+//   Rationale vs old MSB v7 and v3:
+//     v3 conflates uppercase and lowercase consonants into one category bucket —
+//     the dominant flaw for English prose. "The", "He", "In" have a completely
+//     different successor distribution from mid-word consonants like "t","n","s".
+//     The old MSB split (prev_byte >> 5) was mechanical and lost to v3 on
+//     WarAndPeace. This split is handcrafted for English prose bigram statistics.
+//     Same payload layout as v3: 8 lit tables + 1 offset table + bitstream.
 //
 // Core algorithm (fold/unfold/LZ/pairing) is untouched by this module.
 //
@@ -349,6 +359,31 @@ pub fn byte_category(b: u8) -> usize {
 #[inline]
 pub fn context_idx(after_br: bool, prev_byte: u8) -> usize {
     (after_br as usize) * 4 + byte_category(prev_byte)
+}
+
+// ── v7 prose-tuned context function ──────────────────────────────────────────
+//
+// Four categories × after_br flag → 8 contexts.
+//   0 = whitespace      — word-boundary signal; successor is almost always
+//                         a capital or a common lowercase starter
+//   1 = uppercase A–Z   — sentence/proper-noun starters; successor distribution
+//                         is heavily skewed toward "h","e","a","o","i"
+//   2 = lowercase vowels — high-frequency connectors; successor is dominated
+//                         by consonants with characteristic bigram mass
+//   3 = everything else  — lowercase consonants, digits, punct, binary
+//
+// This directly fixes the main flaw in v3: uppercase and lowercase consonants
+// sharing one bucket despite completely different successor distributions.
+
+#[inline]
+pub fn prose_context_idx(after_br: bool, prev_byte: u8) -> usize {
+    let cat = match prev_byte {
+        9 | 10 | 13 | 32                               => 0, // whitespace
+        b'A'..=b'Z'                                    => 1, // uppercase
+        b'a' | b'e' | b'i' | b'o' | b'u'              => 2, // lowercase vowels
+        _                                              => 3, // everything else
+    };
+    (after_br as usize) * 4 + cat
 }
 
 fn count_joint_freq_v3(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32, u64>) {
@@ -1301,42 +1336,34 @@ pub fn read_tokens_v6(
     Ok(tokens)
 }
 
-// ── v7: 8-context MSB lit/length Huffman + offset bucket Huffman ──────────────
+// ── v7: 8-context prose-tuned lit/length Huffman + offset bucket Huffman ──────
 //
-// Context is derived purely from the previous byte's top 3 bits:
-//   ctx = prev_byte >> 5  →  8 contexts (0x00-0x1F, 0x20-0x3F, ..., 0xE0-0xFF)
-//
-// For ASCII prose this naturally separates:
-//   ctx 1 (0x20-0x3F): after space/punct  → word-initial character distribution
-//   ctx 2 (0x40-0x5F): after uppercase    → post-capital distribution
-//   ctx 3 (0x60-0x7F): after lowercase    → word-continuation distribution
-//
-// No after_br flag — the MSB split is the sole context signal. This keeps
-// the table count at 8 (same as v3) while using a data-driven split rather
-// than the heuristic byte_category grouping used by v3.
-//
-// On BACKREF tokens prev_byte is left unchanged — we hold the context at the
-// byte that preceded the backref rather than guessing the last byte of the
-// referenced span.
+// Context = prose_context_idx(after_br, prev_byte) — see function above.
+// Same structural payload as v3: 8 lit tables + 1 offset table + bitstream.
+// prev_byte is updated on LIT tokens; on BACKREF tokens after_br flips but
+// prev_byte is left unchanged (we hold context at the byte before the backref
+// rather than guessing the last reconstructed byte of the referenced span).
 
 fn count_joint_freq_v7(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32, u64>) {
     let mut lit_freqs: [Vec<u64>; 8] = std::array::from_fn(|_| vec![0u64; LIT_LEN_FREQ_SIZE]);
     let mut bucket_freq = [0u64; BUCKET_FREQ_SIZE];
 
-    let mut prev_byte: u8 = b' '; // start in ctx 1 (space/punct context)
+    let mut prev_byte: u8 = b' ';
+    let mut after_br      = false;
 
     for t in tokens {
-        let ctx = (prev_byte >> 5) as usize;
+        let ctx = prose_context_idx(after_br, prev_byte);
         match t {
             Token::Lit { byte } => {
                 lit_freqs[ctx][*byte as usize] += 1;
                 prev_byte = *byte;
+                after_br  = false;
             }
             Token::Backref { offset, length } => {
                 lit_freqs[ctx][(255 + length) as usize] += 1;
                 let (bucket, _, _) = offset_to_bucket(*offset);
                 bucket_freq[bucket as usize] += 1;
-                // prev_byte intentionally unchanged
+                after_br = true;
             }
             Token::End => {
                 lit_freqs[ctx][SYM_END as usize] += 1;
@@ -1383,9 +1410,10 @@ pub fn write_tokens_v7(
     {
         let mut w         = BitWriter::endian(&mut output, BigEndian);
         let mut prev_byte: u8 = b' ';
+        let mut after_br      = false;
 
         for token in tokens {
-            let ctx   = (prev_byte >> 5) as usize;
+            let ctx   = prose_context_idx(after_br, prev_byte);
             let table = &tables[ctx];
 
             match token {
@@ -1396,6 +1424,7 @@ pub fn write_tokens_v7(
                     })?;
                     w.write(len, code)?;
                     prev_byte = *byte;
+                    after_br  = false;
                 }
                 Token::Backref { offset, length } => {
                     let sym = sym_from_length(*length);
@@ -1414,7 +1443,7 @@ pub fn write_tokens_v7(
                         w.write(blen, bcode)?;
                         if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
                     }
-                    // prev_byte intentionally unchanged on BACKREF
+                    after_br = true;
                 }
                 Token::End => {
                     let &(code, len) = table.get(&SYM_END).ok_or_else(|| {
@@ -1445,9 +1474,10 @@ pub fn read_tokens_v7(
     let mut tokens    = Vec::new();
     let mut r         = BitReader::endian(std::io::Cursor::new(input), BigEndian);
     let mut prev_byte: u8 = b' ';
+    let mut after_br      = false;
 
     loop {
-        let ctx = (prev_byte >> 5) as usize;
+        let ctx = prose_context_idx(after_br, prev_byte);
         let sym = match read_huffman_sym(&mut r, &dtables[ctx], max_lens[ctx]) {
             Ok(s)  => s,
             Err(_) => break,
@@ -1457,6 +1487,7 @@ pub fn read_tokens_v7(
             let byte = sym as u8;
             tokens.push(Token::Lit { byte });
             prev_byte = byte;
+            after_br  = false;
         } else if sym == SYM_END {
             tokens.push(Token::End);
             break;
@@ -1471,7 +1502,7 @@ pub fn read_tokens_v7(
                 bucket_to_offset(bucket, extra_val)
             };
             tokens.push(Token::Backref { offset, length });
-            // prev_byte intentionally unchanged on BACKREF
+            after_br = true;
         }
     }
     Ok(tokens)
@@ -1494,4 +1525,4 @@ fn read_huffman_sym<R: std::io::Read>(
         std::io::ErrorKind::InvalidData,
         format!("invalid huffman symbol after {} bits", max_len),
     ))
-    }
+}

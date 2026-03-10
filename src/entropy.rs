@@ -8,6 +8,25 @@
 //   v3  entropy_flag=3  8-context lit/length Huffman + offset bucket Huffman
 //   v4  entropy_flag=4  v1 + recent-offset slot reuse
 //   v5  entropy_flag=5  v2 + recent-offset slot reuse
+//   v6  entropy_flag=6  separate literal stream + sequence stream Huffman
+//
+// v6 architecture (zstd-style literal separation):
+//   Literal bytes are extracted from the token stream, Huffman-coded as a
+//   dedicated byte-only stream, and stored separately from the sequence stream.
+//   The sequence stream encodes SYM_V6_LIT (a single marker symbol) in place
+//   of each literal's inline byte value. The sequence Huffman table covers only
+//   {SYM_V6_LIT, length_syms, SYM_END} — no byte values — so length symbols
+//   get full frequency mass and shorter codes. Literal bytes get a clean
+//   byte-only table with no dilution from length symbols.
+//
+//   v6 payload layout:
+//     [lit_huffman_table]
+//     [seq_huffman_table]
+//     [offset_huffman_table]
+//     [lit_count:           u32 LE]  — number of literal bytes encoded
+//     [lit_bitstream_len:   u32 LE]  — byte length of lit_bitstream
+//     [lit_bitstream]
+//     [seq_bitstream]
 //
 // Core algorithm (fold/unfold/LZ/pairing) is untouched by this module.
 //
@@ -30,6 +49,12 @@ pub const ENTROPY_V2_MIN_BYTES: usize = 1000;
 const SYM_END: u32 = 256;
 #[inline] fn sym_from_length(len: u32) -> u32 { 255 + len }
 #[inline] fn length_from_sym(sym: u32)  -> u32 { sym - 255 }
+
+/// In the v6 sequence stream, this symbol means "consume the next byte from
+/// the literal buffer". Byte values 0-255 do NOT appear in the v6 seq stream.
+/// Range 1-255 is therefore unused in the seq table; fmt0_explicit is chosen
+/// by serialize_table for this sparse alphabet.
+const SYM_V6_LIT: u32 = 0;
 
 /// Size of the lit/length frequency array.
 /// Covers: 0-255 literals, 256 END, 257-65535 length syms (255 + length).
@@ -1082,6 +1107,272 @@ pub fn read_tokens_v5(
     Ok(tokens)
 }
 
+// ── v6: separate literal stream + sequence stream Huffman ─────────────────────
+//
+// The literal bytes are extracted from the token stream and Huffman-coded
+// independently using a byte-only table (alphabet 0-255). The sequence stream
+// uses SYM_V6_LIT (=0) as a single marker in place of each literal's inline
+// byte value. The sequence table covers only {SYM_V6_LIT, SYM_END, length_syms}
+// — no byte values — so length frequency mass is undiluted and length symbols
+// get shorter codes. The separation benefit is largest on prose, where:
+//   • ~70% of tokens may be literals with very skewed byte distribution
+//   • In v1-v5 the joint table has ~300 active symbols diluting that skew
+//   • In v6 the lit table has ~80 active symbols, much tighter codes
+//
+// Build: build_v6_tables returns None if the token stream has no LIT tokens
+// (all-BACKREF streams are handled fine by v1/v4 without separation).
+//
+// Safety: same tokens_safe_for_entropy constraint applies — length symbols are
+// still encoded as 255 + length in the seq table, so max sym = 65535 fits u16
+// exactly when length <= 65280 = ENTROPY_SAFE_MAX_LENGTH.
+
+pub fn build_v6_tables(tokens: &[Token]) -> Option<(EncodeTable, EncodeTable, EncodeTable)> {
+    let mut lit_freq    = vec![0u64; 256];
+    let mut seq_freq:   HashMap<u32, u64> = HashMap::new();
+    let mut bucket_freq = [0u64; BUCKET_FREQ_SIZE];
+    let mut has_lits    = false;
+
+    for t in tokens {
+        match t {
+            Token::Lit { byte } => {
+                lit_freq[*byte as usize] += 1;
+                *seq_freq.entry(SYM_V6_LIT).or_insert(0) += 1;
+                has_lits = true;
+            }
+            Token::Backref { offset, length } => {
+                let sym = sym_from_length(*length);
+                *seq_freq.entry(sym).or_insert(0) += 1;
+                let (bucket, _, _) = offset_to_bucket(*offset);
+                bucket_freq[bucket as usize] += 1;
+            }
+            Token::End => {
+                *seq_freq.entry(SYM_END).or_insert(0) += 1;
+            }
+        }
+    }
+
+    if !has_lits { return None; }
+
+    // SYM_END must always be present so the decoder can terminate.
+    seq_freq.entry(SYM_END).or_insert(1);
+
+    let lit_freq_map: HashMap<u32, u64> = lit_freq.iter()
+        .enumerate()
+        .filter(|(_, &c)| c > 0)
+        .map(|(i, &c)| (i as u32, c))
+        .collect();
+
+    let lit_table    = canonical_codes_from_lengths(&assign_code_lengths(&lit_freq_map));
+    let seq_table    = canonical_codes_from_lengths(&assign_code_lengths(&seq_freq));
+    let bucket_map   = bucket_array_to_map(&bucket_freq);
+    let offset_table = if bucket_map.is_empty() {
+        EncodeTable::new()
+    } else {
+        canonical_codes_from_lengths(&assign_code_lengths(&bucket_map))
+    };
+
+    Some((lit_table, seq_table, offset_table))
+}
+
+/// Encode tokens as v6: separate literal bitstream + sequence bitstream.
+///
+/// Output payload layout:
+///   [lit_table serialized]
+///   [seq_table serialized]
+///   [offset_table serialized]
+///   [lit_count:          u32 LE]  — number of literal symbols in lit_bitstream
+///   [lit_bitstream_len:  u32 LE]  — byte length of the literal bitstream
+///   [lit_bitstream bytes]
+///   [seq_bitstream bytes]
+pub fn write_tokens_v6(
+    tokens:       &[Token],
+    lit_table:    &EncodeTable,
+    seq_table:    &EncodeTable,
+    offset_table: &EncodeTable,
+) -> std::io::Result<Vec<u8>> {
+    // ── Pass 1: Huffman-encode all literal bytes into their own bitstream ─────
+    let mut lit_output: Vec<u8> = Vec::new();
+    let mut lit_count: u32      = 0;
+    {
+        let mut w = BitWriter::endian(&mut lit_output, BigEndian);
+        for t in tokens {
+            if let Token::Lit { byte } = t {
+                let &(code, len) = lit_table.get(&(*byte as u32)).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("v6: literal byte {} missing from lit_table", byte),
+                    )
+                })?;
+                w.write(len, code)?;
+                lit_count += 1;
+            }
+        }
+        w.byte_align()?;
+    }
+
+    // ── Pass 2: encode sequence stream — LIT tokens become SYM_V6_LIT ────────
+    let mut seq_output: Vec<u8> = Vec::new();
+    {
+        let mut w = BitWriter::endian(&mut seq_output, BigEndian);
+        for t in tokens {
+            match t {
+                Token::Lit { .. } => {
+                    let &(code, len) = seq_table.get(&SYM_V6_LIT).ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "v6: SYM_V6_LIT missing from seq_table",
+                        )
+                    })?;
+                    w.write(len, code)?;
+                }
+                Token::Backref { offset, length } => {
+                    let sym = sym_from_length(*length);
+                    let &(code, len) = seq_table.get(&sym).ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("v6: length sym {} missing from seq_table", sym),
+                        )
+                    })?;
+                    w.write(len, code)?;
+                    let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
+                    let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("v6: offset bucket {} missing", bucket),
+                        )
+                    })?;
+                    w.write(blen, bcode)?;
+                    if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
+                }
+                Token::End => {
+                    let &(code, len) = seq_table.get(&SYM_END).ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "v6: SYM_END missing from seq_table",
+                        )
+                    })?;
+                    w.write(len, code)?;
+                }
+            }
+        }
+        w.byte_align()?;
+    }
+
+    // ── Pack payload ──────────────────────────────────────────────────────────
+    let mut payload = serialize_table(lit_table);
+    payload.extend_from_slice(&serialize_table(seq_table));
+    payload.extend_from_slice(&serialize_table(offset_table));
+    payload.extend_from_slice(&lit_count.to_le_bytes());
+    payload.extend_from_slice(&(lit_output.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&lit_output);
+    payload.extend_from_slice(&seq_output);
+    Ok(payload)
+}
+
+/// Decode a v6 payload back into a Token stream.
+///
+/// Reads the three serialized tables, then the 8-byte (lit_count, lit_bitstream_len)
+/// header, decodes exactly lit_count bytes from the literal bitstream, then
+/// walks the sequence bitstream — consuming a literal byte on SYM_V6_LIT,
+/// decoding a BACKREF on a length symbol, and terminating on SYM_END.
+pub fn read_tokens_v6(
+    input:         &[u8],
+    lit_dtable:    &DecodeTable,
+    seq_dtable:    &DecodeTable,
+    offset_dtable: &DecodeTable,
+) -> std::io::Result<Vec<Token>> {
+    // The caller already stripped the three serialized tables from the front.
+    // `input` here is everything after the three tables:
+    //   [lit_count: u32 LE][lit_bitstream_len: u32 LE][lit_bitstream][seq_bitstream]
+    if input.len() < 8 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "v6: payload too short for lit_count + lit_bitstream_len header",
+        ));
+    }
+
+    let lit_count        = u32::from_le_bytes(input[0..4].try_into().unwrap()) as usize;
+    let lit_bitstream_len = u32::from_le_bytes(input[4..8].try_into().unwrap()) as usize;
+
+    if input.len() < 8 + lit_bitstream_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!(
+                "v6: lit_bitstream truncated (need {} bytes, have {})",
+                lit_bitstream_len,
+                input.len().saturating_sub(8)
+            ),
+        ));
+    }
+
+    let lit_bitstream = &input[8..8 + lit_bitstream_len];
+    let seq_bitstream = &input[8 + lit_bitstream_len..];
+
+    let lit_max    = lit_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
+    let seq_max    = seq_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
+    let offset_max = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
+
+    // ── Decode exactly lit_count literal bytes ────────────────────────────────
+    let mut lit_bytes: Vec<u8> = Vec::with_capacity(lit_count);
+    {
+        let mut r = BitReader::endian(std::io::Cursor::new(lit_bitstream), BigEndian);
+        for idx in 0..lit_count {
+            let sym = read_huffman_sym(&mut r, lit_dtable, lit_max).map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("v6: lit_bitstream error at literal {}/{}: {}", idx, lit_count, e),
+                )
+            })?;
+            if sym > 255 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("v6: non-byte symbol {} in lit_bitstream at index {}", sym, idx),
+                ));
+            }
+            lit_bytes.push(sym as u8);
+        }
+    }
+
+    // ── Decode sequence stream ────────────────────────────────────────────────
+    let mut tokens  = Vec::new();
+    let mut lit_idx = 0usize;
+    let mut r = BitReader::endian(std::io::Cursor::new(seq_bitstream), BigEndian);
+
+    loop {
+        let sym = match read_huffman_sym(&mut r, seq_dtable, seq_max) {
+            Ok(s)  => s,
+            Err(_) => break,
+        };
+
+        if sym == SYM_V6_LIT {
+            if lit_idx >= lit_bytes.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "v6: lit buffer exhausted at seq position {} (lit_count={})",
+                        lit_idx, lit_count
+                    ),
+                ));
+            }
+            tokens.push(Token::Lit { byte: lit_bytes[lit_idx] });
+            lit_idx += 1;
+        } else if sym == SYM_END {
+            tokens.push(Token::End);
+            break;
+        } else {
+            // length symbol
+            let length = length_from_sym(sym);
+            let bucket = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
+            let extra_cnt = bucket_extra_bits(bucket);
+            let extra_val = if extra_cnt > 0 { r.read::<u32>(extra_cnt)? } else { 0 };
+            let offset = bucket_to_offset(bucket, extra_val);
+            tokens.push(Token::Backref { offset, length });
+        }
+    }
+
+    Ok(tokens)
+}
+
 // ── Shared Huffman reader ─────────────────────────────────────────────────────
 
 fn read_huffman_sym<R: std::io::Read>(
@@ -1099,4 +1390,4 @@ fn read_huffman_sym<R: std::io::Read>(
         std::io::ErrorKind::InvalidData,
         format!("invalid huffman symbol after {} bits", max_len),
     ))
-}
+                          }

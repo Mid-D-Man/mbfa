@@ -43,10 +43,19 @@
 //     ob >= 21 (window >=   2MB, DRAM)     -> 128
 //
 //   Ceiling saturation check (two conditions, either fires Phase C):
-//     Peak check:      any Backref offset or length >= 90% of field max.
+//     Peak check:       any Backref offset or length >= 90% of field max.
 //     Upper-half check: >= 20% of Backrefs have offset in upper half of window.
 //                       Catches files like WarAndPeace where the window is
 //                       heavily used but no single backref hits the peak.
+//
+//   Rep-match tiebreaking in scan():
+//     Tracks the last REP_SLOTS (3) distinct offsets emitted as Backrefs.
+//     After find_match returns a candidate, scan() checks each slot: if the
+//     slot offset matches at the current position with length >= best_len, it
+//     substitutes the rep-match offset. The token type is unchanged
+//     (Token::Backref) -- this is purely a scanner-quality improvement.
+//     No opcode vocabulary change. No format change. Fully backward compatible.
+//     v4/v5 entropy slot LRU applies on top and captures additional coding gain.
 //
 //   Discovery scan (scan_discover):
 //   Uses DISCOVER_CHAIN_LIMIT (fixed 256) and caps prev array at
@@ -81,21 +90,14 @@ const CEILING_SATURATION_THRESHOLD: f64 = 0.9;
 
 /// Upper-half check: if this fraction or more of all Backrefs have an offset
 /// in the upper half of the current window, treat as saturated and run Phase C.
-///
-/// Catches files where the window is heavily used across its full depth but no
-/// single backref actually peaks at 90% -- the classic case being large prose
-/// files (WarAndPeace: 25% upper-half, JSON_2MB: 24% upper-half) where a wider
-/// ob discovers substantially better ratio.
-///
-/// Calibration against known results:
-///   WarAndPeace 25.0% -- FIRES (needs ob=19+)
-///   JSON_2MB    24.3% -- FIRES (marginal, wider ob doesn't hurt)
-///   JSON_100KB   4.4% -- silent
-///   lcet10       2.8% -- silent
-///   alice29      0.7% -- silent
-///   Source_1MB   0.7% -- silent
-///   ptt5         0.0% -- silent
 const CEILING_UPPER_HALF_THRESHOLD: f64 = 0.20;
+
+// -- Rep-match tiebreaking ----------------------------------------------------
+
+/// Number of recent distinct offsets tracked by scan() for tiebreak preference.
+/// 3 matches zstd's rep-match slot count and covers the vast majority of
+/// reusable offsets without adding meaningful per-position overhead.
+const REP_SLOTS: usize = 3;
 
 const HASH_SIZE:              usize = 1 << 16;
 const HASH_MASK:              usize = HASH_SIZE - 1;
@@ -136,8 +138,68 @@ fn hash3(input: &[u8], pos: usize) -> usize {
     v & HASH_MASK
 }
 
+// -- Rep-match slot tracker ---------------------------------------------------
+
+/// Lightweight ring of the last REP_SLOTS distinct offsets emitted.
+/// Distinct only: pushing a value already at slot 0 is a no-op.
+/// Used exclusively by scan() for tiebreak preference -- does not affect
+/// the token type or format, only which offset value is chosen.
+struct RepSlots {
+    slots: [u32; REP_SLOTS],
+    len:   usize,
+}
+
+impl RepSlots {
+    #[inline]
+    fn new() -> Self {
+        Self { slots: [0u32; REP_SLOTS], len: 0 }
+    }
+
+    /// Push a new offset. If it matches slot 0 already, no-op.
+    /// Otherwise shift existing slots right and insert at slot 0.
+    #[inline]
+    fn push(&mut self, offset: u32) {
+        if self.len > 0 && self.slots[0] == offset { return; }
+        if REP_SLOTS > 2 { self.slots[2] = self.slots[1]; }
+        if REP_SLOTS > 1 { self.slots[1] = self.slots[0]; }
+        self.slots[0] = offset;
+        if self.len < REP_SLOTS { self.len += 1; }
+    }
+
+    /// Return the slice of currently valid slots (len <= REP_SLOTS).
+    #[inline]
+    fn valid(&self) -> &[u32] {
+        &self.slots[..self.len]
+    }
+}
+
+// -- Rep-match length probe ---------------------------------------------------
+
+/// Given a candidate offset that is a known recent-rep, check the actual match
+/// length at position i. Capped at max_len, bounded by input length.
+/// Returns 0 if the offset would reach before the start of input.
+#[inline]
+fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
+    let off = offset as usize;
+    if off == 0 || off > i { return 0; }
+    let j   = i - off;
+    let n   = input.len();
+    let mut len = 0;
+    while len < max_len && (i + len) < n && input[j + (len % off)] == input[i + len] {
+        len += 1;
+    }
+    len
+}
+
 // -- Core scanner -------------------------------------------------------------
 
+/// Full-quality production scan with rep-match tiebreaking.
+///
+/// After find_match returns (best_offset, best_len), scan() checks each
+/// recent-offset slot. If any slot offset achieves length >= best_len at the
+/// current position, it is preferred (equal-length rep beats non-rep; longer
+/// rep beats shorter non-rep when total bit cost is lower). The token emitted
+/// is still Token::Backref -- no opcode change.
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
@@ -147,15 +209,54 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     let n           = input.len();
     let window_size = max_off.min(n).max(1);
 
-    let mut head   = vec![u32::MAX; HASH_SIZE];
-    let mut prev   = vec![u32::MAX; window_size];
-    let mut tokens = Vec::with_capacity(n / 2 + 1);
-    let mut i      = 0;
+    let mut head     = vec![u32::MAX; HASH_SIZE];
+    let mut prev     = vec![u32::MAX; window_size];
+    let mut tokens   = Vec::with_capacity(n / 2 + 1);
+    let mut rep_slots = RepSlots::new();
+    let mut i        = 0;
 
     while i < n {
         let h = hash3(input, i);
-        let (best_offset, best_len) =
+        let (mut best_offset, mut best_len) =
             find_match(input, i, h, &head, &prev, max_off, max_len, window_size, chain_limit);
+
+        // -- Rep-match tiebreaking --------------------------------------------
+        // For each recent-offset slot: probe the match length at the current
+        // position. Prefer the rep-match if:
+        //   (a) equal length as current best (same coverage, cheaper offset), or
+        //   (b) one byte shorter but total bit cost is still lower.
+        //       Rep cost:    backref_bits (offset bits saved; length same)
+        //       Non-rep saves: one extra byte = LIT_TOTAL_BITS bits
+        //       Prefer rep if: saving from cheaper offset > LIT cost of lost byte.
+        //       At ob=17: saving = 17 bits, LIT = 10 bits -> rep wins up to 1 byte short.
+        //       At ob=12: saving = 12 bits, LIT = 10 bits -> rep wins up to 1 byte short.
+        //       At ob=8:  saving = 8 bits,  LIT = 10 bits -> rep does NOT win 1 byte short.
+        // The 1-byte-short case only fires when ob > LIT_TOTAL_BITS (10), i.e. ob >= 11.
+        let ob_beats_lit = offset_bits > LIT_TOTAL_BITS;
+
+        for &slot_off in rep_slots.valid() {
+            if slot_off as usize > max_off { continue; }
+            let rlen = rep_match_len(input, i, slot_off, max_len);
+            if rlen == 0 { continue; }
+
+            let prefer = if rlen >= best_len {
+                // Equal or longer: always prefer rep (same or better coverage, cheaper offset)
+                true
+            } else if ob_beats_lit && best_len > 0 && rlen == best_len.saturating_sub(1) {
+                // One byte shorter: prefer rep only when offset saving > LIT cost
+                // i.e. only when offset_bits > LIT_TOTAL_BITS
+                true
+            } else {
+                false
+            };
+
+            if prefer {
+                best_offset = slot_off as usize;
+                best_len    = rlen;
+                break; // slot 0 is most recent; stop at first qualifying hit
+            }
+        }
+        // -- End rep-match tiebreaking ----------------------------------------
 
         let backref_worthwhile = best_len >= 2
             && backref_bits < (best_len as u32 * LIT_TOTAL_BITS);
@@ -194,6 +295,7 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
                         head[hk] = (i + k) as u32;
                     }
                 }
+                rep_slots.push(best_offset as u32);
                 tokens.push(Token::Backref {
                     offset: best_offset as u32,
                     length: best_len as u32,
@@ -212,6 +314,8 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     tokens
 }
 
+/// Fast discovery scan -- used only to determine ob/lb range. Token stream
+/// is discarded by the caller. No rep-match tracking needed here.
 pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     let max_off     = max_offset(offset_bits).min(DISCOVER_MAX_PREV_SIZE);
     let max_len     = max_length(length_bits);
@@ -426,16 +530,13 @@ fn fingerprint_predict(data: &[u8]) -> Option<(u32, u32)> {
 /// Returns true when the Phase B scan window is insufficient and Phase C
 /// should run to find a better ob/lb.
 ///
-/// Two independent conditions — either fires Phase C:
+/// Two independent conditions -- either fires Phase C:
 ///
 /// Peak check: any single Backref has offset or length >= 90% of field max.
-///   Catches files where the window is genuinely too small and individual
-///   backrefs are bumping against the ceiling.
 ///
 /// Upper-half check: >= 20% of all Backrefs have offset in the upper half
 ///   of the current window. Catches files like WarAndPeace (25% upper-half)
-///   where the window is heavily used across its full depth but no single
-///   backref hits 90% -- a wider window would still improve ratio.
+///   where the window is heavily used but no single backref hits 90%.
 fn ceiling_saturated(tokens: &[Token], ob: u32, lb: u32) -> bool {
     let max_off  = max_offset(ob);
     let max_len  = max_length(lb);
@@ -448,7 +549,6 @@ fn ceiling_saturated(tokens: &[Token], ob: u32, lb: u32) -> bool {
 
     for t in tokens {
         if let Token::Backref { offset, length } = t {
-            // Peak check fires immediately
             if *offset >= ob_ceil || *length >= lb_ceil {
                 println!("  ceiling check: peak hit offset={} (ceil={}) or length={} (ceil={})",
                     offset, ob_ceil, length, lb_ceil);
@@ -459,19 +559,18 @@ fn ceiling_saturated(tokens: &[Token], ob: u32, lb: u32) -> bool {
         }
     }
 
-    // Upper-half distribution check
     if total_br > 0 {
         let upper_frac = upper_half as f64 / total_br as f64;
         if upper_frac >= CEILING_UPPER_HALF_THRESHOLD {
             println!(
-                "  ceiling check: upper-half saturated {:.1}% >= {:.0}% threshold — Phase C needed",
+                "  ceiling check: upper-half saturated {:.1}% >= {:.0}% threshold -- Phase C needed",
                 upper_frac * 100.0,
                 CEILING_UPPER_HALF_THRESHOLD * 100.0,
             );
             return true;
         }
         println!(
-            "  ceiling check: ok — upper-half {:.1}% < {:.0}% threshold",
+            "  ceiling check: ok -- upper-half {:.1}% < {:.0}% threshold",
             upper_frac * 100.0,
             CEILING_UPPER_HALF_THRESHOLD * 100.0,
         );
@@ -619,4 +718,4 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     };
 
     phase_c_from_baseline(baseline, wide_discovery, input)
-}
+        }

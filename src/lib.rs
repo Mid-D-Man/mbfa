@@ -134,6 +134,7 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                     None
                 };
 
+            // Variant pool: v1-v6 unchanged, v7 = prose-tuned 8-context split
             let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7]
                 .into_par_iter()
                 .map(|flag| {
@@ -163,6 +164,7 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                             Some((lt, st, ot)) => encode_v6_shared(&tokens, lt, st, ot),
                             None => None,
                         },
+                        // v7: prose-tuned 4-category × after_br context split
                         7 => if v2_ok { try_entropy_v7(&tokens) } else { None },
                         _ => None,
                     };
@@ -314,6 +316,8 @@ fn encode_v6_shared(
     entropy::write_tokens_v6(tokens, lit_table, seq_table, offset_table).ok()
 }
 
+/// v7: prose-tuned 4-category × after_br context split.
+/// Same structural payload as v3 — 8 lit tables + offset table + bitstream.
 fn try_entropy_v7(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     let (lit_tables, offset_table) = entropy::build_encode_tables_v7(tokens)?;
     let coded = entropy::write_tokens_v7(tokens, &lit_tables, &offset_table).ok()?;

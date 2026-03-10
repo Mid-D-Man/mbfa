@@ -130,6 +130,34 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
+        // v6: separate literal stream + sequence stream
+        6 => {
+            let payload = &input[payload_start..];
+            // Three tables: lit_table, seq_table, offset_table
+            let (lit_enc, lit_c) = entropy::deserialize_table(payload)
+                .map_err(|e| std::io::Error::new(e.kind(),
+                    format!("v6 unfold: lit_table failed: {}", e)))?;
+            let (seq_enc, seq_c) = entropy::deserialize_table(&payload[lit_c..])
+                .map_err(|e| std::io::Error::new(e.kind(),
+                    format!("v6 unfold: seq_table failed: {}", e)))?;
+            let (off_enc, off_c) = entropy::deserialize_table(&payload[lit_c + seq_c..])
+                .map_err(|e| std::io::Error::new(e.kind(),
+                    format!("v6 unfold: offset_table failed: {}", e)))?;
+            let lit_dt = entropy::decode_table_from_encode(&lit_enc);
+            let seq_dt = entropy::decode_table_from_encode(&seq_enc);
+            let off_dt = entropy::decode_table_from_encode(&off_enc);
+            // Everything after the three tables is [lit_count][lit_bitstream_len][lit_bs][seq_bs]
+            let tokens = entropy::read_tokens_v6(
+                &payload[lit_c + seq_c + off_c..],
+                &lit_dt,
+                &seq_dt,
+                &off_dt,
+            )?;
+            let rec = reconstruct(&tokens);
+            println!("Entropy v6 unfold: {} bytes", rec.len());
+            (rec, fold_count.saturating_sub(1))
+        }
+
         // 0 or unknown: no entropy, raw payload
         _ => {
             (input[payload_start..].to_vec(), fold_count)

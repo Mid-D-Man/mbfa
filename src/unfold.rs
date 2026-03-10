@@ -133,7 +133,6 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         // v6: separate literal stream + sequence stream
         6 => {
             let payload = &input[payload_start..];
-            // Three tables: lit_table, seq_table, offset_table
             let (lit_enc, lit_c) = entropy::deserialize_table(payload)
                 .map_err(|e| std::io::Error::new(e.kind(),
                     format!("v6 unfold: lit_table failed: {}", e)))?;
@@ -146,7 +145,6 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let lit_dt = entropy::decode_table_from_encode(&lit_enc);
             let seq_dt = entropy::decode_table_from_encode(&seq_enc);
             let off_dt = entropy::decode_table_from_encode(&off_enc);
-            // Everything after the three tables is [lit_count][lit_bitstream_len][lit_bs][seq_bs]
             let tokens = entropy::read_tokens_v6(
                 &payload[lit_c + seq_c + off_c..],
                 &lit_dt,
@@ -155,6 +153,33 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             )?;
             let rec = reconstruct(&tokens);
             println!("Entropy v6 unfold: {} bytes", rec.len());
+            (rec, fold_count.saturating_sub(1))
+        }
+
+        // v7: 8-context MSB lit/length + offset bucket
+        7 => {
+            let payload = &input[payload_start..];
+            let mut cursor = 0usize;
+            let mut lit_dtables: Vec<entropy::DecodeTable> = Vec::with_capacity(8);
+            for i in 0..8usize {
+                let (enc, consumed) = entropy::deserialize_table(&payload[cursor..])
+                    .map_err(|e| std::io::Error::new(e.kind(),
+                        format!("v7 unfold: lit table {} failed: {}", i, e)))?;
+                lit_dtables.push(entropy::decode_table_from_encode(&enc));
+                cursor += consumed;
+            }
+            let (off_enc, off_c) = entropy::deserialize_table(&payload[cursor..])
+                .map_err(|e| std::io::Error::new(e.kind(),
+                    format!("v7 unfold: offset table failed: {}", e)))?;
+            let off_dt = entropy::decode_table_from_encode(&off_enc);
+            cursor += off_c;
+            let arr: [entropy::DecodeTable; 8] = lit_dtables.try_into()
+                .map_err(|_| std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "v7 unfold: expected exactly 8 literal tables"))?;
+            let tokens = entropy::read_tokens_v7(&payload[cursor..], &arr, &off_dt)?;
+            let rec    = reconstruct(&tokens);
+            println!("Entropy v7 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
 

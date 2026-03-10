@@ -36,11 +36,28 @@
 //     input.len() <= PARALLEL_SCAN_THRESHOLD (1 MB).
 //
 //   Dynamic chain limit (full scan only):
-//   Cache-aware tiered cap:
-//     ob <= 16 (window <=  64KB, L2-warm)  -> 256
-//     ob 17-18 (window <= 256KB, L3-warm)  -> 512
-//     ob 19-20 (window <=   1MB, L3-tight) -> 256
-//     ob >= 21 (window >=   2MB, DRAM)     -> 128
+//   Cache-aware tiered cap (W7: flattened ob 17-18 tier from 512 to 256):
+//     ob <= 20 (window <=  1MB)  -> 256
+//     ob >= 21 (window >=  2MB)  -> 128
+//   The previous 512-depth tier at ob=17-18 caused greedy tokenisation
+//   divergence on large prose (WarAndPeace), where deeper chains found
+//   different match boundaries that propagated worse results downstream.
+//   LZ tokenisation quality is NOT monotone with chain depth.
+//
+//   Power-of-two prev array (W8):
+//   prev is sized to next_power_of_two(max_off.min(n)) rather than max_off.min(n).
+//   This ensures j & window_mask is a valid index, replacing j % window_size
+//   (a real integer division) in the chain traversal hot loop.
+//   The extra entry is always u32::MAX (uninitialized); find_match's
+//   i - j > max_off guard rejects any position at distance >= 1<<ob immediately.
+//
+//   Lazy hash updates in scan_discover (W8):
+//   When a match of length L is found during discovery, only position i is
+//   added to the hash table (not all L intermediate positions). Discovery tokens
+//   are discarded — we only need the maximum ob/lb values, not quality chains.
+//   Skipping the inner O(L) loop avoids catastrophic slowdown on files with
+//   very long matches (e.g. Source_1MB with lb=20, where a single match can
+//   span hundreds of KB and trigger hundreds of thousands of hash updates).
 //
 //   Ceiling saturation check (two conditions, either fires Phase C):
 //     Peak check:       any Backref offset or length >= 90% of field max.
@@ -84,19 +101,11 @@ const FINGERPRINT_SMALL_FILE_BYTES:   usize = 32768;
 
 // -- Ceiling saturation constants ---------------------------------------------
 
-/// Peak check: any single Backref offset or length at or above this fraction
-/// of field maximum is treated as saturated.
 const CEILING_SATURATION_THRESHOLD: f64 = 0.9;
-
-/// Upper-half check: if this fraction or more of all Backrefs have an offset
-/// in the upper half of the current window, treat as saturated and run Phase C.
 const CEILING_UPPER_HALF_THRESHOLD: f64 = 0.20;
 
 // -- Rep-match tiebreaking ----------------------------------------------------
 
-/// Number of recent distinct offsets tracked by scan() for tiebreak preference.
-/// 3 matches zstd's rep-match slot count and covers the vast majority of
-/// reusable offsets without adding meaningful per-position overhead.
 const REP_SLOTS: usize = 3;
 
 const HASH_SIZE:              usize = 1 << 16;
@@ -108,23 +117,43 @@ const PARALLEL_SCAN_THRESHOLD: usize = 1_048_576;
 // -- Discovery scan constants -------------------------------------------------
 
 const DISCOVER_CHAIN_LIMIT:   usize = 256;
-const DISCOVER_MAX_PREV_SIZE: usize = 2 * 1024 * 1024;
+const DISCOVER_MAX_PREV_SIZE: usize = 2 * 1024 * 1024;  // 2^21 bytes — also a power of two
 
 // -- Tiered chain limit -------------------------------------------------------
 
 /// Cache-aware tiered chain depth limit for full-quality scans.
 ///
-///   ob <= 16   window <=  64KB   prev <=   64KB   L2-resident  -> 256
-///   ob 17-18   window <= 256KB   prev <=  256KB   L3-resident  -> 512
-///   ob 19-20   window <=   1MB   prev <=    1MB   L3-tight     -> 256
-///   ob >= 21   window >=   2MB   prev >=    2MB   DRAM         -> 128
+/// W7: flattened from the previous four-tier layout to two tiers.
+/// The ob=17-18 tier previously used 512 which caused tokenisation divergence
+/// on large prose. 256 recovers quality while retaining the speed gains from W3.
+///
+///   ob <= 20   window <=   1MB   -> 256
+///   ob >= 21   window >=   2MB   -> 128
 pub fn compute_chain_limit(_input_len: usize, offset_bits: u32) -> usize {
     match offset_bits {
-        0..=16 => 256,
-        17..=18 => 512,
-        19..=20 => 256,
-        _ => 128,
+        0..=20 => 256,
+        _      => 128,
     }
+}
+
+// -- Window helpers -----------------------------------------------------------
+
+/// Returns (alloc_size, window_mask) for the prev circular buffer.
+///
+/// alloc_size = next_power_of_two(max_off.min(n).max(1))
+/// window_mask = alloc_size - 1
+///
+/// Because alloc_size is always a power of two, `j & window_mask` replaces
+/// `j % window_size` in the find_match hot loop — AND instead of division.
+///
+/// Correctness: the one extra entry (vs old max_off.min(n)) is initialised to
+/// u32::MAX. find_match guards `i - j > max_off` before using any chain entry,
+/// so the extra slot can never yield a false match.
+#[inline]
+fn window_alloc_and_mask(max_off_limit: usize, n: usize) -> (usize, usize) {
+    let raw  = max_off_limit.min(n).max(1);
+    let pow2 = raw.next_power_of_two();
+    (pow2, pow2 - 1)
 }
 
 // -- Hash ---------------------------------------------------------------------
@@ -140,10 +169,6 @@ fn hash3(input: &[u8], pos: usize) -> usize {
 
 // -- Rep-match slot tracker ---------------------------------------------------
 
-/// Lightweight ring of the last REP_SLOTS distinct offsets emitted.
-/// Distinct only: pushing a value already at slot 0 is a no-op.
-/// Used exclusively by scan() for tiebreak preference -- does not affect
-/// the token type or format, only which offset value is chosen.
 struct RepSlots {
     slots: [u32; REP_SLOTS],
     len:   usize,
@@ -155,8 +180,6 @@ impl RepSlots {
         Self { slots: [0u32; REP_SLOTS], len: 0 }
     }
 
-    /// Push a new offset. If it matches slot 0 already, no-op.
-    /// Otherwise shift existing slots right and insert at slot 0.
     #[inline]
     fn push(&mut self, offset: u32) {
         if self.len > 0 && self.slots[0] == offset { return; }
@@ -166,7 +189,6 @@ impl RepSlots {
         if self.len < REP_SLOTS { self.len += 1; }
     }
 
-    /// Return the slice of currently valid slots (len <= REP_SLOTS).
     #[inline]
     fn valid(&self) -> &[u32] {
         &self.slots[..self.len]
@@ -175,9 +197,6 @@ impl RepSlots {
 
 // -- Rep-match length probe ---------------------------------------------------
 
-/// Given a candidate offset that is a known recent-rep, check the actual match
-/// length at position i. Capped at max_len, bounded by input length.
-/// Returns 0 if the offset would reach before the start of input.
 #[inline]
 fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
     let off = offset as usize;
@@ -194,44 +213,27 @@ fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
 // -- Core scanner -------------------------------------------------------------
 
 /// Full-quality production scan with rep-match tiebreaking.
-///
-/// After find_match returns (best_offset, best_len), scan() checks each
-/// recent-offset slot. If any slot offset achieves length >= best_len at the
-/// current position, it is preferred (equal-length rep beats non-rep; longer
-/// rep beats shorter non-rep when total bit cost is lower). The token emitted
-/// is still Token::Backref -- no opcode change.
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
     let backref_bits = backref_total_bits(offset_bits, length_bits);
     let chain_limit  = compute_chain_limit(input.len(), offset_bits);
 
-    let n           = input.len();
-    let window_size = max_off.min(n).max(1);
+    let n = input.len();
+    let (window_size, window_mask) = window_alloc_and_mask(max_off, n);
 
-    let mut head     = vec![u32::MAX; HASH_SIZE];
-    let mut prev     = vec![u32::MAX; window_size];
-    let mut tokens   = Vec::with_capacity(n / 2 + 1);
+    let mut head      = vec![u32::MAX; HASH_SIZE];
+    let mut prev      = vec![u32::MAX; window_size];
+    let mut tokens    = Vec::with_capacity(n / 2 + 1);
     let mut rep_slots = RepSlots::new();
-    let mut i        = 0;
+    let mut i         = 0;
 
     while i < n {
         let h = hash3(input, i);
         let (mut best_offset, mut best_len) =
-            find_match(input, i, h, &head, &prev, max_off, max_len, window_size, chain_limit);
+            find_match(input, i, h, &head, &prev, max_off, max_len, window_mask, chain_limit);
 
         // -- Rep-match tiebreaking --------------------------------------------
-        // For each recent-offset slot: probe the match length at the current
-        // position. Prefer the rep-match if:
-        //   (a) equal length as current best (same coverage, cheaper offset), or
-        //   (b) one byte shorter but total bit cost is still lower.
-        //       Rep cost:    backref_bits (offset bits saved; length same)
-        //       Non-rep saves: one extra byte = LIT_TOTAL_BITS bits
-        //       Prefer rep if: saving from cheaper offset > LIT cost of lost byte.
-        //       At ob=17: saving = 17 bits, LIT = 10 bits -> rep wins up to 1 byte short.
-        //       At ob=12: saving = 12 bits, LIT = 10 bits -> rep wins up to 1 byte short.
-        //       At ob=8:  saving = 8 bits,  LIT = 10 bits -> rep does NOT win 1 byte short.
-        // The 1-byte-short case only fires when ob > LIT_TOTAL_BITS (10), i.e. ob >= 11.
         let ob_beats_lit = offset_bits > LIT_TOTAL_BITS;
 
         for &slot_off in rep_slots.valid() {
@@ -240,11 +242,8 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
             if rlen == 0 { continue; }
 
             let prefer = if rlen >= best_len {
-                // Equal or longer: always prefer rep (same or better coverage, cheaper offset)
                 true
             } else if ob_beats_lit && best_len > 0 && rlen == best_len.saturating_sub(1) {
-                // One byte shorter: prefer rep only when offset saving > LIT cost
-                // i.e. only when offset_bits > LIT_TOTAL_BITS
                 true
             } else {
                 false
@@ -253,7 +252,7 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
             if prefer {
                 best_offset = slot_off as usize;
                 best_len    = rlen;
-                break; // slot 0 is most recent; stop at first qualifying hit
+                break;
             }
         }
         // -- End rep-match tiebreaking ----------------------------------------
@@ -265,14 +264,14 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
             let lazy = if i + 1 < n {
                 let h1 = hash3(input, i + 1);
                 let (_, len1) = find_match(
-                    input, i + 1, h1, &head, &prev, max_off, max_len, window_size, chain_limit,
+                    input, i + 1, h1, &head, &prev, max_off, max_len, window_mask, chain_limit,
                 );
                 if len1 > best_len {
                     true
                 } else if best_len <= LAZY_SHORT_LEN && i + 2 < n {
                     let h2 = hash3(input, i + 2);
                     let (_, len2) = find_match(
-                        input, i + 2, h2, &head, &prev, max_off, max_len, window_size, chain_limit,
+                        input, i + 2, h2, &head, &prev, max_off, max_len, window_mask, chain_limit,
                     );
                     len2 > best_len + 2
                 } else {
@@ -283,7 +282,7 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
             };
 
             if lazy {
-                prev[i % window_size] = head[h];
+                prev[i & window_mask] = head[h];
                 head[h] = i as u32;
                 tokens.push(Token::Lit { byte: input[i] });
                 i += 1;
@@ -291,7 +290,7 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
                 for k in 0..best_len {
                     if i + k + 2 < n {
                         let hk = hash3(input, i + k);
-                        prev[(i + k) % window_size] = head[hk];
+                        prev[(i + k) & window_mask] = head[hk];
                         head[hk] = (i + k) as u32;
                     }
                 }
@@ -303,7 +302,7 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
                 i += best_len;
             }
         } else {
-            prev[i % window_size] = head[h];
+            prev[i & window_mask] = head[h];
             head[h] = i as u32;
             tokens.push(Token::Lit { byte: input[i] });
             i += 1;
@@ -314,13 +313,22 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     tokens
 }
 
-/// Fast discovery scan -- used only to determine ob/lb range. Token stream
-/// is discarded by the caller. No rep-match tracking needed here.
+/// Fast discovery scan — used only to determine ob/lb range. Token stream
+/// is discarded by the caller.
+///
+/// Differences from scan():
+/// - Single hash update per matched span (not the full O(L) inner loop).
+///   Since tokens are discarded we only need max ob/lb, not quality chains.
+///   The inner loop is the dominant cost on highly-compressible files where
+///   single matches can span hundreds of KB (e.g. Source_1MB with lb=20).
+/// - No rep-match tracking needed — tokens discarded.
+/// - No lazy matching.
 pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
-    let max_off     = max_offset(offset_bits).min(DISCOVER_MAX_PREV_SIZE);
-    let max_len     = max_length(length_bits);
-    let n           = input.len();
-    let window_size = max_off.min(n).max(1);
+    let max_off = max_offset(offset_bits).min(DISCOVER_MAX_PREV_SIZE);
+    let max_len = max_length(length_bits);
+    let n       = input.len();
+
+    let (window_size, window_mask) = window_alloc_and_mask(max_off, n);
 
     let mut head   = vec![u32::MAX; HASH_SIZE];
     let mut prev   = vec![u32::MAX; window_size];
@@ -331,25 +339,24 @@ pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<To
         let h = hash3(input, i);
         let (best_offset, best_len) = find_match(
             input, i, h, &head, &prev,
-            max_off, max_len, window_size,
+            max_off, max_len, window_mask,
             DISCOVER_CHAIN_LIMIT,
         );
 
         if best_len >= 2 {
-            for k in 0..best_len {
-                if i + k + 2 < n {
-                    let hk = hash3(input, i + k);
-                    prev[(i + k) % window_size] = head[hk];
-                    head[hk] = (i + k) as u32;
-                }
-            }
+            // Update current position only — skip intermediate positions i+1..i+best_len.
+            // We need max ob/lb values, not dense chains. Skipping the O(best_len) inner
+            // loop avoids catastrophic slowdown when best_len is very large (e.g. lb=20
+            // on Source_1MB where a single match can be hundreds of KB long).
+            prev[i & window_mask] = head[h];
+            head[h] = i as u32;
             tokens.push(Token::Backref {
                 offset: best_offset as u32,
                 length: best_len as u32,
             });
             i += best_len;
         } else {
-            prev[i % window_size] = head[h];
+            prev[i & window_mask] = head[h];
             head[h] = i as u32;
             tokens.push(Token::Lit { byte: input[i] });
             i += 1;
@@ -368,7 +375,7 @@ fn find_match(
     prev:        &[u32],
     max_off:     usize,
     max_len:     usize,
-    window_size: usize,
+    window_mask: usize,   // AND mask — prev has next_power_of_two(max_off) entries
     chain_limit: usize,
 ) -> (usize, usize) {
     let n = input.len();
@@ -396,7 +403,7 @@ fn find_match(
             if best_len == max_len { break; }
         }
 
-        cur   = prev[j % window_size];
+        cur   = prev[j & window_mask];
         steps += 1;
     }
 
@@ -527,16 +534,6 @@ fn fingerprint_predict(data: &[u8]) -> Option<(u32, u32)> {
     Some((BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS))
 }
 
-/// Returns true when the Phase B scan window is insufficient and Phase C
-/// should run to find a better ob/lb.
-///
-/// Two independent conditions -- either fires Phase C:
-///
-/// Peak check: any single Backref has offset or length >= 90% of field max.
-///
-/// Upper-half check: >= 20% of all Backrefs have offset in the upper half
-///   of the current window. Catches files like WarAndPeace (25% upper-half)
-///   where the window is heavily used but no single backref hits 90%.
 fn ceiling_saturated(tokens: &[Token], ob: u32, lb: u32) -> bool {
     let max_off  = max_offset(ob);
     let max_len  = max_length(lb);
@@ -718,4 +715,4 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     };
 
     phase_c_from_baseline(baseline, wide_discovery, input)
-        }
+}

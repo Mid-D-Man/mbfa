@@ -1,0 +1,25 @@
+Original size: 25154240 bits (3144280 bytes)
+  fingerprint: entropy=4.14 size=3144280
+  fingerprint Rule 3: default -> ob=17 lb=8
+  Phase B scan: ob=17 lb=8 chain_limit=64 raw_cost=2115562
+  ceiling check: peak hit offset=120253 (ceil=117963) or length=3 (ceil=229)
+  ceiling check: saturated -> falling through to Phase C
+  chain_limit (baseline ob=17): 64  raw_cost=2115562
+  discovery (capped 2MB/chain=256): discovered ob=21 lb=8
+  chain_limit (constrained ob=21): 128  raw_cost=2033402
+  entropy tiebreaker: constrained est=1579984b vs baseline est=1633928b -> constrained wins
+  constrained wins: ob=21 lb=8 raw_cost=2033402 vs baseline raw_cost=2115562
+Window diagnostics: 55368/92604 tokens BACKREF (59.8%) | offset: 0.0% at max (2097151) | 8.7% upper half | length: 0.0% at max (255) | offset_bits=21 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=21 (window=2097151 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 2033408 bits (254176 bytes)
+Fold 2 pairing pre-scan: Cantor fallback rate = 99.9% (threshold 77%)
+Fold 2 pairing skipped — high fallback rate
+  chain_limit (baseline ob=17): 512  raw_cost=2320188
+  discovery (capped 2MB/chain=256): discovered ob=18 lb=8
+  chain_limit (constrained ob=18): 512  raw_cost=2340043
+  entropy tiebreaker: constrained est=1837391b vs baseline est=1832803b -> baseline wins
+  baseline wins: ob=17 lb=8 raw_cost=2320188 vs constrained raw_cost=2340043
+Fold 2 (LZ): 2320192 bits (290024 bytes)
+Fold 2 not worth it (ratio 1.141), stopping at fold 1
+Joint entropy flag=5: 254176 → 194060 B
+Done. 3144280 bytes → 194066 bytes

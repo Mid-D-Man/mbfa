@@ -9,6 +9,7 @@
 //   v4  entropy_flag=4  v1 + recent-offset slot reuse
 //   v5  entropy_flag=5  v2 + recent-offset slot reuse
 //   v6  entropy_flag=6  separate literal stream + sequence stream Huffman
+//   v7  entropy_flag=7  8-context MSB lit/length Huffman + offset bucket Huffman
 //
 // v6 architecture (zstd-style literal separation):
 //   Literal bytes are extracted from the token stream, Huffman-coded as a
@@ -28,15 +29,18 @@
 //     [lit_bitstream]
 //     [seq_bitstream]
 //
+// v7 architecture (MSB context split):
+//   8 lit/length tables indexed by (prev_byte >> 5). No after_br flag.
+//   For ASCII prose this naturally separates word-initial, post-capital,
+//   word-continuation, and high-byte contexts without heuristics.
+//   Same payload layout as v3: 8 lit tables + 1 offset table + bitstream.
+//
 // Core algorithm (fold/unfold/LZ/pairing) is untouched by this module.
 //
 // Frequency counting uses fixed arrays instead of HashMap:
-//   - Lit/length channel: vec![0u64; 65536] — covers all syms when entropy is safe
-//     (literals 0-255, SYM_END=256, length syms 257-65535 via 255+length)
-//   - Offset bucket channel: [u64; 64] — max bucket=47 for ob=24
-//   - Slot channel: [u64; NUM_SLOTS] — 8 slots, combined with bucket array
-// These are converted to HashMap<u32,u64> (non-zero entries only) before
-// passing to assign_code_lengths, which is unchanged.
+//   - Lit/length channel: vec![0u64; 65536]
+//   - Offset bucket channel: [u64; 64]
+//   - Slot channel: [u64; NUM_SLOTS]
 
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
@@ -50,21 +54,10 @@ const SYM_END: u32 = 256;
 #[inline] fn sym_from_length(len: u32) -> u32 { 255 + len }
 #[inline] fn length_from_sym(sym: u32)  -> u32 { sym - 255 }
 
-/// In the v6 sequence stream, this symbol means "consume the next byte from
-/// the literal buffer". Byte values 0-255 do NOT appear in the v6 seq stream.
-/// Range 1-255 is therefore unused in the seq table; fmt0_explicit is chosen
-/// by serialize_table for this sparse alphabet.
 const SYM_V6_LIT: u32 = 0;
 
-/// Size of the lit/length frequency array.
-/// Covers: 0-255 literals, 256 END, 257-65535 length syms (255 + length).
-/// Only populated when tokens_safe_for_entropy passes (all lengths ≤ 65280),
-/// so max sym = 255 + 65280 = 65535 which fits exactly.
 const LIT_LEN_FREQ_SIZE: usize = 65536;
-
-/// Size of the offset bucket frequency array.
-/// Max bucket for ob=24: offset=2^24-1 → extra_bits=22 → bucket=47. 64 gives safe margin.
-const BUCKET_FREQ_SIZE: usize = 64;
+const BUCKET_FREQ_SIZE:  usize = 64;
 
 pub type EncodeTable = HashMap<u32, (u32, u32)>;
 pub type DecodeTable = HashMap<(u32, u32), u32>;
@@ -135,14 +128,7 @@ pub fn bucket_extra_bits(bucket: u32) -> u32 {
 }
 
 // ── Frequency counting — fixed array implementations ─────────────────────────
-//
-// All functions build frequency tables using direct-indexed arrays instead of
-// HashMap. Array writes are O(1) with no hashing overhead. After counting, only
-// non-zero entries are collected into a HashMap<u32, u64> for assign_code_lengths.
-// This is strictly faster than HashMap for large token streams.
 
-/// Build a HashMap from a lit/length frequency array (non-zero entries only).
-/// Ensures SYM_END always has at least count 1 (Huffman tree requires END symbol).
 #[inline]
 fn lit_len_array_to_map(freq: &[u64]) -> HashMap<u32, u64> {
     let mut map: HashMap<u32, u64> = freq.iter()
@@ -154,7 +140,6 @@ fn lit_len_array_to_map(freq: &[u64]) -> HashMap<u32, u64> {
     map
 }
 
-/// Build a HashMap from a bucket frequency array (non-zero entries only).
 #[inline]
 fn bucket_array_to_map(freq: &[u64; BUCKET_FREQ_SIZE]) -> HashMap<u32, u64> {
     freq.iter()
@@ -164,8 +149,6 @@ fn bucket_array_to_map(freq: &[u64; BUCKET_FREQ_SIZE]) -> HashMap<u32, u64> {
         .collect()
 }
 
-/// Joint lit/length frequency counting — vec![0u64; 65536] indexed by symbol.
-/// SYM_END guaranteed present with count >= 1 in returned map.
 fn count_joint_freq(tokens: &[Token]) -> HashMap<u32, u64> {
     let mut freq = vec![0u64; LIT_LEN_FREQ_SIZE];
     for t in tokens {
@@ -178,21 +161,17 @@ fn count_joint_freq(tokens: &[Token]) -> HashMap<u32, u64> {
     lit_len_array_to_map(&freq)
 }
 
-/// Offset bucket frequency counting — [u64; 64] indexed by bucket.
 pub fn count_offset_bucket_freq(tokens: &[Token]) -> HashMap<u32, u64> {
     let mut freq = [0u64; BUCKET_FREQ_SIZE];
     for t in tokens {
         if let Token::Backref { offset, .. } = t {
             let (bucket, _, _) = offset_to_bucket(*offset);
-            // bucket <= 47 for ob <= 24, always within [u64; 64]
             freq[bucket as usize] += 1;
         }
     }
     bucket_array_to_map(&freq)
 }
 
-/// Slotted offset frequency counting — buckets [u64; 64] + slots [u64; NUM_SLOTS].
-/// Slot symbols are combined into the returned HashMap as SLOT_SYMBOL_BASE + idx.
 pub fn count_offset_bucket_freq_slotted(tokens: &[Token]) -> HashMap<u32, u64> {
     let mut bucket_freq = [0u64; BUCKET_FREQ_SIZE];
     let mut slot_freq   = [0u64; NUM_SLOTS];
@@ -218,10 +197,6 @@ pub fn count_offset_bucket_freq_slotted(tokens: &[Token]) -> HashMap<u32, u64> {
     map
 }
 
-/// 2-context lit/length frequency counting.
-/// context 0: position after literal or at stream start
-/// context 1: position after backref
-/// Both vecs are vec![0u64; 65536]. SYM_END ensured in freq0.
 fn count_joint_freq_by_context(tokens: &[Token]) -> (HashMap<u32, u64>, HashMap<u32, u64>) {
     let mut freq0 = vec![0u64; LIT_LEN_FREQ_SIZE];
     let mut freq1 = vec![0u64; LIT_LEN_FREQ_SIZE];
@@ -376,11 +351,7 @@ pub fn context_idx(after_br: bool, prev_byte: u8) -> usize {
     (after_br as usize) * 4 + byte_category(prev_byte)
 }
 
-/// 8-context lit/length frequency counting.
-/// Each context gets its own vec![0u64; 65536]. Total heap: 8 × 512KB = 4MB.
-/// Only allocated when v3 entropy is being attempted on a large enough stream.
 fn count_joint_freq_v3(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32, u64>) {
-    // 8 independent lit/length frequency vecs
     let mut lit_freqs: [Vec<u64>; 8] = std::array::from_fn(|_| vec![0u64; LIT_LEN_FREQ_SIZE]);
     let mut bucket_freq = [0u64; BUCKET_FREQ_SIZE];
 
@@ -1108,23 +1079,6 @@ pub fn read_tokens_v5(
 }
 
 // ── v6: separate literal stream + sequence stream Huffman ─────────────────────
-//
-// The literal bytes are extracted from the token stream and Huffman-coded
-// independently using a byte-only table (alphabet 0-255). The sequence stream
-// uses SYM_V6_LIT (=0) as a single marker in place of each literal's inline
-// byte value. The sequence table covers only {SYM_V6_LIT, SYM_END, length_syms}
-// — no byte values — so length frequency mass is undiluted and length symbols
-// get shorter codes. The separation benefit is largest on prose, where:
-//   • ~70% of tokens may be literals with very skewed byte distribution
-//   • In v1-v5 the joint table has ~300 active symbols diluting that skew
-//   • In v6 the lit table has ~80 active symbols, much tighter codes
-//
-// Build: build_v6_tables returns None if the token stream has no LIT tokens
-// (all-BACKREF streams are handled fine by v1/v4 without separation).
-//
-// Safety: same tokens_safe_for_entropy constraint applies — length symbols are
-// still encoded as 255 + length in the seq table, so max sym = 65535 fits u16
-// exactly when length <= 65280 = ENTROPY_SAFE_MAX_LENGTH.
 
 pub fn build_v6_tables(tokens: &[Token]) -> Option<(EncodeTable, EncodeTable, EncodeTable)> {
     let mut lit_freq    = vec![0u64; 256];
@@ -1153,7 +1107,6 @@ pub fn build_v6_tables(tokens: &[Token]) -> Option<(EncodeTable, EncodeTable, En
 
     if !has_lits { return None; }
 
-    // SYM_END must always be present so the decoder can terminate.
     seq_freq.entry(SYM_END).or_insert(1);
 
     let lit_freq_map: HashMap<u32, u64> = lit_freq.iter()
@@ -1174,23 +1127,12 @@ pub fn build_v6_tables(tokens: &[Token]) -> Option<(EncodeTable, EncodeTable, En
     Some((lit_table, seq_table, offset_table))
 }
 
-/// Encode tokens as v6: separate literal bitstream + sequence bitstream.
-///
-/// Output payload layout:
-///   [lit_table serialized]
-///   [seq_table serialized]
-///   [offset_table serialized]
-///   [lit_count:          u32 LE]  — number of literal symbols in lit_bitstream
-///   [lit_bitstream_len:  u32 LE]  — byte length of the literal bitstream
-///   [lit_bitstream bytes]
-///   [seq_bitstream bytes]
 pub fn write_tokens_v6(
     tokens:       &[Token],
     lit_table:    &EncodeTable,
     seq_table:    &EncodeTable,
     offset_table: &EncodeTable,
 ) -> std::io::Result<Vec<u8>> {
-    // ── Pass 1: Huffman-encode all literal bytes into their own bitstream ─────
     let mut lit_output: Vec<u8> = Vec::new();
     let mut lit_count: u32      = 0;
     {
@@ -1210,7 +1152,6 @@ pub fn write_tokens_v6(
         w.byte_align()?;
     }
 
-    // ── Pass 2: encode sequence stream — LIT tokens become SYM_V6_LIT ────────
     let mut seq_output: Vec<u8> = Vec::new();
     {
         let mut w = BitWriter::endian(&mut seq_output, BigEndian);
@@ -1258,7 +1199,6 @@ pub fn write_tokens_v6(
         w.byte_align()?;
     }
 
-    // ── Pack payload ──────────────────────────────────────────────────────────
     let mut payload = serialize_table(lit_table);
     payload.extend_from_slice(&serialize_table(seq_table));
     payload.extend_from_slice(&serialize_table(offset_table));
@@ -1269,21 +1209,12 @@ pub fn write_tokens_v6(
     Ok(payload)
 }
 
-/// Decode a v6 payload back into a Token stream.
-///
-/// Reads the three serialized tables, then the 8-byte (lit_count, lit_bitstream_len)
-/// header, decodes exactly lit_count bytes from the literal bitstream, then
-/// walks the sequence bitstream — consuming a literal byte on SYM_V6_LIT,
-/// decoding a BACKREF on a length symbol, and terminating on SYM_END.
 pub fn read_tokens_v6(
     input:         &[u8],
     lit_dtable:    &DecodeTable,
     seq_dtable:    &DecodeTable,
     offset_dtable: &DecodeTable,
 ) -> std::io::Result<Vec<Token>> {
-    // The caller already stripped the three serialized tables from the front.
-    // `input` here is everything after the three tables:
-    //   [lit_count: u32 LE][lit_bitstream_len: u32 LE][lit_bitstream][seq_bitstream]
     if input.len() < 8 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
@@ -1291,7 +1222,7 @@ pub fn read_tokens_v6(
         ));
     }
 
-    let lit_count        = u32::from_le_bytes(input[0..4].try_into().unwrap()) as usize;
+    let lit_count         = u32::from_le_bytes(input[0..4].try_into().unwrap()) as usize;
     let lit_bitstream_len = u32::from_le_bytes(input[4..8].try_into().unwrap()) as usize;
 
     if input.len() < 8 + lit_bitstream_len {
@@ -1312,7 +1243,6 @@ pub fn read_tokens_v6(
     let seq_max    = seq_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
     let offset_max = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
 
-    // ── Decode exactly lit_count literal bytes ────────────────────────────────
     let mut lit_bytes: Vec<u8> = Vec::with_capacity(lit_count);
     {
         let mut r = BitReader::endian(std::io::Cursor::new(lit_bitstream), BigEndian);
@@ -1333,7 +1263,6 @@ pub fn read_tokens_v6(
         }
     }
 
-    // ── Decode sequence stream ────────────────────────────────────────────────
     let mut tokens  = Vec::new();
     let mut lit_idx = 0usize;
     let mut r = BitReader::endian(std::io::Cursor::new(seq_bitstream), BigEndian);
@@ -1360,7 +1289,6 @@ pub fn read_tokens_v6(
             tokens.push(Token::End);
             break;
         } else {
-            // length symbol
             let length = length_from_sym(sym);
             let bucket = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
             let extra_cnt = bucket_extra_bits(bucket);
@@ -1370,6 +1298,182 @@ pub fn read_tokens_v6(
         }
     }
 
+    Ok(tokens)
+}
+
+// ── v7: 8-context MSB lit/length Huffman + offset bucket Huffman ──────────────
+//
+// Context is derived purely from the previous byte's top 3 bits:
+//   ctx = prev_byte >> 5  →  8 contexts (0x00-0x1F, 0x20-0x3F, ..., 0xE0-0xFF)
+//
+// For ASCII prose this naturally separates:
+//   ctx 1 (0x20-0x3F): after space/punct  → word-initial character distribution
+//   ctx 2 (0x40-0x5F): after uppercase    → post-capital distribution
+//   ctx 3 (0x60-0x7F): after lowercase    → word-continuation distribution
+//
+// No after_br flag — the MSB split is the sole context signal. This keeps
+// the table count at 8 (same as v3) while using a data-driven split rather
+// than the heuristic byte_category grouping used by v3.
+//
+// On BACKREF tokens prev_byte is left unchanged — we hold the context at the
+// byte that preceded the backref rather than guessing the last byte of the
+// referenced span.
+
+fn count_joint_freq_v7(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32, u64>) {
+    let mut lit_freqs: [Vec<u64>; 8] = std::array::from_fn(|_| vec![0u64; LIT_LEN_FREQ_SIZE]);
+    let mut bucket_freq = [0u64; BUCKET_FREQ_SIZE];
+
+    let mut prev_byte: u8 = b' '; // start in ctx 1 (space/punct context)
+
+    for t in tokens {
+        let ctx = (prev_byte >> 5) as usize;
+        match t {
+            Token::Lit { byte } => {
+                lit_freqs[ctx][*byte as usize] += 1;
+                prev_byte = *byte;
+            }
+            Token::Backref { offset, length } => {
+                lit_freqs[ctx][(255 + length) as usize] += 1;
+                let (bucket, _, _) = offset_to_bucket(*offset);
+                bucket_freq[bucket as usize] += 1;
+                // prev_byte intentionally unchanged
+            }
+            Token::End => {
+                lit_freqs[ctx][SYM_END as usize] += 1;
+            }
+        }
+    }
+
+    let lit_maps: [HashMap<u32, u64>; 8] = std::array::from_fn(|i| {
+        lit_len_array_to_map(&lit_freqs[i])
+    });
+
+    (lit_maps, bucket_array_to_map(&bucket_freq))
+}
+
+pub fn build_encode_tables_v7(tokens: &[Token]) -> Option<([EncodeTable; 8], EncodeTable)> {
+    let (lit_freqs, offset_freq) = count_joint_freq_v7(tokens);
+    let has_lits = lit_freqs.iter().any(|f| !f.is_empty());
+    if !has_lits { return None; }
+
+    let lit_tables: [EncodeTable; 8] = std::array::from_fn(|i| {
+        if lit_freqs[i].is_empty() {
+            EncodeTable::new()
+        } else {
+            canonical_codes_from_lengths(&assign_code_lengths(&lit_freqs[i]))
+        }
+    });
+
+    let offset_table = if offset_freq.is_empty() {
+        EncodeTable::new()
+    } else {
+        canonical_codes_from_lengths(&assign_code_lengths(&offset_freq))
+    };
+
+    Some((lit_tables, offset_table))
+}
+
+pub fn write_tokens_v7(
+    tokens:       &[Token],
+    tables:       &[EncodeTable],
+    offset_table: &EncodeTable,
+) -> std::io::Result<Vec<u8>> {
+    assert!(tables.len() == 8, "v7 requires exactly 8 literal tables");
+    let mut output = Vec::new();
+    {
+        let mut w         = BitWriter::endian(&mut output, BigEndian);
+        let mut prev_byte: u8 = b' ';
+
+        for token in tokens {
+            let ctx   = (prev_byte >> 5) as usize;
+            let table = &tables[ctx];
+
+            match token {
+                Token::Lit { byte } => {
+                    let &(code, len) = table.get(&(*byte as u32)).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v7 lit byte {} missing in ctx {}", byte, ctx))
+                    })?;
+                    w.write(len, code)?;
+                    prev_byte = *byte;
+                }
+                Token::Backref { offset, length } => {
+                    let sym = sym_from_length(*length);
+                    let &(code, len) = table.get(&sym).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v7 length sym {} missing in ctx {}", sym, ctx))
+                    })?;
+                    w.write(len, code)?;
+
+                    if !offset_table.is_empty() {
+                        let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
+                        let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData,
+                                format!("v7 offset bucket {} missing", bucket))
+                        })?;
+                        w.write(blen, bcode)?;
+                        if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
+                    }
+                    // prev_byte intentionally unchanged on BACKREF
+                }
+                Token::End => {
+                    let &(code, len) = table.get(&SYM_END).ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v7 END sym missing in ctx {}", ctx))
+                    })?;
+                    w.write(len, code)?;
+                }
+            }
+        }
+        w.byte_align()?;
+    }
+    Ok(output)
+}
+
+pub fn read_tokens_v7(
+    input:         &[u8],
+    dtables:       &[DecodeTable],
+    offset_dtable: &DecodeTable,
+) -> std::io::Result<Vec<Token>> {
+    assert!(dtables.len() == 8, "v7 requires exactly 8 decode tables");
+
+    let max_lens: [u32; 8] = std::array::from_fn(|i| {
+        dtables[i].keys().map(|&(_, l)| l).max().unwrap_or(1)
+    });
+    let offset_max = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
+
+    let mut tokens    = Vec::new();
+    let mut r         = BitReader::endian(std::io::Cursor::new(input), BigEndian);
+    let mut prev_byte: u8 = b' ';
+
+    loop {
+        let ctx = (prev_byte >> 5) as usize;
+        let sym = match read_huffman_sym(&mut r, &dtables[ctx], max_lens[ctx]) {
+            Ok(s)  => s,
+            Err(_) => break,
+        };
+
+        if sym < 256 {
+            let byte = sym as u8;
+            tokens.push(Token::Lit { byte });
+            prev_byte = byte;
+        } else if sym == SYM_END {
+            tokens.push(Token::End);
+            break;
+        } else {
+            let length = length_from_sym(sym);
+            let offset = if offset_dtable.is_empty() {
+                1
+            } else {
+                let bucket    = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
+                let extra_cnt = bucket_extra_bits(bucket);
+                let extra_val = if extra_cnt > 0 { r.read::<u32>(extra_cnt)? } else { 0 };
+                bucket_to_offset(bucket, extra_val)
+            };
+            tokens.push(Token::Backref { offset, length });
+            // prev_byte intentionally unchanged on BACKREF
+        }
+    }
     Ok(tokens)
 }
 
@@ -1390,4 +1494,4 @@ fn read_huffman_sym<R: std::io::Read>(
         std::io::ErrorKind::InvalidData,
         format!("invalid huffman symbol after {} bits", max_len),
     ))
-                          }
+    }

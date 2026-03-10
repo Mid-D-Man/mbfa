@@ -73,7 +73,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
-        // v3: 8-context lit/length + offset bucket
+        // v3: 8-context heuristic category lit/length + offset bucket
         3 => {
             let payload = &input[payload_start..];
             let mut cursor = 0usize;
@@ -156,7 +156,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
-        // v7: 8-context MSB lit/length + offset bucket
+        // v7: 8-context prose-tuned category split (whitespace/upper/vowel/other × after_br)
         7 => {
             let payload = &input[payload_start..];
             let mut cursor = 0usize;

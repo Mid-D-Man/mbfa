@@ -7,15 +7,20 @@
 //
 //   Phase A/B -- fingerprint + single scan (LARGE FILES ONLY, > 1 MB):
 //     Phase A fingerprint_predict classifies the input and predicts (ob, lb).
-//     Phase B runs one full-quality scan at the predicted parameters, then
+//     Phase B runs one full-quality LZ scan at the predicted parameters, then
 //     checks two conditions before deciding whether to run Phase C:
-//       1. Early exit: if Phase B ratio < PHASE_B_EARLY_EXIT_RATIO (15%),
+//       1. Ceiling check: if the window was NOT saturated, check early exit.
+//       2. Early exit: if Phase B ratio < PHASE_B_EARLY_EXIT_RATIO (15%),
 //          the data is already highly compressible at baseline and Phase C
 //          gain is negligible (measured: 0.33pp on JSON_2MB at 8.41% Phase B
-//          ratio). Skip ceiling check and Phase C entirely — 1 scan total.
-//       2. Ceiling check: if Phase B ratio >= threshold, check whether the
-//          window was sufficient. Not saturated -> return (1 scan total).
-//          Saturated -> fall through to Phase C.
+//          ratio). Only fires AFTER ceiling check confirms no saturation.
+//
+//     ORDERING IS CRITICAL:
+//       Ceiling check MUST run before early exit. If early exit ran first,
+//       highly-repetitive large files (Repetitive_2MB, lb=99.9% saturated)
+//       would bypass Phase C and produce incorrect results. The ceiling check
+//       catches saturation first; early exit only fires in the not-saturated
+//       branch where it is safe.
 //
 //     Phase A/B is skipped entirely for files <= PARALLEL_SCAN_THRESHOLD (1 MB).
 //     On small/medium files rayon::join(baseline, discovery) is already optimal.
@@ -110,6 +115,10 @@ const ENTROPY_TIE_THRESHOLD:      f64   = 0.05;
 //
 // 15% chosen to provide comfortable margin above JSON_2MB (8.41%) while
 // leaving all prose/binary files that genuinely need Phase C untouched.
+//
+// IMPORTANT: this check ONLY fires inside the ceiling-not-saturated branch.
+// If it ran before the ceiling check, highly-repetitive files with 99.9%
+// length saturation would bypass Phase C entirely and produce wrong results.
 const PHASE_B_EARLY_EXIT_RATIO: f64 = 0.15;
 
 // -- Fingerprint constants ----------------------------------------------------
@@ -665,23 +674,6 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
                 let tokens = scan(input, pred_ob, pred_lb);
                 let result = ScanResult::new(tokens, pred_ob, pred_lb, "phase_b");
 
-                // ── Phase B early exit ────────────────────────────────────────
-                // If Phase B already achieves highly compressible output, skip
-                // the ceiling check and Phase C entirely. Measured on JSON_2MB:
-                // phase_b_ratio=8.41%, Phase C gain=0.33pp at cost of a full
-                // extra scan on 3.1MB. Threshold of 15% has comfortable margin.
-                let phase_b_ratio = result.raw_cost as f64
-                    / (input.len() as f64 * 8.0);
-                if phase_b_ratio < PHASE_B_EARLY_EXIT_RATIO {
-                    println!(
-                        "  Phase B early exit: ratio={:.4}% < {:.0}% threshold -- skipping Phase C",
-                        phase_b_ratio * 100.0,
-                        PHASE_B_EARLY_EXIT_RATIO * 100.0,
-                    );
-                    return (result.tokens, result.ob, result.lb);
-                }
-                // ── End Phase B early exit ────────────────────────────────────
-
                 println!(
                     "  Phase B scan: ob={} lb={} chain_limit={} raw_cost={}",
                     pred_ob, pred_lb,
@@ -689,17 +681,44 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
                     result.raw_cost,
                 );
 
-                if !ceiling_saturated(&result.tokens, pred_ob, pred_lb) {
-                    println!("  ceiling check: ok -- Phase B wins (1 scan total)");
-                    return (result.tokens, result.ob, result.lb);
-                }
+                // ── Ceiling check FIRST ───────────────────────────────────────
+                // Must run before early exit. If ceiling fires (e.g. Repetitive_2MB
+                // with 99.9% length saturation), we MUST go to Phase C regardless
+                // of how low the Phase B ratio is. Early exit is only safe once we
+                // know the window was not saturated.
+                if ceiling_saturated(&result.tokens, pred_ob, pred_lb) {
+                    println!("  ceiling check: saturated -> falling through to Phase C");
 
-                println!("  ceiling check: saturated -> falling through to Phase C");
-
-                if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
-                    let baseline  = ScanResult { label: "baseline", ..result };
-                    let discovery = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
-                    return phase_c_from_baseline(baseline, discovery, input);
+                    if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
+                        let baseline  = ScanResult { label: "baseline", ..result };
+                        let discovery = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
+                        return phase_c_from_baseline(baseline, discovery, input);
+                    }
+                    // pred params differ from baseline (Rule 2 small-file path, not
+                    // reached in practice for >1MB files) — fall through to parallel
+                    // Phase C below.
+                } else {
+                    // ── Ceiling not saturated: safe to check early exit ───────
+                    let phase_b_ratio = result.raw_cost as f64
+                        / (input.len() as f64 * 8.0);
+                    if phase_b_ratio < PHASE_B_EARLY_EXIT_RATIO {
+                        println!(
+                            "  Phase B early exit: ratio={:.4}% < {:.0}% threshold \
+                             -- ceiling clear, skipping Phase C",
+                            phase_b_ratio * 100.0,
+                            PHASE_B_EARLY_EXIT_RATIO * 100.0,
+                        );
+                        return (result.tokens, result.ob, result.lb);
+                    }
+                    println!("  ceiling check: ok -- Phase B ratio {:.4}% above early-exit threshold, Phase C needed",
+                        phase_b_ratio * 100.0);
+                    // Not saturated but ratio above threshold — still run Phase C
+                    // for potential gain (prose files, source, etc.)
+                    if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
+                        let baseline  = ScanResult { label: "baseline", ..result };
+                        let discovery = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
+                        return phase_c_from_baseline(baseline, discovery, input);
+                    }
                 }
             }
         }
@@ -724,4 +743,4 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     };
 
     phase_c_from_baseline(baseline, wide_discovery, input)
-}
+        }

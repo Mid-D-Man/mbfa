@@ -26,7 +26,7 @@ jobs:
             SHOULD_PUBLISH="true"
           else
             COMMIT_MSG="${{ github.event.head_commit.message }}"
-            if echo "$COMMIT_MSG" | grep -qiE '\-\-(publish|deploy)'; then
+            if echo "$COMMIT_MSG" | grep -qiE '\-\-(publish|deploy|all)'; then
               SHOULD_PUBLISH="true"
             fi
           fi
@@ -226,20 +226,15 @@ jobs:
           open('bench_files/image.bmp','wb').write(hdr + b''.join(reversed(rows)))
           "
 
-          # ── PNG small (~5-20KB): 256x256 plasma fractal noise ──────────────
-          # plasma: generates complex fractal content that PNG's DEFLATE
-          # struggles to compress as well as a smooth gradient.
-          # Expected file size: 5–20KB depending on the generated pattern.
+          # PNG small (~5-20KB): 256x256 plasma fractal noise
           convert -size 256x256 plasma: -depth 8 bench_files/image_png_small.png
           echo "PNG small size: $(wc -c < bench_files/image_png_small.png) bytes"
 
-          # ── PNG large (~500KB–1.5MB): 1024x1024 plasma fractal ─────────────
-          # Large enough to exercise the PNG transform path meaningfully.
-          # 1024x1024 plasma with RGB depth produces ~500KB–1.5MB PNG.
+          # PNG large (~500KB-1.5MB): 1024x1024 plasma fractal
           convert -size 1024x1024 plasma: -depth 8 bench_files/image_png_large.png
           echo "PNG large size: $(wc -c < bench_files/image_png_large.png) bytes"
 
-          # ── JPEG — 512x512 photo-like gradient noise ───────────────────────
+          # JPEG — 512x512 photo-like gradient noise
           python3 -c "
           import struct, zlib, math, random
           random.seed(7)
@@ -262,28 +257,18 @@ jobs:
           convert /tmp/photo_raw.ppm -quality 85 bench_files/photo.jpg
           echo "JPEG size: $(wc -c < bench_files/photo.jpg) bytes"
 
-          # ── FBX — binary FBX stub (~150KB synthetic mesh data) ────────────
+          # FBX — binary FBX stub (~150KB synthetic mesh data)
           python3 -c "
           import struct, math, random
-
           random.seed(13)
-
           def fbx_magic():
               return b'Kaydara FBX Binary  \x00\x1a\x00' + struct.pack('<I', 7400)
-
           def pack_float_array(vals):
               return struct.pack(f'<{len(vals)}f', *vals)
-
           def pack_int_array(vals):
               return struct.pack(f'<{len(vals)}i', *vals)
-
-          vertices = []
-          normals  = []
-          uvs      = []
-          indices  = []
-
-          rings = 40
-          segs  = 40
+          vertices = []; normals = []; uvs = []; indices = []
+          rings = 40; segs = 40
           for r in range(rings + 1):
               phi = math.pi * r / rings
               for s in range(segs):
@@ -297,51 +282,34 @@ jobs:
                   vertices.extend([jx * 100, jy * 100, jz * 100])
                   normals.extend([x, y, z])
                   uvs.extend([s / segs, r / rings])
-
           for r in range(rings):
               for s in range(segs):
                   a = r * (segs + 1) + s
                   b = a + segs + 1
                   indices.extend([a, b, a + 1, b, b + 1, a + 1])
-
           verts_bytes   = pack_float_array(vertices)
           normals_bytes = pack_float_array(normals)
           uvs_bytes     = pack_float_array(uvs)
           idx_bytes     = pack_int_array(indices)
-
           transforms = []
           for i in range(50):
-              angle = i * 0.2
-              scale = 1.0 + i * 0.01
-              tx, ty, tz = i * 5.0, 0.0, 0.0
-              m = [
-                  scale * math.cos(angle), -math.sin(angle), 0.0, tx,
-                  math.sin(angle),  scale * math.cos(angle), 0.0, ty,
-                  0.0,              0.0,                      scale, tz,
-                  0.0,              0.0,                      0.0,   1.0,
-              ]
+              angle = i * 0.2; scale = 1.0 + i * 0.01; tx, ty, tz = i * 5.0, 0.0, 0.0
+              m = [scale * math.cos(angle), -math.sin(angle), 0.0, tx,
+                   math.sin(angle), scale * math.cos(angle), 0.0, ty,
+                   0.0, 0.0, scale, tz, 0.0, 0.0, 0.0, 1.0]
               transforms.extend(m)
           transforms_bytes = pack_float_array(transforms)
-
           mat_props = b''
           prop_names = [b'DiffuseColor', b'SpecularColor', b'EmissiveColor',
                         b'Roughness', b'Metalness', b'Opacity', b'BumpFactor']
           for i in range(30):
               for name in prop_names:
                   mat_props += struct.pack('B', len(name)) + name
-                  mat_props += struct.pack('<fff',
-                      random.uniform(0, 1),
-                      random.uniform(0, 1),
-                      random.uniform(0, 1))
-
-          magic  = fbx_magic()
-          body   = verts_bytes + normals_bytes + uvs_bytes + idx_bytes
-          body  += transforms_bytes + mat_props
-          body  += b'\x00' * 13
-
+                  mat_props += struct.pack('<fff', random.uniform(0,1), random.uniform(0,1), random.uniform(0,1))
+          magic = fbx_magic()
+          body = verts_bytes + normals_bytes + uvs_bytes + idx_bytes + transforms_bytes + mat_props + b'\x00' * 13
           with open('bench_files/mesh.fbx', 'wb') as f:
               f.write(magic + body)
-
           print(f'FBX size: {len(magic) + len(body)} bytes')
           "
           echo "FBX size: $(wc -c < bench_files/mesh.fbx) bytes"
@@ -753,6 +721,8 @@ jobs:
           echo "Branch:    ${{ github.ref_name }}"
           echo "Published: ${{ needs.parse-commit.outputs.should_publish }}"
           echo ""
-          echo "Use --publish or --deploy in commit message to run benchmarks."
-          echo "Use --corp in commit message to run Canterbury corpus benchmarks."
-          echo "Use --archive in commit message to run archive benchmarks."
+          echo "Commit message flags:"
+          echo "  --publish / --deploy  run custom benchmark suite + deploy"
+          echo "  --corp                run Canterbury corpus benchmark"
+          echo "  --archive             run archive benchmark"
+          echo "  --all                 run ALL three benchmark suites"

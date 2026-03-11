@@ -23,7 +23,7 @@ jobs:
             SHOULD_RUN="true"
           else
             COMMIT_MSG="${{ github.event.head_commit.message }}"
-            if echo "$COMMIT_MSG" | grep -qiE '\-\-corp'; then
+            if echo "$COMMIT_MSG" | grep -qiE '\-\-(corp|all)'; then
               SHOULD_RUN="true"
             fi
           fi
@@ -331,4 +331,4 @@ jobs:
         run: |
           echo "MBFA Canterbury Corpus — Build #${{ github.run_number }}"
           echo "Triggered: ${{ needs.parse-trigger.outputs.should_run }}"
-          echo "Use --corp in commit message to run corpus benchmarks."
+          echo "Use --corp or --all in commit message to run corpus benchmarks."

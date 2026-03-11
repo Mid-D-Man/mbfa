@@ -1,0 +1,17 @@
+WAV fmt: 1 ch, 16 bps → delta stride 2
+Filter delta2: 44144 bytes in, 44144 bytes filtered
+Original size: 353152 bits (44144 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=47028
+  discovery (capped 2MB/chain=256): discovered ob=13 lb=16
+  chain_limit (constrained ob=13): 256  raw_cost=44412
+  lb cap: constrained lb=16 output=5552B >= threshold 400B -- capped raw_cost=44095 chain_limit=256
+  capped wins over baseline
+Window diagnostics: 357/3731 tokens BACKREF (9.6%) | offset: 0.0% at max (8191) | 4.8% upper half | length: 0.3% at max (32767) | offset_bits=13 length_bits=15 — OK
+Fold 1 adaptive: offset_bits=13 (window=8191 bytes) length_bits=15 (max_len=32767)
+Fold 1 (LZ): 44096 bits (5512 bytes)
+Fold 2 pairing pre-scan: Cantor fallback rate = 84.9% (threshold 77%)
+Fold 2 pairing skipped — high fallback rate
+Fold 2 skipped — LZ on packed bytes not beneficial (current ratio 0.125, threshold 0.10)
+Entropy variant sizes (raw=5512B): v1=4508B v2=5016B v3=4771B v4=4546B v5=5054B v6=4303B v7=4683B
+Joint entropy flag=6: 5512 → 4303 B
+Done. 44144 bytes → 4309 bytes

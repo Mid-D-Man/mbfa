@@ -156,31 +156,16 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
-        // v7: 8-context prose-tuned category split (whitespace/upper/vowel/other × after_br)
+        // v7: removed — prose-tuned context split was retired after session 6.
+        // This arm is kept only for backwards compatibility so that any .mbfa
+        // files compressed with the short-lived v7 variant produce a clean
+        // error rather than silently corrupting data.
         7 => {
-            let payload = &input[payload_start..];
-            let mut cursor = 0usize;
-            let mut lit_dtables: Vec<entropy::DecodeTable> = Vec::with_capacity(8);
-            for i in 0..8usize {
-                let (enc, consumed) = entropy::deserialize_table(&payload[cursor..])
-                    .map_err(|e| std::io::Error::new(e.kind(),
-                        format!("v7 unfold: lit table {} failed: {}", i, e)))?;
-                lit_dtables.push(entropy::decode_table_from_encode(&enc));
-                cursor += consumed;
-            }
-            let (off_enc, off_c) = entropy::deserialize_table(&payload[cursor..])
-                .map_err(|e| std::io::Error::new(e.kind(),
-                    format!("v7 unfold: offset table failed: {}", e)))?;
-            let off_dt = entropy::decode_table_from_encode(&off_enc);
-            cursor += off_c;
-            let arr: [entropy::DecodeTable; 8] = lit_dtables.try_into()
-                .map_err(|_| std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "v7 unfold: expected exactly 8 literal tables"))?;
-            let tokens = entropy::read_tokens_v7(&payload[cursor..], &arr, &off_dt)?;
-            let rec    = reconstruct(&tokens);
-            println!("Entropy v7 unfold: {} bytes", rec.len());
-            (rec, fold_count.saturating_sub(1))
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "entropy flag 7 (prose-tuned v7) has been removed — \
+                 this file was compressed with a development build and cannot be decompressed",
+            ));
         }
 
         // 0 or unknown: no entropy, raw payload

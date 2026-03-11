@@ -607,6 +607,20 @@ fn phase_c_from_baseline(
         wide_lb,
         "constrained",
     );
+
+    // ── DIAGNOSTIC: constrained vs baseline ratio comparison ─────────────────
+    let input_bits   = input.len() as f64 * 8.0;
+    let baseline_pct = baseline.raw_cost    as f64 / input_bits * 100.0;
+    let constrained_pct = constrained.raw_cost as f64 / input_bits * 100.0;
+    let ratio_gain   = baseline_pct - constrained_pct;
+    println!(
+        "  DIAG phase_b_ratio={:.4}% constrained_ratio={:.4}% gain_from_phase_c={:.4}pp \
+         ob_b={} ob_c={} lb_b={} lb_c={}",
+        baseline_pct, constrained_pct, ratio_gain,
+        baseline.ob, constrained.ob, baseline.lb, constrained.lb,
+    );
+    // ── END DIAGNOSTIC ────────────────────────────────────────────────────────
+
     println!(
         "  chain_limit (constrained ob={}): {}  raw_cost={}",
         wide_ob,
@@ -668,6 +682,19 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
             Some((pred_ob, pred_lb)) => {
                 let tokens = scan(input, pred_ob, pred_lb);
                 let result = ScanResult::new(tokens, pred_ob, pred_lb, "phase_b");
+
+                // ── DIAGNOSTIC: Phase B ratio before ceiling check ────────────
+                let phase_b_bits  = result.raw_cost as f64;
+                let input_bits    = input.len() as f64 * 8.0;
+                let phase_b_ratio = phase_b_bits / input_bits * 100.0;
+                println!(
+                    "  DIAG phase_b: ob={} lb={} raw_cost={} input_bytes={} \
+                     phase_b_ratio={:.4}% chain_limit={}",
+                    pred_ob, pred_lb, result.raw_cost, input.len(),
+                    phase_b_ratio,
+                    compute_chain_limit(input.len(), pred_ob),
+                );
+                // ── END DIAGNOSTIC ────────────────────────────────────────────
 
                 println!(
                     "  Phase B scan: ob={} lb={} chain_limit={} raw_cost={}",

@@ -1,7 +1,7 @@
 // src/entropy.rs
 //
 // Entropy coding variants — all operate on the fold-1 token stream.
-// Variant numbering after cleanup:
+// Variant numbering:
 //
 //   v1  entropy_flag=1  joint lit/length Huffman + offset bucket Huffman
 //   v2  entropy_flag=2  2-context lit/length Huffman + offset bucket Huffman
@@ -9,7 +9,6 @@
 //   v4  entropy_flag=4  v1 + recent-offset slot reuse
 //   v5  entropy_flag=5  v2 + recent-offset slot reuse
 //   v6  entropy_flag=6  separate literal stream + sequence stream Huffman
-//   v7  entropy_flag=7  8-context prose-tuned lit/length Huffman + offset bucket Huffman
 //
 // v6 architecture (zstd-style literal separation):
 //   Literal bytes are extracted from the token stream, Huffman-coded as a
@@ -29,21 +28,10 @@
 //     [lit_bitstream]
 //     [seq_bitstream]
 //
-// v7 architecture (prose-tuned category split):
-//   8 lit/length tables indexed by (after_br * 4 + prose_category(prev_byte)).
-//   prose_category splits:
-//     0 = whitespace (0x09, 0x0A, 0x0D, 0x20) — pure word-boundary signal
-//     1 = uppercase A–Z — sentence/proper-noun starters
-//     2 = lowercase vowels a,e,i,o,u — high-frequency connectors
-//     3 = everything else (lowercase consonants, digits, punct, binary)
-//
-//   Rationale vs old MSB v7 and v3:
-//     v3 conflates uppercase and lowercase consonants into one category bucket —
-//     the dominant flaw for English prose. "The", "He", "In" have a completely
-//     different successor distribution from mid-word consonants like "t","n","s".
-//     The old MSB split (prev_byte >> 5) was mechanical and lost to v3 on
-//     WarAndPeace. This split is handcrafted for English prose bigram statistics.
-//     Same payload layout as v3: 8 lit tables + 1 offset table + bitstream.
+// NOTE: entropy_flag=7 (prose-tuned 8-context split) was trialled in session 6
+// and removed — it lost to v3 on WarAndPeace by 433B and won nowhere.
+// The match arm in unfold.rs is kept to return a clean error for any files
+// compressed with that development build. No v7 code exists in this file.
 //
 // Core algorithm (fold/unfold/LZ/pairing) is untouched by this module.
 //
@@ -359,31 +347,6 @@ pub fn byte_category(b: u8) -> usize {
 #[inline]
 pub fn context_idx(after_br: bool, prev_byte: u8) -> usize {
     (after_br as usize) * 4 + byte_category(prev_byte)
-}
-
-// ── v7 prose-tuned context function ──────────────────────────────────────────
-//
-// Four categories × after_br flag → 8 contexts.
-//   0 = whitespace      — word-boundary signal; successor is almost always
-//                         a capital or a common lowercase starter
-//   1 = uppercase A–Z   — sentence/proper-noun starters; successor distribution
-//                         is heavily skewed toward "h","e","a","o","i"
-//   2 = lowercase vowels — high-frequency connectors; successor is dominated
-//                         by consonants with characteristic bigram mass
-//   3 = everything else  — lowercase consonants, digits, punct, binary
-//
-// This directly fixes the main flaw in v3: uppercase and lowercase consonants
-// sharing one bucket despite completely different successor distributions.
-
-#[inline]
-pub fn prose_context_idx(after_br: bool, prev_byte: u8) -> usize {
-    let cat = match prev_byte {
-        9 | 10 | 13 | 32                               => 0, // whitespace
-        b'A'..=b'Z'                                    => 1, // uppercase
-        b'a' | b'e' | b'i' | b'o' | b'u'              => 2, // lowercase vowels
-        _                                              => 3, // everything else
-    };
-    (after_br as usize) * 4 + cat
 }
 
 fn count_joint_freq_v3(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32, u64>) {
@@ -1333,178 +1296,6 @@ pub fn read_tokens_v6(
         }
     }
 
-    Ok(tokens)
-}
-
-// ── v7: 8-context prose-tuned lit/length Huffman + offset bucket Huffman ──────
-//
-// Context = prose_context_idx(after_br, prev_byte) — see function above.
-// Same structural payload as v3: 8 lit tables + 1 offset table + bitstream.
-// prev_byte is updated on LIT tokens; on BACKREF tokens after_br flips but
-// prev_byte is left unchanged (we hold context at the byte before the backref
-// rather than guessing the last reconstructed byte of the referenced span).
-
-fn count_joint_freq_v7(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32, u64>) {
-    let mut lit_freqs: [Vec<u64>; 8] = std::array::from_fn(|_| vec![0u64; LIT_LEN_FREQ_SIZE]);
-    let mut bucket_freq = [0u64; BUCKET_FREQ_SIZE];
-
-    let mut prev_byte: u8 = b' ';
-    let mut after_br      = false;
-
-    for t in tokens {
-        let ctx = prose_context_idx(after_br, prev_byte);
-        match t {
-            Token::Lit { byte } => {
-                lit_freqs[ctx][*byte as usize] += 1;
-                prev_byte = *byte;
-                after_br  = false;
-            }
-            Token::Backref { offset, length } => {
-                lit_freqs[ctx][(255 + length) as usize] += 1;
-                let (bucket, _, _) = offset_to_bucket(*offset);
-                bucket_freq[bucket as usize] += 1;
-                after_br = true;
-            }
-            Token::End => {
-                lit_freqs[ctx][SYM_END as usize] += 1;
-            }
-        }
-    }
-
-    let lit_maps: [HashMap<u32, u64>; 8] = std::array::from_fn(|i| {
-        lit_len_array_to_map(&lit_freqs[i])
-    });
-
-    (lit_maps, bucket_array_to_map(&bucket_freq))
-}
-
-pub fn build_encode_tables_v7(tokens: &[Token]) -> Option<([EncodeTable; 8], EncodeTable)> {
-    let (lit_freqs, offset_freq) = count_joint_freq_v7(tokens);
-    let has_lits = lit_freqs.iter().any(|f| !f.is_empty());
-    if !has_lits { return None; }
-
-    let lit_tables: [EncodeTable; 8] = std::array::from_fn(|i| {
-        if lit_freqs[i].is_empty() {
-            EncodeTable::new()
-        } else {
-            canonical_codes_from_lengths(&assign_code_lengths(&lit_freqs[i]))
-        }
-    });
-
-    let offset_table = if offset_freq.is_empty() {
-        EncodeTable::new()
-    } else {
-        canonical_codes_from_lengths(&assign_code_lengths(&offset_freq))
-    };
-
-    Some((lit_tables, offset_table))
-}
-
-pub fn write_tokens_v7(
-    tokens:       &[Token],
-    tables:       &[EncodeTable],
-    offset_table: &EncodeTable,
-) -> std::io::Result<Vec<u8>> {
-    assert!(tables.len() == 8, "v7 requires exactly 8 literal tables");
-    let mut output = Vec::new();
-    {
-        let mut w         = BitWriter::endian(&mut output, BigEndian);
-        let mut prev_byte: u8 = b' ';
-        let mut after_br      = false;
-
-        for token in tokens {
-            let ctx   = prose_context_idx(after_br, prev_byte);
-            let table = &tables[ctx];
-
-            match token {
-                Token::Lit { byte } => {
-                    let &(code, len) = table.get(&(*byte as u32)).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v7 lit byte {} missing in ctx {}", byte, ctx))
-                    })?;
-                    w.write(len, code)?;
-                    prev_byte = *byte;
-                    after_br  = false;
-                }
-                Token::Backref { offset, length } => {
-                    let sym = sym_from_length(*length);
-                    let &(code, len) = table.get(&sym).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v7 length sym {} missing in ctx {}", sym, ctx))
-                    })?;
-                    w.write(len, code)?;
-
-                    if !offset_table.is_empty() {
-                        let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
-                        let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidData,
-                                format!("v7 offset bucket {} missing", bucket))
-                        })?;
-                        w.write(blen, bcode)?;
-                        if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
-                    }
-                    after_br = true;
-                }
-                Token::End => {
-                    let &(code, len) = table.get(&SYM_END).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("v7 END sym missing in ctx {}", ctx))
-                    })?;
-                    w.write(len, code)?;
-                }
-            }
-        }
-        w.byte_align()?;
-    }
-    Ok(output)
-}
-
-pub fn read_tokens_v7(
-    input:         &[u8],
-    dtables:       &[DecodeTable],
-    offset_dtable: &DecodeTable,
-) -> std::io::Result<Vec<Token>> {
-    assert!(dtables.len() == 8, "v7 requires exactly 8 decode tables");
-
-    let max_lens: [u32; 8] = std::array::from_fn(|i| {
-        dtables[i].keys().map(|&(_, l)| l).max().unwrap_or(1)
-    });
-    let offset_max = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
-
-    let mut tokens    = Vec::new();
-    let mut r         = BitReader::endian(std::io::Cursor::new(input), BigEndian);
-    let mut prev_byte: u8 = b' ';
-    let mut after_br      = false;
-
-    loop {
-        let ctx = prose_context_idx(after_br, prev_byte);
-        let sym = match read_huffman_sym(&mut r, &dtables[ctx], max_lens[ctx]) {
-            Ok(s)  => s,
-            Err(_) => break,
-        };
-
-        if sym < 256 {
-            let byte = sym as u8;
-            tokens.push(Token::Lit { byte });
-            prev_byte = byte;
-            after_br  = false;
-        } else if sym == SYM_END {
-            tokens.push(Token::End);
-            break;
-        } else {
-            let length = length_from_sym(sym);
-            let offset = if offset_dtable.is_empty() {
-                1
-            } else {
-                let bucket    = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
-                let extra_cnt = bucket_extra_bits(bucket);
-                let extra_val = if extra_cnt > 0 { r.read::<u32>(extra_cnt)? } else { 0 };
-                bucket_to_offset(bucket, extra_val)
-            };
-            tokens.push(Token::Backref { offset, length });
-            after_br = true;
-        }
-    }
     Ok(tokens)
 }
 

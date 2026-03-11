@@ -35,7 +35,7 @@ fn sample_entropy(data: &[u8]) -> f64 {
 /// File header layout:
 ///   Byte 0:          fold_count
 ///   Byte 1:          pair_flag    (1 = fold 2 used pair encoding)
-///   Byte 2:          entropy_flag (0 = none, 1-7 = entropy variant)
+///   Byte 2:          entropy_flag (0 = none, 1-6 = entropy variant)
 ///   Byte 3:          filter_flag  (0 = none, 1-4 = delta stride 1-4)
 ///   Bytes 4..4+N:    offset_bits[0..N]  N = fold_count
 ///   Bytes 4+N..4+2N: length_bits[0..N]
@@ -134,8 +134,8 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                     None
                 };
 
-            // Variant pool: v1-v6 unchanged, v7 = prose-tuned 8-context split
-            let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7]
+            // Variant pool: v1-v6
+            let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6]
                 .into_par_iter()
                 .map(|flag| {
                     let payload = match flag {
@@ -164,8 +164,6 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                             Some((lt, st, ot)) => encode_v6_shared(&tokens, lt, st, ot),
                             None => None,
                         },
-                        // v7: prose-tuned 4-category × after_br context split
-                        7 => if v2_ok { try_entropy_v7(&tokens) } else { None },
                         _ => None,
                     };
                     (flag, payload)
@@ -316,20 +314,6 @@ fn encode_v6_shared(
     entropy::write_tokens_v6(tokens, lit_table, seq_table, offset_table).ok()
 }
 
-/// v7: prose-tuned 4-category × after_br context split.
-/// Same structural payload as v3 — 8 lit tables + offset table + bitstream.
-fn try_entropy_v7(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
-    let (lit_tables, offset_table) = entropy::build_encode_tables_v7(tokens)?;
-    let coded = entropy::write_tokens_v7(tokens, &lit_tables, &offset_table).ok()?;
-    let mut payload = Vec::new();
-    for t in &lit_tables {
-        payload.extend_from_slice(&entropy::serialize_table(t));
-    }
-    payload.extend_from_slice(&entropy::serialize_table(&offset_table));
-    payload.extend_from_slice(&coded);
-    Some(payload)
-}
-
 // ── pair_vs_entropy ───────────────────────────────────────────────────────────
 
 fn pair_vs_entropy(
@@ -397,7 +381,8 @@ fn pair_vs_entropy(
             None
         };
 
-    let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7]
+    // Variant pool: v1-v6
+    let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6]
         .into_par_iter()
         .map(|flag| {
             let payload = match flag {
@@ -426,7 +411,6 @@ fn pair_vs_entropy(
                     Some((lt, st, ot)) => encode_v6_shared(&fold1_tokens, lt, st, ot),
                     None => None,
                 },
-                7 => if v2_ok { try_entropy_v7(&fold1_tokens) } else { None },
                 _ => None,
             };
             (flag, payload)

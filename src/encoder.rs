@@ -8,11 +8,14 @@
 //   Phase A/B -- fingerprint + single scan (LARGE FILES ONLY, > 1 MB):
 //     Phase A fingerprint_predict classifies the input and predicts (ob, lb).
 //     Phase B runs one full-quality scan at the predicted parameters, then
-//     ceiling_saturated() checks whether the window was sufficient.
-//       Not saturated -> return immediately (1 scan total).
-//       Saturated, pred matches baseline -> reuse tokens as baseline in Phase C,
-//         skip the baseline re-scan (saves 1 scan).
-//       Saturated, pred differs from baseline -> fall through to Phase C fresh.
+//     checks two conditions before deciding whether to run Phase C:
+//       1. Early exit: if Phase B ratio < PHASE_B_EARLY_EXIT_RATIO (15%),
+//          the data is already highly compressible at baseline and Phase C
+//          gain is negligible (measured: 0.33pp on JSON_2MB at 8.41% Phase B
+//          ratio). Skip ceiling check and Phase C entirely — 1 scan total.
+//       2. Ceiling check: if Phase B ratio >= threshold, check whether the
+//          window was sufficient. Not saturated -> return (1 scan total).
+//          Saturated -> fall through to Phase C.
 //
 //     Phase A/B is skipped entirely for files <= PARALLEL_SCAN_THRESHOLD (1 MB).
 //     On small/medium files rayon::join(baseline, discovery) is already optimal.
@@ -95,6 +98,20 @@ const ENTROPY_SAFE_LENGTH_BITS:   u32   = 15;
 const ENTROPY_MIN_BYTES_FOR_SCAN: usize = 400;
 const ENTROPY_TIE_THRESHOLD:      f64   = 0.05;
 
+// -- Phase B early-exit threshold ---------------------------------------------
+//
+// If Phase B ratio (raw token stream bits / input bits) is below this value,
+// the data is already highly compressible at baseline ob=17 and Phase C will
+// provide negligible gain at high cost (full extra LZ scan on large input).
+//
+// Calibrated from JSON_2MB (3.1MB): phase_b_ratio=8.41%, Phase C gain=0.33pp.
+// WarAndPeace (3.3MB prose) Phase B ratio is ~50%+ (needs ob=21 lb=10) so
+// it is unaffected by this threshold and always runs Phase C.
+//
+// 15% chosen to provide comfortable margin above JSON_2MB (8.41%) while
+// leaving all prose/binary files that genuinely need Phase C untouched.
+const PHASE_B_EARLY_EXIT_RATIO: f64 = 0.15;
+
 // -- Fingerprint constants ----------------------------------------------------
 
 const FINGERPRINT_ENTROPY_REPETITIVE: f64   = 2.0;
@@ -141,17 +158,6 @@ pub fn compute_chain_limit(input_len: usize, offset_bits: u32) -> usize {
 
 // -- Window helpers -----------------------------------------------------------
 
-/// Returns (alloc_size, window_mask) for the prev circular buffer.
-///
-/// alloc_size = next_power_of_two(max_off.min(n).max(1))
-/// window_mask = alloc_size - 1
-///
-/// Because alloc_size is a power of two, `j & window_mask` replaces
-/// `j % window_size` in the find_match hot loop (AND instead of division).
-///
-/// The one extra entry vs the old max_off.min(n) is always u32::MAX.
-/// find_match guards i - j > max_off before using any chain entry,
-/// so that slot can never produce a false match.
 #[inline]
 fn window_alloc_and_mask(max_off_limit: usize, n: usize) -> (usize, usize) {
     let raw  = max_off_limit.min(n).max(1);
@@ -314,15 +320,6 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
 
 /// Fast discovery scan — used only to determine ob/lb range. Token stream
 /// is discarded by the caller.
-///
-/// Key difference from scan(): when a match of length L is found, only
-/// position i is inserted into the hash table. The O(L) inner loop over
-/// i+1..i+best_len is skipped entirely. Since we only need the maximum
-/// offset and length values (not quality chains), the intermediate positions
-/// are irrelevant. This avoids catastrophic slowdown on files with very
-/// long matches: Source_1MB with lb=20 can have matches spanning hundreds
-/// of KB, previously costing millions of hash table writes per file.
-/// Measured: 26-41% total compression speedup on large files.
 pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     let max_off = max_offset(offset_bits).min(DISCOVER_MAX_PREV_SIZE);
     let max_len = max_length(length_bits);
@@ -343,7 +340,6 @@ pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<To
             DISCOVER_CHAIN_LIMIT,
         );
 
-        // Always update current position only — never the intermediate span.
         prev[i & window_mask] = head[h];
         head[h] = i as u32;
 
@@ -607,20 +603,6 @@ fn phase_c_from_baseline(
         wide_lb,
         "constrained",
     );
-
-    // ── DIAGNOSTIC: constrained vs baseline ratio comparison ─────────────────
-    let input_bits   = input.len() as f64 * 8.0;
-    let baseline_pct = baseline.raw_cost    as f64 / input_bits * 100.0;
-    let constrained_pct = constrained.raw_cost as f64 / input_bits * 100.0;
-    let ratio_gain   = baseline_pct - constrained_pct;
-    println!(
-        "  DIAG phase_b_ratio={:.4}% constrained_ratio={:.4}% gain_from_phase_c={:.4}pp \
-         ob_b={} ob_c={} lb_b={} lb_c={}",
-        baseline_pct, constrained_pct, ratio_gain,
-        baseline.ob, constrained.ob, baseline.lb, constrained.lb,
-    );
-    // ── END DIAGNOSTIC ────────────────────────────────────────────────────────
-
     println!(
         "  chain_limit (constrained ob={}): {}  raw_cost={}",
         wide_ob,
@@ -683,18 +665,22 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
                 let tokens = scan(input, pred_ob, pred_lb);
                 let result = ScanResult::new(tokens, pred_ob, pred_lb, "phase_b");
 
-                // ── DIAGNOSTIC: Phase B ratio before ceiling check ────────────
-                let phase_b_bits  = result.raw_cost as f64;
-                let input_bits    = input.len() as f64 * 8.0;
-                let phase_b_ratio = phase_b_bits / input_bits * 100.0;
-                println!(
-                    "  DIAG phase_b: ob={} lb={} raw_cost={} input_bytes={} \
-                     phase_b_ratio={:.4}% chain_limit={}",
-                    pred_ob, pred_lb, result.raw_cost, input.len(),
-                    phase_b_ratio,
-                    compute_chain_limit(input.len(), pred_ob),
-                );
-                // ── END DIAGNOSTIC ────────────────────────────────────────────
+                // ── Phase B early exit ────────────────────────────────────────
+                // If Phase B already achieves highly compressible output, skip
+                // the ceiling check and Phase C entirely. Measured on JSON_2MB:
+                // phase_b_ratio=8.41%, Phase C gain=0.33pp at cost of a full
+                // extra scan on 3.1MB. Threshold of 15% has comfortable margin.
+                let phase_b_ratio = result.raw_cost as f64
+                    / (input.len() as f64 * 8.0);
+                if phase_b_ratio < PHASE_B_EARLY_EXIT_RATIO {
+                    println!(
+                        "  Phase B early exit: ratio={:.4}% < {:.0}% threshold -- skipping Phase C",
+                        phase_b_ratio * 100.0,
+                        PHASE_B_EARLY_EXIT_RATIO * 100.0,
+                    );
+                    return (result.tokens, result.ob, result.lb);
+                }
+                // ── End Phase B early exit ────────────────────────────────────
 
                 println!(
                     "  Phase B scan: ob={} lb={} chain_limit={} raw_cost={}",

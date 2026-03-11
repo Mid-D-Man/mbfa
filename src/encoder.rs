@@ -8,33 +8,33 @@
 //   Phase A/B -- fingerprint + single scan (LARGE FILES ONLY, > 1 MB):
 //     Phase A fingerprint_predict classifies the input and predicts (ob, lb).
 //     Phase B runs one full-quality LZ scan at the predicted parameters, then
-//     checks two conditions before deciding whether to run Phase C:
-//       1. Ceiling check: if the window was NOT saturated, check early exit.
-//       2. Early exit: if Phase B ratio < PHASE_B_EARLY_EXIT_RATIO (15%),
-//          the data is already highly compressible at baseline and Phase C
-//          gain is negligible (measured: 0.33pp on JSON_2MB at 8.41% Phase B
-//          ratio). Only fires AFTER ceiling check confirms no saturation.
+//     applies three checks IN ORDER before deciding whether to run Phase C:
 //
-//     ORDERING IS CRITICAL:
-//       Ceiling check MUST run before early exit. If early exit ran first,
-//       highly-repetitive large files (Repetitive_2MB, lb=99.9% saturated)
-//       would bypass Phase C and produce incorrect results. The ceiling check
-//       catches saturation first; early exit only fires in the not-saturated
-//       branch where it is safe.
+//       1. Peak saturation (hard):  any Backref offset or length >= 90% of
+//          field max. If true, the field is genuinely too small and Phase C
+//          is REQUIRED. Must run BEFORE early exit — Repetitive_2MB has
+//          phase_b_ratio << 15% but lb=8 saturates (99.9% of lengths = 255).
+//          If early exit ran first it would bypass Phase C and return wrong ob/lb.
+//
+//       2. Early exit (only safe after peak passes): if Phase B ratio 
+//          PHASE_B_EARLY_EXIT_RATIO (15%), Phase C gain is negligible.
+//          Calibrated from JSON_2MB: ratio=8.41%, Phase C gain=0.33pp at cost
+//          of a full extra scan on 3.1MB. Peak does NOT fire for JSON (lengths
+//          typically 10-50 bytes, never near lb_ceil=229 at lb=8).
+//
+//       3. Upper-half saturation (softer): >= 20% of Backrefs have offset in
+//          upper half of window. Only reached when peak is clear and ratio is
+//          above the early-exit threshold. Catches WarAndPeace (large file,
+//          many refs > 64KB in a 128KB window). JSON_2MB's upper-half check
+//          would also fire (>20% of refs go > 64KB in 128KB window on 3MB data)
+//          but early exit fires first at step 2, so JSON_2MB never reaches here.
 //
 //     Phase A/B is skipped entirely for files <= PARALLEL_SCAN_THRESHOLD (1 MB).
 //     On small/medium files rayon::join(baseline, discovery) is already optimal.
-//     Phase B runs sequentially before discovery, killing the parallel speedup
-//     whenever ceiling fires (which it does on most medium prose/source/binary
-//     files with diverse offsets).
 //
 //   Phase A fingerprint rules (applied only when input > 1 MB):
 //     Rule 1: entropy < 2.0 (highly repetitive) -> defer to Phase C.
-//             lb will saturate at lb=8; ceiling check fires immediately anyway.
-//             Skipping Phase B saves a wasted full-quality scan.
 //     Rule 2: size < 32 KB -> predict ob = ceil(log2(size)), lb = 8.
-//             Not reached in practice (gated behind > 1 MB check), kept for
-//             correctness if threshold changes.
 //     Rule 3: default -> predict baseline (ob=17, lb=8).
 //
 //   Phase C -- discovery path:
@@ -54,39 +54,21 @@
 //     ob 19-20   window <=   1MB                        -> 256
 //     ob >= 21   window >=   2MB                        -> 128
 //
-//   Rationale for size-aware branch:
-//     WarAndPeace (3.3MB, ob=17) and ptt5 (501KB, ob=17) want opposite chain
-//     depths. W3 (chain=64 at ob=17) gave WarAndPeace 31.24% but ptt5 10.57%.
-//     W4 (chain=512 at ob=17) gave ptt5 10.35% but WarAndPeace 33.47%.
-//     These files never use the same code path: WarAndPeace hits Phase B
-//     (input > 1MB), ptt5 hits rayon parallel Phase C (input < 1MB).
-//     The size-aware branch routes them independently without conflict.
-//     compute_chain_limit receives input_len explicitly for this purpose.
-//
 //   Power-of-two prev array:
 //     prev is sized to next_power_of_two(max_off.min(n)) rather than
 //     max_off.min(n). This makes j & window_mask a valid index, replacing
 //     j % window_size (integer division) in the find_match hot loop.
-//     The extra entry initialises to u32::MAX; find_match's i-j > max_off
-//     guard rejects any position at distance >= 1<<ob immediately.
 //
 //   Lazy hash updates in scan_discover:
 //     When a match of length L is found during discovery, only position i is
-//     added to the hash table. Discovery tokens are discarded — we only need
-//     max ob/lb values. Skipping the O(L) inner loop avoids catastrophic
-//     slowdown on files with very long matches (Source_1MB lb=20, single
-//     matches spanning hundreds of KB). Measured 26-41% speedup on large files.
-//
-//   Ceiling saturation check (two conditions, either fires Phase C):
-//     Peak check:       any Backref offset or length >= 90% of field max.
-//     Upper-half check: >= 20% of Backrefs have offset in upper half of window.
+//     added to the hash table. Discovery tokens are discarded. Measured 26-41%
+//     speedup on large files.
 //
 //   Rep-match tiebreaking in scan():
 //     Tracks the last REP_SLOTS (3) distinct offsets emitted as Backrefs.
 //     After find_match returns a candidate, scan() checks each slot: if the
 //     slot offset matches at the current position with length >= best_len, it
-//     substitutes the rep-match offset. Token type unchanged (Token::Backref).
-//     No opcode vocabulary change. No format change. Fully backward compatible.
+//     substitutes the rep-match offset. Fully backward compatible.
 
 use crate::opcode::{
     Token, LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits,
@@ -105,20 +87,10 @@ const ENTROPY_TIE_THRESHOLD:      f64   = 0.05;
 
 // -- Phase B early-exit threshold ---------------------------------------------
 //
-// If Phase B ratio (raw token stream bits / input bits) is below this value,
-// the data is already highly compressible at baseline ob=17 and Phase C will
-// provide negligible gain at high cost (full extra LZ scan on large input).
-//
-// Calibrated from JSON_2MB (3.1MB): phase_b_ratio=8.41%, Phase C gain=0.33pp.
-// WarAndPeace (3.3MB prose) Phase B ratio is ~50%+ (needs ob=21 lb=10) so
-// it is unaffected by this threshold and always runs Phase C.
-//
-// 15% chosen to provide comfortable margin above JSON_2MB (8.41%) while
-// leaving all prose/binary files that genuinely need Phase C untouched.
-//
-// IMPORTANT: this check ONLY fires inside the ceiling-not-saturated branch.
-// If it ran before the ceiling check, highly-repetitive files with 99.9%
-// length saturation would bypass Phase C entirely and produce wrong results.
+// Applied ONLY after peak saturation check passes (step 2 of 3).
+// If Phase B ratio < 15%, Phase C gain is negligible (JSON_2MB: 8.41%, +0.33pp).
+// Safe to apply here because peak saturation already confirmed the window is not
+// too small — Repetitive_2MB never reaches this check (peak fires at step 1).
 const PHASE_B_EARLY_EXIT_RATIO: f64 = 0.15;
 
 // -- Fingerprint constants ----------------------------------------------------
@@ -148,12 +120,6 @@ const DISCOVER_MAX_PREV_SIZE: usize = 2 * 1024 * 1024;
 
 // -- Tiered chain limit -------------------------------------------------------
 
-/// Cache-aware tiered chain depth limit for full-quality scans.
-///
-/// ob=17-18 uses a size-aware branch: small/medium files (<=1MB, parallel path)
-/// use chain=512 for quality; large files (>1MB, Phase B path) use chain=64 to
-/// avoid tokenisation divergence observed on large prose (WarAndPeace).
-/// These files never share a code path so the branch has no interaction.
 pub fn compute_chain_limit(input_len: usize, offset_bits: u32) -> usize {
     match offset_bits {
         0..=16 => 256,
@@ -226,7 +192,6 @@ fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
 
 // -- Core scanner -------------------------------------------------------------
 
-/// Full-quality production scan with rep-match tiebreaking.
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
@@ -247,7 +212,6 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
         let (mut best_offset, mut best_len) =
             find_match(input, i, h, &head, &prev, max_off, max_len, window_mask, chain_limit);
 
-        // -- Rep-match tiebreaking --------------------------------------------
         let ob_beats_lit = offset_bits > LIT_TOTAL_BITS;
 
         for &slot_off in rep_slots.valid() {
@@ -269,7 +233,6 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
                 break;
             }
         }
-        // -- End rep-match tiebreaking ----------------------------------------
 
         let backref_worthwhile = best_len >= 2
             && backref_bits < (best_len as u32 * LIT_TOTAL_BITS);
@@ -327,8 +290,6 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     tokens
 }
 
-/// Fast discovery scan — used only to determine ob/lb range. Token stream
-/// is discarded by the caller.
 pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     let max_off = max_offset(offset_bits).min(DISCOVER_MAX_PREV_SIZE);
     let max_len = max_length(length_bits);
@@ -535,23 +496,45 @@ fn fingerprint_predict(data: &[u8]) -> Option<(u32, u32)> {
     Some((BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS))
 }
 
-fn ceiling_saturated(tokens: &[Token], ob: u32, lb: u32) -> bool {
+// -- Ceiling saturation: split into two independent checks --------------------
+//
+// peak_saturated:       HARD check — any single Backref hits >= 90% of field max.
+//                       Means the window or length field is genuinely too small.
+//                       Must run BEFORE early exit.
+//
+// upper_half_saturated: SOFT check — >= 20% of Backrefs reference the upper half
+//                       of the offset window. Means longer lookback is likely useful.
+//                       Only runs AFTER peak and early exit both pass.
+
+fn peak_saturated(tokens: &[Token], ob: u32, lb: u32) -> bool {
+    let max_off = max_offset(ob);
+    let max_len = max_length(lb);
+    let ob_ceil = ((max_off as f64) * CEILING_SATURATION_THRESHOLD) as u32;
+    let lb_ceil = ((max_len as f64) * CEILING_SATURATION_THRESHOLD) as u32;
+
+    for t in tokens {
+        if let Token::Backref { offset, length } = t {
+            if *offset >= ob_ceil || *length >= lb_ceil {
+                println!(
+                    "  ceiling check: peak hit offset={} (ceil={}) or length={} (ceil={})",
+                    offset, ob_ceil, length, lb_ceil
+                );
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn upper_half_saturated(tokens: &[Token], ob: u32) -> bool {
     let max_off  = max_offset(ob);
-    let max_len  = max_length(lb);
-    let ob_ceil  = ((max_off as f64) * CEILING_SATURATION_THRESHOLD) as u32;
-    let lb_ceil  = ((max_len as f64) * CEILING_SATURATION_THRESHOLD) as u32;
     let half_off = (max_off / 2) as u32;
 
     let mut total_br:   u64 = 0;
     let mut upper_half: u64 = 0;
 
     for t in tokens {
-        if let Token::Backref { offset, length } = t {
-            if *offset >= ob_ceil || *length >= lb_ceil {
-                println!("  ceiling check: peak hit offset={} (ceil={}) or length={} (ceil={})",
-                    offset, ob_ceil, length, lb_ceil);
-                return true;
-            }
+        if let Token::Backref { offset, .. } = t {
             total_br += 1;
             if *offset > half_off { upper_half += 1; }
         }
@@ -573,11 +556,86 @@ fn ceiling_saturated(tokens: &[Token], ob: u32, lb: u32) -> bool {
             CEILING_UPPER_HALF_THRESHOLD * 100.0,
         );
     }
-
     false
 }
 
-// -- Phase C inner logic (shared by both paths) -------------------------------
+fn log_window_diagnostics(tokens: &[Token], offset_bits: u32, length_bits: u32) {
+    let max_off = (1u32 << offset_bits) - 1;
+    let max_len = (1u32 << length_bits) - 1;
+    let mut total_br:   u64 = 0;
+    let mut at_max_off: u64 = 0;
+    let mut above_half: u64 = 0;
+    let mut at_max_len: u64 = 0;
+    let mut total_lit:  u64 = 0;
+
+    for t in tokens {
+        match t {
+            Token::Backref { offset, length } => {
+                total_br += 1;
+                if *offset == max_off { at_max_off += 1; }
+                if *offset > max_off / 2 { above_half += 1; }
+                if *length == max_len { at_max_len += 1; }
+            }
+            Token::Lit { .. } => total_lit += 1,
+            Token::End => {}
+        }
+    }
+
+    if total_br + total_lit == 0 { return; }
+    let total    = total_br + total_lit;
+    let br_pct   = total_br    as f64 / total    as f64 * 100.0;
+    let sat_pct  = if total_br > 0 { at_max_off as f64 / total_br as f64 * 100.0 } else { 0.0 };
+    let deep_pct = if total_br > 0 { above_half as f64 / total_br as f64 * 100.0 } else { 0.0 };
+    let len_pct  = if total_br > 0 { at_max_len as f64 / total_br as f64 * 100.0 } else { 0.0 };
+
+    println!(
+        "Window diagnostics: {}/{} tokens BACKREF ({:.1}%) | \
+         offset: {:.1}% at max ({}) | {:.1}% upper half | \
+         length: {:.1}% at max ({}) | offset_bits={} length_bits={} — {}",
+        total_br, total, br_pct,
+        sat_pct, max_off, deep_pct,
+        len_pct, max_len,
+        offset_bits, length_bits,
+        if sat_pct > 5.0        { "⚠ OFFSET SATURATED — window too small" }
+        else if len_pct > 5.0   { "⚠ LENGTH SATURATED — length field too small" }
+        else if deep_pct > 30.0 { "HEAVY — large offsets dominant" }
+        else                    { "OK" }
+    );
+}
+
+/// Baseline parameters used by Phase B in encoder.rs — mirrored here
+/// solely for the Phase C gain diagnostic.
+const DIAG_BASELINE_OB: u32 = 17;
+const DIAG_BASELINE_LB: u32 = 8;
+
+fn diag_stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
+    let br_bits = backref_total_bits(ob, lb) as u64;
+    tokens.iter().map(|t| match t {
+        Token::Lit { .. }     => LIT_TOTAL_BITS as u64,
+        Token::Backref { .. } => br_bits,
+        Token::End            => END_TOTAL_BITS as u64,
+    }).sum()
+}
+
+fn log_phase_c_gain(tokens: &[Token], ob: u32, lb: u32, input_len: usize) {
+    if ob <= DIAG_BASELINE_OB && lb <= DIAG_BASELINE_LB {
+        return;
+    }
+    let input_bits    = input_len as f64 * 8.0;
+    let actual_cost   = diag_stream_bit_cost(tokens, ob, lb);
+    let baseline_cost = diag_stream_bit_cost(tokens, DIAG_BASELINE_OB, DIAG_BASELINE_LB);
+    let actual_pct    = actual_cost   as f64 / input_bits * 100.0;
+    let baseline_pct  = baseline_cost as f64 / input_bits * 100.0;
+    let gain_pp       = baseline_pct - actual_pct;
+    println!(
+        "  DIAG phase_c_gain: ob={} lb={} \
+         actual_ratio={:.4}% baseline_hyp_ratio={:.4}% \
+         gain_pp={:.4}pp input_bytes={}",
+        ob, lb, actual_pct, baseline_pct, gain_pp, input_len,
+    );
+}
+
+// -- Phase C inner logic ------------------------------------------------------
 
 fn phase_c_from_baseline(
     baseline:       ScanResult,
@@ -681,49 +739,75 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
                     result.raw_cost,
                 );
 
-                // ── Ceiling check FIRST ───────────────────────────────────────
-                // Must run before early exit. If ceiling fires (e.g. Repetitive_2MB
-                // with 99.9% length saturation), we MUST go to Phase C regardless
-                // of how low the Phase B ratio is. Early exit is only safe once we
-                // know the window was not saturated.
-                if ceiling_saturated(&result.tokens, pred_ob, pred_lb) {
-                    println!("  ceiling check: saturated -> falling through to Phase C");
-
+                // ── Step 1: Peak saturation (HARD — must run before early exit) ──
+                //
+                // Catches Repetitive_2MB: lb=8 max=255, practically every match hits
+                // length=255 → lb_ceil=229 fires immediately. Phase B ratio is also
+                // low (~<1%) but we CANNOT early exit here — the field is genuinely
+                // too small. Returning ob=17 lb=8 would produce a 183-byte output
+                // instead of the correct 131-byte output at ob=10 lb=21.
+                if peak_saturated(&result.tokens, pred_ob, pred_lb) {
+                    println!("  ceiling check: peak saturated -> Phase C required");
                     if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
                         let baseline  = ScanResult { label: "baseline", ..result };
                         let discovery = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
                         return phase_c_from_baseline(baseline, discovery, input);
                     }
-                    // pred params differ from baseline (Rule 2 small-file path, not
-                    // reached in practice for >1MB files) — fall through to parallel
-                    // Phase C below.
+                    // pred_ob != baseline (Rule 2, not reached for >1MB): fall through
+                    // to parallel Phase C below.
                 } else {
-                    // ── Ceiling not saturated: safe to check early exit ───────
+                    // ── Step 2: Early exit (safe — peak saturation already cleared) ──
+                    //
+                    // Catches JSON_2MB: lengths 10-50 bytes, never near lb_ceil=229.
+                    // phase_b_ratio=8.41% < 15%. Phase C would find ob=21 but only
+                    // gains 0.09pp at cost of a full extra scan on 3.1MB (~1200ms).
+                    //
+                    // JSON_2MB upper-half% is >20% at ob=17 (many refs span >64KB in
+                    // a 3MB file with 128KB window) so step 3 WOULD fire without this
+                    // early exit. We never reach step 3 for JSON_2MB.
                     let phase_b_ratio = result.raw_cost as f64
                         / (input.len() as f64 * 8.0);
+
                     if phase_b_ratio < PHASE_B_EARLY_EXIT_RATIO {
                         println!(
                             "  Phase B early exit: ratio={:.4}% < {:.0}% threshold \
-                             -- ceiling clear, skipping Phase C",
+                             -- peak clear, skipping Phase C",
                             phase_b_ratio * 100.0,
                             PHASE_B_EARLY_EXIT_RATIO * 100.0,
                         );
                         return (result.tokens, result.ob, result.lb);
                     }
-                    println!("  ceiling check: ok -- Phase B ratio {:.4}% above early-exit threshold, Phase C needed",
-                        phase_b_ratio * 100.0);
-                    // Not saturated but ratio above threshold — still run Phase C
-                    // for potential gain (prose files, source, etc.)
-                    if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
-                        let baseline  = ScanResult { label: "baseline", ..result };
-                        let discovery = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
-                        return phase_c_from_baseline(baseline, discovery, input);
+
+                    // ── Step 3: Upper-half saturation (SOFT) ─────────────────────
+                    //
+                    // Catches WarAndPeace and other large prose/source/binary files
+                    // where ob=17 is genuinely too small. These have high ratio (>15%)
+                    // so early exit does not fire.
+                    if upper_half_saturated(&result.tokens, pred_ob) {
+                        println!("  ceiling check: upper-half saturated -> Phase C");
+                        if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
+                            let baseline  = ScanResult { label: "baseline", ..result };
+                            let discovery = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
+                            return phase_c_from_baseline(baseline, discovery, input);
+                        }
+                        // pred_ob != baseline: fall through to parallel Phase C below.
+                    } else {
+                        // Not peak-saturated, not upper-half saturated, ratio above
+                        // threshold: Phase B window is sufficient, return as-is.
+                        println!("  ceiling check: ok -- Phase B wins (1 scan total)");
+                        return (result.tokens, result.ob, result.lb);
                     }
                 }
             }
         }
     }
 
+    // ── Phase C parallel path ─────────────────────────────────────────────────
+    // Reached by:
+    //   (a) files <= PARALLEL_SCAN_THRESHOLD (rayon::join baseline + discovery)
+    //   (b) files > threshold where fingerprint returned None (Rule 1: repetitive)
+    //   (c) files > threshold where pred_ob != BASELINE (Rule 2: not reached in
+    //       practice for >1MB, kept for correctness)
     let (baseline, wide_discovery) = if input.len() <= PARALLEL_SCAN_THRESHOLD {
         let (bt, disc) = rayon::join(
             || scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS),
@@ -742,5 +826,10 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
         )
     };
 
-    phase_c_from_baseline(baseline, wide_discovery, input)
-        }
+    let (tokens, ob, lb) = phase_c_from_baseline(baseline, wide_discovery, input);
+
+    log_window_diagnostics(&tokens, ob, lb);
+    log_phase_c_gain(&tokens, ob, lb, input.len());
+
+    (tokens, ob, lb)
+}

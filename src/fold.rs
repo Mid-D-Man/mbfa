@@ -6,13 +6,21 @@
 use crate::encoder::scan_adaptive;
 use crate::bitwriter::write_tokens;
 use crate::pairing::pair_encode;
-use crate::opcode::{Token, OFFSET_BITS_MIN, LENGTH_BITS_MIN};
+use crate::opcode::{
+    Token, OFFSET_BITS_MIN, LENGTH_BITS_MIN,
+    LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits,
+};
 
 const MIN_IMPROVEMENT_RATIO:    f64   = 0.985;
 const MIN_FOLD_BITS:            usize = 64;
 const MIN_PAIR_BYTES:           usize = 512;
 const MAX_CANTOR_FALLBACK_RATE: f64   = 0.77;
 const FOLD2_LZ_MAX_RATIO:       f64   = 0.10;
+
+/// Baseline parameters used by Phase B in encoder.rs — mirrored here
+/// solely for the Phase C gain diagnostic. Do not use for anything else.
+const DIAG_BASELINE_OB: u32 = 17;
+const DIAG_BASELINE_LB: u32 = 8;
 
 fn cantor(x: u32, y: u32) -> u64 {
     let s = (x + y) as u64;
@@ -76,6 +84,39 @@ fn log_window_diagnostics(tokens: &[Token], offset_bits: u32, length_bits: u32) 
     );
 }
 
+/// Compute raw bit cost of a token stream at given ob/lb.
+/// Used only for the Phase C gain diagnostic — not for any compression decision.
+fn diag_stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
+    let br_bits = backref_total_bits(ob, lb) as u64;
+    tokens.iter().map(|t| match t {
+        Token::Lit { .. }     => LIT_TOTAL_BITS as u64,
+        Token::Backref { .. } => br_bits,
+        Token::End            => END_TOTAL_BITS as u64,
+    }).sum()
+}
+
+/// If Phase C widened ob or lb beyond baseline, print both the actual ratio
+/// and the hypothetical baseline ratio from the same token stream.
+/// The baseline figure is a slight underestimate of true Phase B cost
+/// (Phase B tokens would differ) but sufficient for threshold calibration.
+fn log_phase_c_gain(tokens: &[Token], ob: u32, lb: u32, input_len: usize) {
+    if ob <= DIAG_BASELINE_OB && lb <= DIAG_BASELINE_LB {
+        return; // Phase C did not widen — nothing to report
+    }
+    let input_bits      = input_len as f64 * 8.0;
+    let actual_cost     = diag_stream_bit_cost(tokens, ob, lb);
+    let baseline_cost   = diag_stream_bit_cost(tokens, DIAG_BASELINE_OB, DIAG_BASELINE_LB);
+    let actual_pct      = actual_cost   as f64 / input_bits * 100.0;
+    let baseline_pct    = baseline_cost as f64 / input_bits * 100.0;
+    let gain_pp         = baseline_pct - actual_pct;
+    println!(
+        "  DIAG phase_c_gain: ob={} lb={} \
+         actual_ratio={:.4}% baseline_hyp_ratio={:.4}% \
+         gain_pp={:.4}pp input_bytes={}",
+        ob, lb, actual_pct, baseline_pct, gain_pp, input_len,
+    );
+}
+
 /// Returns (compressed_bytes, folds_done, used_pairing,
 ///          offset_bits_per_fold, length_bits_per_fold, fold1_tokens)
 pub fn fold(input: &[u8], max_folds: u8)
@@ -105,6 +146,11 @@ pub fn fold(input: &[u8], max_folds: u8)
             let (tokens, ob, lb) = scan_adaptive(&current);
 
             log_window_diagnostics(&tokens, ob, lb);
+
+            // Diagnostic: show how much Phase C gained over baseline ob=17
+            // (only prints when ob or lb was widened beyond baseline)
+            log_phase_c_gain(&tokens, ob, lb, current.len());
+
             println!(
                 "Fold 1 adaptive: offset_bits={} (window={} bytes) length_bits={} (max_len={})",
                 ob, (1u32 << ob) - 1, lb, (1u32 << lb) - 1
@@ -117,7 +163,6 @@ pub fn fold(input: &[u8], max_folds: u8)
             let ratio = folded_bits as f64 / prev_size as f64;
             if ratio >= MIN_IMPROVEMENT_RATIO {
                 println!("Fold 1 not worth it (ratio {:.3}), stopping at fold 0", ratio);
-                // fold1_tokens stays None — used_pairing will be false
                 break;
             }
             if folded_bits <= MIN_FOLD_BITS {
@@ -150,11 +195,6 @@ pub fn fold(input: &[u8], max_folds: u8)
             && current.len() >= MIN_PAIR_BYTES;
 
         let use_pairing = if consider_pairing {
-            // Task 6: fold1_tokens is guaranteed Some here — consider_pairing
-            // requires folds_done == 1, which means fold 1 succeeded and always
-            // sets fold1_tokens. Using the cached stream eliminates a full
-            // read_tokens decode pass that the old code performed just to compute
-            // cantor_fallback_rate then immediately discard the tokens.
             let tokens = fold1_tokens.as_ref()
                 .expect("fold1_tokens must be Some when folds_done == 1");
             let fallback_rate = cantor_fallback_rate(tokens);
@@ -183,10 +223,6 @@ pub fn fold(input: &[u8], max_folds: u8)
         }
 
         let (folded, candidate_ob, candidate_lb) = if use_pairing {
-            // Task 6: fold1_tokens guaranteed Some — same guarantee as above.
-            // Using the cached stream eliminates a second read_tokens decode pass
-            // that the old code performed to feed pair_encode. Two full bitstream
-            // decode passes eliminated total when pairing fires.
             let tokens = fold1_tokens.as_ref()
                 .expect("fold1_tokens must be Some when use_pairing is true");
             (pair_encode(tokens, current_ob, current_lb)?, 0u32, 0u32)
@@ -233,4 +269,4 @@ pub fn fold(input: &[u8], max_folds: u8)
     }
 
     Ok((current, folds_done, final_used_pairing, offset_bits_per_fold, length_bits_per_fold, fold1_tokens))
-            }
+}

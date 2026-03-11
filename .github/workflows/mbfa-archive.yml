@@ -23,7 +23,7 @@ jobs:
             SHOULD_RUN="true"
           else
             COMMIT_MSG="${{ github.event.head_commit.message }}"
-            if echo "$COMMIT_MSG" | grep -qiE '\-\-archive'; then
+            if echo "$COMMIT_MSG" | grep -qiE '\-\-(archive|all)'; then
               SHOULD_RUN="true"
             fi
           fi
@@ -491,4 +491,4 @@ jobs:
         run: |
           echo "MBFA Archive Benchmark — Build #${{ github.run_number }}"
           echo "Triggered: ${{ needs.parse-trigger.outputs.should_run }}"
-          echo "Use --archive in commit message to run archive benchmarks."
+          echo "Use --archive or --all in commit message to run archive benchmarks."

@@ -36,7 +36,7 @@ fn sample_entropy(data: &[u8]) -> f64 {
 ///   Byte 0:          fold_count
 ///   Byte 1:          pair_flag    (1 = fold 2 used pair encoding)
 ///   Byte 2:          entropy_flag (0 = none, 1-6 = entropy variant)
-///   Byte 3:          filter_flag  (0 = none, 1-4 = delta stride 1-4)
+///   Byte 3:          filter_flag  (0 = none, 1-4 = delta stride 1-4, 5 = shuffle4)
 ///   Bytes 4..4+N:    offset_bits[0..N]  N = fold_count
 ///   Bytes 4+N..4+2N: length_bits[0..N]
 ///   Remaining:       compressed payload
@@ -49,7 +49,7 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     let filter_buf: Option<Vec<u8>> = if filter_flag != filters::FILTER_NONE {
         let f = filters::apply_filter(input, filter_flag);
         println!(
-            "Filter delta{}: {} bytes in, {} bytes filtered",
+            "Filter flag={}: {} bytes in, {} bytes filtered",
             filter_flag, input.len(), f.len()
         );
         Some(f)
@@ -190,11 +190,21 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let best_size = results.iter().map(|(_, o)| sz(o)).min().unwrap_or(usize::MAX);
 
             if best_size >= raw_size {
+                // ── BUG FIX: was format!("v{}={}", f, sz(o)) which printed
+                // usize::MAX (18446744073709551615) for skipped variants.
+                // Now mirrors the same guard used in the variant-sizes log above.
                 let detail: Vec<String> = results.iter()
-                    .map(|(f, o)| format!("v{}={}", f, sz(o)))
+                    .map(|(f, o)| {
+                        let s = sz(o);
+                        if s == usize::MAX {
+                            format!("v{}=skip", f)
+                        } else {
+                            format!("v{}={}B", f, s)
+                        }
+                    })
                     .collect();
                 println!(
-                    "Joint entropy skipped (no gain: {} vs raw={})",
+                    "Joint entropy skipped (no gain: {} vs raw={}B)",
                     detail.join(" "), raw_size
                 );
                 (compressed, 0u8, false, folds_done, offset_bits_per_fold, length_bits_per_fold)

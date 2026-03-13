@@ -2,14 +2,6 @@
 # scripts/gen_special_files.py
 # Generates all special benchmark files and writes special_manifest.json
 # Usage: python3 scripts/gen_special_files.py [--output-dir bench_files_special]
-#
-# Produces files covering:
-#   - Formats targeted for new delta/shuffle filters (STL, PLY, FBX stub, GLB stub)
-#   - Unity project file types (C#, YAML assets, shaders, terrain .raw, DLL stub)
-#   - Unreal project file types (uasset stub, ini, uplugin, usmap stub)
-#   - Config formats (YAML, TOML, .mdix)
-#   - Direct-upload slot (handled by HTML, not here)
-# Writes: {output_dir}/special_manifest.json
 
 import argparse
 import json
@@ -40,29 +32,25 @@ def gen_stl_binary(path):
     header = b"MBFA benchmark STL binary mesh" + b"\x00" * (80 - 30)
     data = header + struct.pack("<I", n_tris)
     for i in range(n_tris):
-        # smooth sphere-ish normals + vertices
         phi   = math.pi * i / n_tris
         theta = 2 * math.pi * i / 100
         nx = math.sin(phi) * math.cos(theta)
         ny = math.cos(phi)
         nz = math.sin(phi) * math.sin(theta)
-        # normal
         data += struct.pack("<fff", nx, ny, nz)
-        # 3 vertices with small jitter
         for _ in range(3):
             vx = nx * 10.0 + random.gauss(0, 0.01)
             vy = ny * 10.0 + random.gauss(0, 0.01)
             vz = nz * 10.0 + random.gauss(0, 0.01)
             data += struct.pack("<fff", vx, vy, vz)
-        data += struct.pack("<H", 0)  # attr
+        data += struct.pack("<H", 0)
     return write(path, data)
 
-# ── PLY binary (float32 vertices + int32 indices) ─────────────────────────────
+# ── PLY binary ────────────────────────────────────────────────────────────────
 def gen_ply_binary(path):
     random.seed(7)
     n_verts = 2000
     n_faces = 1800
-    # Build header
     hdr  = "ply\n"
     hdr += "format binary_little_endian 1.0\n"
     hdr += f"element vertex {n_verts}\n"
@@ -73,7 +61,6 @@ def gen_ply_binary(path):
     hdr += "property list uchar int vertex_indices\n"
     hdr += "end_header\n"
     body = hdr.encode()
-    # Vertices: smooth gradient sphere
     for i in range(n_verts):
         phi   = math.pi * i / n_verts
         theta = 2 * math.pi * (i % 100) / 100
@@ -83,7 +70,6 @@ def gen_ply_binary(path):
         nx, ny, nz = math.sin(phi)*math.cos(theta), math.cos(phi), math.sin(phi)*math.sin(theta)
         s, t = theta / (2*math.pi), phi / math.pi
         body += struct.pack("<ffffffff", x, y, z, nx, ny, nz, s, t)
-    # Faces
     for i in range(n_faces):
         a = i % n_verts
         b = (i + 1) % n_verts
@@ -91,12 +77,10 @@ def gen_ply_binary(path):
         body += struct.pack("<Biii", 3, a, b, c)
     return write(path, body)
 
-# ── GLB stub (binary GLTF with float32 buffer chunk) ─────────────────────────
+# ── GLB stub ──────────────────────────────────────────────────────────────────
 def gen_glb(path):
     random.seed(13)
-    # JSON chunk
-    import json as _json
-    json_str = _json.dumps({
+    json_str = json.dumps({
         "asset": {"version": "2.0"},
         "scene": 0,
         "scenes": [{"nodes": [0]}],
@@ -113,11 +97,8 @@ def gen_glb(path):
         "buffers": [{"byteLength": 8400}]
     })
     json_bytes = json_str.encode()
-    # Pad JSON to 4-byte boundary
     pad = (4 - len(json_bytes) % 4) % 4
     json_bytes += b" " * pad
-
-    # BIN chunk — float32 vertices + uint16 indices
     bin_data = b""
     for i in range(500):
         phi   = math.pi * i / 500
@@ -130,7 +111,6 @@ def gen_glb(path):
         bin_data += struct.pack("<H", i % 500)
     bin_pad = (4 - len(bin_data) % 4) % 4
     bin_data += b"\x00" * bin_pad
-
     json_chunk = struct.pack("<II", len(json_bytes), 0x4E4F534A) + json_bytes
     bin_chunk  = struct.pack("<II", len(bin_data),  0x004E4942) + bin_data
     body       = json_chunk + bin_chunk
@@ -138,7 +118,7 @@ def gen_glb(path):
     glb = struct.pack("<III", 0x46546C67, 2, total_len) + body
     return write(path, glb)
 
-# ── Unity C# scripts (realistic, repetitive structure) ────────────────────────
+# ── Unity C# scripts ──────────────────────────────────────────────────────────
 def gen_unity_csharp(path):
     lines = []
     lines.append("using UnityEngine;")
@@ -171,12 +151,11 @@ def gen_unity_csharp(path):
         lines.append("")
     return write(path, "\n".join(lines))
 
-# ── Unity YAML asset (.unity scene file) ─────────────────────────────────────
+# ── Unity YAML asset ──────────────────────────────────────────────────────────
 def gen_unity_yaml(path):
     random.seed(3)
     lines = ["%YAML 1.1", "%TAG !u! tag:unity3d.com,2011:",""]
     for i in range(200):
-        guid = "".join(f"{random.randint(0,255):02x}" for _ in range(16))
         lines.append(f"--- !u!1 &{random.randint(100000000,999999999)}")
         lines.append("GameObject:")
         lines.append(f"  m_ObjectHideFlags: 0")
@@ -200,14 +179,13 @@ def gen_unity_yaml(path):
         lines.append("")
     return write(path, "\n".join(lines))
 
-# ── Unity terrain .raw (16-bit heightmap) ─────────────────────────────────────
-def gen_terrain_raw(path):
-    w, h = 513, 513
+# ── Unity terrain .raw ────────────────────────────────────────────────────────
+def gen_terrain_raw(path, w=513, h=513, seed_x=0.05, seed_y=0.05):
     data = b""
     for y in range(h):
         for x in range(w):
             height = int(
-                (math.sin(x * 0.05) * math.cos(y * 0.05) * 0.4 +
+                (math.sin(x * seed_x) * math.cos(y * seed_y) * 0.4 +
                  math.sin(x * 0.02 + y * 0.03) * 0.3 +
                  math.sin(x * 0.1) * 0.15 + 0.5) * 65535
             )
@@ -271,16 +249,14 @@ def gen_unreal_ini(path):
 
 # ── Unreal uasset stub ────────────────────────────────────────────────────────
 def gen_uasset_stub(path):
-    # Synthetic binary that mimics uasset structure — float arrays + repeated tags
     random.seed(99)
-    magic = struct.pack("<I", 0x9E2A83C1)
+    magic   = struct.pack("<I", 0x9E2A83C1)
     version = struct.pack("<ii", -8, 0)
-    # Repeated property blocks (common pattern in uassets)
     props = b""
     prop_names = [b"StaticMesh\x00", b"Material\x00\x00\x00", b"Transform\x00\x00",
                   b"Mobility\x00\x00\x00", b"CastShadow\x00\x00"]
     for i in range(300):
-        name = prop_names[i % len(prop_names)]
+        name   = prop_names[i % len(prop_names)]
         floats = struct.pack("<fff",
             math.sin(i * 0.1) * 100,
             math.cos(i * 0.1) * 100,
@@ -291,30 +267,33 @@ def gen_uasset_stub(path):
 
 # ── Unreal uplugin JSON ───────────────────────────────────────────────────────
 def gen_uplugin(path):
-    import json as _json
     plugins = []
+    categories = ["Rendering", "Physics", "AI", "Network", "UI"]
+    platform_list = ["Win64", "Mac", "Linux", "Android", "IOS"]
     for i in range(50):
         plugins.append({
             "Name": f"Plugin{i:03d}",
             "Enabled": (i % 3 != 0),
             "MarketplaceURL": f"https://marketplace.unrealengine.com/product/plugin{i:03d}",
-            "SupportedTargetPlatforms": ["Win64","Mac","Linux","Android","IOS"],
+            "SupportedTargetPlatforms": platform_list,
             "VersionName": f"1.{i}.0",
             "FriendlyName": f"Awesome Plugin {i:03d}",
             "Description": f"This plugin provides functionality number {i} for Unreal Engine projects.",
-            "Category": ["Rendering","Physics","AI","Network","UI"][i % 5],
+            "Category": categories[i % 5],
             "bIsBetaVersion": (i % 7 == 0),
             "Modules": [{"Name": f"Plugin{i:03d}Module", "Type": "Runtime", "LoadingPhase": "Default"}]
         })
     obj = {"FileVersion": 3, "Version": 1, "VersionName": "1.0.0",
            "FriendlyName": "MBFA Test Plugin Bundle", "Plugins": plugins}
-    return write(path, _json.dumps(obj, indent=2))
+    return write(path, json.dumps(obj, indent=2).encode())
 
-# ── Generic YAML (CI/config style) ────────────────────────────────────────────
+# ── Generic YAML config ───────────────────────────────────────────────────────
 def gen_yaml_config(path):
+    random.seed(11)
     lines = []
     services = ["api","worker","scheduler","cache","db","proxy","monitor","logger"]
     envs = ["development","staging","production"]
+    region_list = ["us-east-1", "eu-west-1", "ap-southeast-1"]
     for env in envs:
         for svc in services * 4:
             lines.append(f"# {env} {svc} configuration")
@@ -323,11 +302,11 @@ def gen_yaml_config(path):
             lines.append(f"  replicas: {random.randint(1,5)}")
             lines.append(f"  resources:")
             lines.append(f"    requests:")
-            lines.append(f"      cpu: \"100m\"")
-            lines.append(f"      memory: \"128Mi\"")
+            lines.append(f'      cpu: "100m"')
+            lines.append(f'      memory: "128Mi"')
             lines.append(f"    limits:")
-            lines.append(f"      cpu: \"500m\"")
-            lines.append(f"      memory: \"512Mi\"")
+            lines.append(f'      cpu: "500m"')
+            lines.append(f'      memory: "512Mi"')
             lines.append(f"  env:")
             lines.append(f"    - name: APP_ENV")
             lines.append(f"      value: {env}")
@@ -342,12 +321,14 @@ def gen_yaml_config(path):
             lines.append(f"    initialDelaySeconds: 30")
             lines.append(f"    periodSeconds: 10")
             lines.append("")
-    return write(path, "\n".join(lines))
+    return write(path, "\n".join(lines).encode())
 
 # ── TOML config ───────────────────────────────────────────────────────────────
 def gen_toml_config(path):
+    region_list = ["us-east-1", "eu-west-1", "ap-southeast-1"]
     lines = []
     for i in range(80):
+        region = region_list[i % 3]
         lines.append(f"[[services]]")
         lines.append(f'name = "service_{i:03d}"')
         lines.append(f'host = "192.168.1.{i % 256}"')
@@ -355,7 +336,7 @@ def gen_toml_config(path):
         lines.append(f"timeout = {30 + i % 60}")
         lines.append(f"retries = {3 + i % 5}")
         lines.append(f"enabled = {'true' if i % 3 != 0 else 'false'}")
-        lines.append(f'region = "{[\"us-east-1\",\"eu-west-1\",\"ap-southeast-1\"][i%3]}"')
+        lines.append(f'region = "{region}"')
         lines.append(f"[services.tls]")
         lines.append(f"enabled = true")
         lines.append(f'cert = "/etc/ssl/certs/service_{i:03d}.crt"')
@@ -364,7 +345,7 @@ def gen_toml_config(path):
         lines.append(f"scrape_interval = 15")
         lines.append(f'endpoint = "/metrics"')
         lines.append("")
-    return write(path, "\n".join(lines))
+    return write(path, "\n".join(lines).encode())
 
 # ── MidMans DixScript .mdix ───────────────────────────────────────────────────
 def gen_mdix(path):
@@ -421,9 +402,9 @@ def gen_mdix(path):
     (amount<float> currency<string> = "USD") {
         let formatted<string> = $"${amount}";
         if: currency == "EUR" {
-            formatted = $"€{amount}";
+            formatted = $"{amount}";
         } elif: currency == "GBP" {
-            formatted = $"£{amount}";
+            formatted = $"{amount}";
         }
         return formatted;
     }
@@ -438,11 +419,11 @@ def gen_mdix(path):
     ~getStatusLabel<string> => global
     (status<enum>) {
         chk: status {
-            -> Status.Pending  { return "Pending Review"; }
-            -> Status.Active   { return "Currently Active"; }
-            -> Status.Paused   { return "On Hold"; }
-            -> Status.Completed{ return "Done"; }
-            -> miss            { return "Unknown"; }
+            -> Status.Pending   { return "Pending Review"; }
+            -> Status.Active    { return "Currently Active"; }
+            -> Status.Paused    { return "On Hold"; }
+            -> Status.Completed { return "Done"; }
+            -> miss             { return "Unknown"; }
         }
     }
 )
@@ -505,34 +486,26 @@ def gen_mdix(path):
     }
 )
 """
-    # Repeat to make it a meaningful size
     full = (content.strip() + "\n\n") * 12
     return write(path, full.encode())
 
-# ── DLL stub (managed assembly pattern) ───────────────────────────────────────
+# ── DLL stub ──────────────────────────────────────────────────────────────────
 def gen_dll_stub(path):
-    # PE/COFF header stub + repetitive MSIL-like byte pattern
     random.seed(55)
-    # DOS stub
     dos = b"MZ" + b"\x00" * 58 + struct.pack("<I", 0x80)
     dos += b"\x00" * (0x80 - len(dos))
-    # PE signature
     pe_sig = b"PE\x00\x00"
-    # COFF header (x86)
-    coff = struct.pack("<HHIIIHH", 0x14c, 3, 0, 0, 0, 0xe0, 0x0102)
-    # Optional header stub
-    opt = struct.pack("<HBBiiiIIIIII", 0x10b, 0, 0, 4096, 512, 512, 0, 0x1000, 0x400000, 8, 8, 4)
-    opt += b"\x00" * (0xe0 - 28)
-    pe = pe_sig + coff + opt
+    coff   = struct.pack("<HHIIIHH", 0x14c, 3, 0, 0, 0, 0xe0, 0x0102)
+    opt    = struct.pack("<HBBiiiIIIIII", 0x10b, 0, 0, 4096, 512, 512, 0, 0x1000, 0x400000, 8, 8, 4)
+    opt   += b"\x00" * (0xe0 - 28)
+    pe     = pe_sig + coff + opt
     header = dos + pe + b"\x00" * (0x400 - len(dos + pe))
-    # Body: repeating IL-like opcodes and metadata tokens
     opcodes = bytes([0x02, 0x03, 0x04, 0x17, 0x1a, 0x20, 0x28, 0x2a, 0x6f, 0x7b, 0x7c, 0x7d, 0x00])
     body = b""
     for i in range(3000):
         token = struct.pack("<I", 0x0A000001 + (i % 500))
         body += bytes([opcodes[i % len(opcodes)]]) + token
         if i % 20 == 0:
-            # string literal pattern
             s = f"MethodName_{i % 100}\x00".encode()
             body += s
     return write(path, header + body)
@@ -549,14 +522,14 @@ def main():
         manifest.append({"name": name, "category": category, "ext": ext,
                          "file": f"{name}{ext}", "bytes": size})
 
-    print(f"Generating special benchmark files → {out}/")
+    print(f"Generating special benchmark files -> {out}/")
 
     size = gen_stl_binary(f"{out}/mesh_sphere.stl")
     add("mesh_sphere", "3D_filter_target", ".stl", size)
     print(f"  mesh_sphere.stl          {size:>10,} bytes")
 
     size = gen_ply_binary(f"{out}/mesh_sphere.ply")
-    add("mesh_sphere", "3D_filter_target", ".ply", size)
+    add("mesh_sphere_ply", "3D_filter_target", ".ply", size)
     print(f"  mesh_sphere.ply          {size:>10,} bytes")
 
     size = gen_glb(f"{out}/scene.glb")
@@ -583,9 +556,13 @@ def main():
     add("SampleScene", "Unity", ".unity", size)
     print(f"  SampleScene.unity        {size:>10,} bytes")
 
-    size = gen_terrain_raw(f"{out}/Terrain.raw")
+    size = gen_terrain_raw(f"{out}/Terrain.raw", w=513, h=513, seed_x=0.05, seed_y=0.05)
     add("Terrain", "Unity", ".raw", size)
     print(f"  Terrain.raw              {size:>10,} bytes")
+
+    size = gen_terrain_raw(f"{out}/Terrain_large.raw", w=1025, h=1025, seed_x=0.03, seed_y=0.03)
+    add("Terrain_large", "Unity", ".raw", size)
+    print(f"  Terrain_large.raw        {size:>10,} bytes")
 
     size = gen_unity_shader(f"{out}/Shaders.shader")
     add("Shaders", "Unity", ".shader", size)
@@ -607,23 +584,10 @@ def main():
     add("Assembly", "Binary", ".dll", size)
     print(f"  Assembly.dll             {size:>10,} bytes")
 
-    size = gen_terrain_raw(f"{out}/Terrain_large.raw")
-    # Overwrite with a 1025x1025 version for a larger test
-    w2, h2 = 1025, 1025
-    data2 = b""
-    for y in range(h2):
-        for x in range(w2):
-            height = int((math.sin(x*0.03)*math.cos(y*0.03)*0.5 + 0.5)*65535)
-            data2 += struct.pack("<H", max(0,min(65535,height)))
-    size2 = write(f"{out}/Terrain_large.raw", data2)
-    manifest[-1] = {"name": "Terrain_large", "category": "Unity", "ext": ".raw",
-                    "file": "Terrain_large.raw", "bytes": size2}
-    print(f"  Terrain_large.raw        {size2:>10,} bytes")
-
     manifest_path = f"{out}/special_manifest.json"
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
-    print(f"\nManifest written → {manifest_path}")
+    print(f"\nManifest written -> {manifest_path}")
     print(f"Total files: {len(manifest)}")
 
 if __name__ == "__main__":

@@ -60,7 +60,14 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     let to_fold: &[u8] = filter_buf.as_deref().unwrap_or(input);
 
     // ── Incompressible early exit ─────────────────────────────────────────────
-    if input.len() > INCOMPRESSIBLE_MIN_BYTES {
+    // Skipped when a structural filter was applied: detect_filter() already
+    // confirmed the data is a known structured format (STL, WAV, BMP…).
+    // Byte-plane shuffle and delta transforms reduce LZ-visible redundancy
+    // without necessarily lowering per-byte Shannon entropy, so the entropy
+    // gate would incorrectly bail out on shuffled float data.
+    let skip_entropy_gate = filter_flag != filters::FILTER_NONE;
+
+    if !skip_entropy_gate && input.len() > INCOMPRESSIBLE_MIN_BYTES {
         let ent = sample_entropy(to_fold);
         if ent > INCOMPRESSIBLE_ENTROPY_THRESHOLD {
             println!(
@@ -134,7 +141,6 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                     None
                 };
 
-            // Variant pool: v1-v6
             let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6]
                 .into_par_iter()
                 .map(|flag| {
@@ -172,16 +178,12 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
 
             let sz = |o: &Option<Vec<u8>>| o.as_ref().map(|p| p.len()).unwrap_or(usize::MAX);
 
-            // ── Log all variant sizes ─────────────────────────────────────────
             {
                 let detail: Vec<String> = results.iter()
                     .map(|(f, o)| {
                         let s = sz(o);
-                        if s == usize::MAX {
-                            format!("v{}=skip", f)
-                        } else {
-                            format!("v{}={}B", f, s)
-                        }
+                        if s == usize::MAX { format!("v{}=skip", f) }
+                        else               { format!("v{}={}B", f, s) }
                     })
                     .collect();
                 println!("Entropy variant sizes (raw={}B): {}", raw_size, detail.join(" "));
@@ -190,17 +192,11 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let best_size = results.iter().map(|(_, o)| sz(o)).min().unwrap_or(usize::MAX);
 
             if best_size >= raw_size {
-                // ── BUG FIX: was format!("v{}={}", f, sz(o)) which printed
-                // usize::MAX (18446744073709551615) for skipped variants.
-                // Now mirrors the same guard used in the variant-sizes log above.
                 let detail: Vec<String> = results.iter()
                     .map(|(f, o)| {
                         let s = sz(o);
-                        if s == usize::MAX {
-                            format!("v{}=skip", f)
-                        } else {
-                            format!("v{}={}B", f, s)
-                        }
+                        if s == usize::MAX { format!("v{}=skip", f) }
+                        else               { format!("v{}={}B", f, s) }
                     })
                     .collect();
                 println!(
@@ -391,7 +387,6 @@ fn pair_vs_entropy(
             None
         };
 
-    // Variant pool: v1-v6
     let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6]
         .into_par_iter()
         .map(|flag| {
@@ -427,7 +422,6 @@ fn pair_vs_entropy(
         })
         .collect();
 
-    // ── Log all variant sizes ─────────────────────────────────────────────────
     {
         let detail: Vec<String> = results.iter()
             .map(|(f, o)| match o {

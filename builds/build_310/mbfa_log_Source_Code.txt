@@ -1,0 +1,14 @@
+Original size: 234840 bits (29355 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=86278
+  discovery (capped 2MB/chain=256): discovered ob=15 lb=8
+  chain_limit (constrained ob=15): 256  raw_cost=81796
+  constrained wins: ob=15 lb=8 raw_cost=81796 vs baseline raw_cost=86278
+Window diagnostics: 2381/4846 tokens BACKREF (49.1%) | offset: 0.0% at max (32767) | 5.1% upper half | length: 0.0% at max (255) | offset_bits=15 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=15 (window=32767 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 81800 bits (10225 bytes)
+Fold 2 pairing pre-scan: Cantor fallback rate = 66.4% (threshold 77%)
+Fold 2 (PAIR): 78536 bits (9817 bytes)
+Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.334, threshold 0.10)
+Entropy variant sizes (fold1 est=10225B): v1=7909B v2=8166B v3=9245B v4=7951B v5=8208B v6=7925B
+Entropy flag=1 beats PAIR: 7909 B < 9817 B
+Done. 29355 bytes → 7915 bytes

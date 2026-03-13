@@ -1,14 +1,4 @@
 # .github/workflows/mbfa-special.yml
-# Special benchmark suite — game engine files, filter targets, config formats, custom formats.
-# Runs when:
-#   - commit message contains --special or --all
-#   - workflow_dispatch
-#
-# Architecture:
-#   Job 1 (gen-files):   Run scripts/gen_special_files.py → upload artifact
-#   Job 2 (benchmark):   Download artifact → run MBFA + competitors → produce results.json
-#   Job 3 (deploy):      Deploy HTML report to gh-pages/special/
-
 name: MBFA Special Benchmark
 
 on:
@@ -20,7 +10,7 @@ on:
 
 permissions:
   contents: write
-  actions: read
+  actions: write
 
 jobs:
 
@@ -118,13 +108,13 @@ jobs:
             ./target/release/mbfa decompress "${f}.mbfa" "${f}.recovered" > /dev/null 2>&1
             if ! diff "$f" "${f}.recovered" > /dev/null 2>&1; then
               echo "  FAIL: $(basename $f)"
-              FAILED=1
+              FAILED=$((FAILED+1))
             else
               echo "  OK:   $(basename $f)"
             fi
           done
-          if [ "$FAILED" = "1" ]; then
-            echo "Roundtrip failures detected"
+          if [ "$FAILED" != "0" ]; then
+            echo "Roundtrip failures detected: $FAILED"
             exit 1
           fi
           echo "All roundtrips passed"
@@ -137,108 +127,138 @@ jobs:
           FIRST=true
 
           run_bench() {
-            local file=$1
-            local name=$2
-            local category=$3
-            local orig_size=$(wc -c < "bench_files_special/$file")
+            local file="$1"
+            local name="$2"
+            local category="$3"
+            local orig_size
+            orig_size=$(wc -c < "bench_files_special/$file")
 
-            # MBFA
-            local mbfa_start=$(date +%s%N)
-            ./target/release/mbfa compress "bench_files_special/$file" "bench_files_special/${file}.mbfa" \
-              > /tmp/mbfa_log_${name}.txt 2>&1
-            local mbfa_end=$(date +%s%N)
-            local mbfa_ms=$(( (mbfa_end - mbfa_start) / 1000000 ))
-            local mbfa_size=$(wc -c < "bench_files_special/${file}.mbfa" 2>/dev/null || echo 0)
+            # ── MBFA ──────────────────────────────────────────────────────────
+            local mbfa_start mbfa_end mbfa_ms mbfa_size
+            mbfa_start=$(date +%s%N)
+            ./target/release/mbfa compress "bench_files_special/$file" \
+              "bench_files_special/${file}.mbfa" \
+              > "/tmp/mbfa_log_${name}.txt" 2>&1
+            mbfa_end=$(date +%s%N)
+            mbfa_ms=$(( (mbfa_end - mbfa_start) / 1000000 ))
+            mbfa_size=$(wc -c < "bench_files_special/${file}.mbfa" 2>/dev/null || echo 0)
 
-            local decomp_start=$(date +%s%N)
+            local decomp_start decomp_end mbfa_decomp_ms
+            decomp_start=$(date +%s%N)
             ./target/release/mbfa decompress "bench_files_special/${file}.mbfa" \
               "bench_files_special/${file}.recovered" > /dev/null 2>&1
-            local decomp_end=$(date +%s%N)
-            local mbfa_decomp_ms=$(( (decomp_end - decomp_start) / 1000000 ))
+            decomp_end=$(date +%s%N)
+            mbfa_decomp_ms=$(( (decomp_end - decomp_start) / 1000000 ))
 
             local roundtrip="PASS"
             if ! diff "bench_files_special/$file" "bench_files_special/${file}.recovered" > /dev/null 2>&1; then
               roundtrip="FAIL"
             fi
 
-            local fold_detail=$(cat /tmp/mbfa_log_${name}.txt | \
-              grep -E "^(Original|Fold|Done|Joint|Entropy|Window|Filter)" | \
-              tr '\n' '|' | sed 's/"/\\"/g')
+            local fold_detail
+            fold_detail=$(grep -E "^(Original|Fold|Done|Joint|Entropy|Window|Filter)" \
+              "/tmp/mbfa_log_${name}.txt" 2>/dev/null | tr '\n' '|' | sed 's/"/\\"/g')
 
-            # gzip
-            local gz_start=$(date +%s%N)
+            # ── gzip ──────────────────────────────────────────────────────────
+            local gz_start gz_end gz_ms gz_size gz_decomp_start gz_decomp_end gz_decomp_ms
+            gz_start=$(date +%s%N)
             gzip -k -f "bench_files_special/$file" 2>/dev/null
-            local gz_ms=$(( ($(date +%s%N) - gz_start) / 1000000 ))
-            local gz_size=$(wc -c < "bench_files_special/${file}.gz" 2>/dev/null || echo 0)
+            gz_end=$(date +%s%N)
+            gz_ms=$(( (gz_end - gz_start) / 1000000 ))
+            gz_size=$(wc -c < "bench_files_special/${file}.gz" 2>/dev/null || echo 0)
+            gz_decomp_start=$(date +%s%N)
+            gzip -d -k -f -c "bench_files_special/${file}.gz" > /dev/null 2>/dev/null
+            gz_decomp_end=$(date +%s%N)
+            gz_decomp_ms=$(( (gz_decomp_end - gz_decomp_start) / 1000000 ))
 
-            # zstd
-            local zst_start=$(date +%s%N)
+            # ── zstd ──────────────────────────────────────────────────────────
+            local zst_start zst_end zst_ms zst_size zst_decomp_start zst_decomp_end zst_decomp_ms
+            zst_start=$(date +%s%N)
             zstd -q -f "bench_files_special/$file" -o "bench_files_special/${file}.zst" 2>/dev/null
-            local zst_ms=$(( ($(date +%s%N) - zst_start) / 1000000 ))
-            local zst_size=$(wc -c < "bench_files_special/${file}.zst" 2>/dev/null || echo 0)
+            zst_end=$(date +%s%N)
+            zst_ms=$(( (zst_end - zst_start) / 1000000 ))
+            zst_size=$(wc -c < "bench_files_special/${file}.zst" 2>/dev/null || echo 0)
+            zst_decomp_start=$(date +%s%N)
+            zstd -d -q -f -c "bench_files_special/${file}.zst" > /dev/null 2>/dev/null
+            zst_decomp_end=$(date +%s%N)
+            zst_decomp_ms=$(( (zst_decomp_end - zst_decomp_start) / 1000000 ))
 
-            # xz
-            local xz_start=$(date +%s%N)
+            # ── xz ────────────────────────────────────────────────────────────
+            local xz_start xz_end xz_ms xz_size xz_decomp_start xz_decomp_end xz_decomp_ms
+            xz_start=$(date +%s%N)
             xz -k -f "bench_files_special/$file" 2>/dev/null
-            local xz_ms=$(( ($(date +%s%N) - xz_start) / 1000000 ))
-            local xz_size=$(wc -c < "bench_files_special/${file}.xz" 2>/dev/null || echo 0)
+            xz_end=$(date +%s%N)
+            xz_ms=$(( (xz_end - xz_start) / 1000000 ))
+            xz_size=$(wc -c < "bench_files_special/${file}.xz" 2>/dev/null || echo 0)
+            xz_decomp_start=$(date +%s%N)
+            xz -d -k -f -c "bench_files_special/${file}.xz" > /dev/null 2>/dev/null
+            xz_decomp_end=$(date +%s%N)
+            xz_decomp_ms=$(( (xz_decomp_end - xz_decomp_start) / 1000000 ))
 
-            # brotli
-            local br_start=$(date +%s%N)
+            # ── brotli ────────────────────────────────────────────────────────
+            local br_start br_end br_ms br_size br_decomp_start br_decomp_end br_decomp_ms
+            br_start=$(date +%s%N)
             brotli -k -f "bench_files_special/$file" -o "bench_files_special/${file}.br" 2>/dev/null
-            local br_ms=$(( ($(date +%s%N) - br_start) / 1000000 ))
-            local br_size=$(wc -c < "bench_files_special/${file}.br" 2>/dev/null || echo 0)
+            br_end=$(date +%s%N)
+            br_ms=$(( (br_end - br_start) / 1000000 ))
+            br_size=$(wc -c < "bench_files_special/${file}.br" 2>/dev/null || echo 0)
+            br_decomp_start=$(date +%s%N)
+            brotli -d -k -f -c "bench_files_special/${file}.br" > /dev/null 2>/dev/null
+            br_decomp_end=$(date +%s%N)
+            br_decomp_ms=$(( (br_decomp_end - br_decomp_start) / 1000000 ))
 
-            # zpaq
-            local zpaq_start=$(date +%s%N)
+            # ── zpaq ──────────────────────────────────────────────────────────
+            local zpaq_start zpaq_end zpaq_ms zpaq_size zpaq_decomp_ms
+            zpaq_start=$(date +%s%N)
             zpaq a "bench_files_special/${file}.zpaq" "bench_files_special/$file" \
               -method 2 > /dev/null 2>&1 || true
-            local zpaq_ms=$(( ($(date +%s%N) - zpaq_start) / 1000000 ))
-            local zpaq_size=$(wc -c < "bench_files_special/${file}.zpaq" 2>/dev/null || echo 0)
+            zpaq_end=$(date +%s%N)
+            zpaq_ms=$(( (zpaq_end - zpaq_start) / 1000000 ))
+            zpaq_size=$(wc -c < "bench_files_special/${file}.zpaq" 2>/dev/null || echo 0)
+            zpaq_decomp_ms=0
+            if [ "$zpaq_size" -gt 0 ]; then
+              local zpaq_d_start zpaq_d_end
+              zpaq_d_start=$(date +%s%N)
+              zpaq e "bench_files_special/${file}.zpaq" \
+                -to "/tmp/zpaq_decomp_$$" > /dev/null 2>&1 || true
+              zpaq_d_end=$(date +%s%N)
+              zpaq_decomp_ms=$(( (zpaq_d_end - zpaq_d_start) / 1000000 ))
+              rm -rf "/tmp/zpaq_decomp_$$"
+            fi
 
-            local mbfa_pct=$(fix_pct $(echo "scale=2; $mbfa_size * 100 / $orig_size" | bc))
-            local gz_pct=$(fix_pct   $(echo "scale=2; $gz_size   * 100 / $orig_size" | bc))
-            local zst_pct=$(fix_pct  $(echo "scale=2; $zst_size  * 100 / $orig_size" | bc))
-            local xz_pct=$(fix_pct   $(echo "scale=2; $xz_size   * 100 / $orig_size" | bc))
-            local br_pct=$(fix_pct   $(echo "scale=2; $br_size   * 100 / $orig_size" | bc))
-            local zpaq_pct=$(fix_pct $(echo "scale=2; $zpaq_size * 100 / $orig_size" | bc))
+            # ── percentages and rank ───────────────────────────────────────────
+            local mbfa_pct gz_pct zst_pct xz_pct br_pct zpaq_pct
+            mbfa_pct=$(fix_pct "$(echo "scale=2; $mbfa_size * 100 / $orig_size" | bc)")
+            gz_pct=$(fix_pct   "$(echo "scale=2; $gz_size   * 100 / $orig_size" | bc)")
+            zst_pct=$(fix_pct  "$(echo "scale=2; $zst_size  * 100 / $orig_size" | bc)")
+            xz_pct=$(fix_pct   "$(echo "scale=2; $xz_size   * 100 / $orig_size" | bc)")
+            br_pct=$(fix_pct   "$(echo "scale=2; $br_size   * 100 / $orig_size" | bc)")
+            zpaq_pct=$(fix_pct "$(echo "scale=2; $zpaq_size * 100 / $orig_size" | bc)")
 
-            local all_pcts="$mbfa_pct $gz_pct $zst_pct $xz_pct $br_pct $zpaq_pct"
-            local rank=$(echo "$all_pcts" | tr ' ' '\n' | sort -n | \
+            local all_pcts rank
+            all_pcts="$mbfa_pct $gz_pct $zst_pct $xz_pct $br_pct $zpaq_pct"
+            rank=$(echo "$all_pcts" | tr ' ' '\n' | sort -n | \
               grep -n "^${mbfa_pct}$" | head -1 | cut -d: -f1)
             [ -z "$rank" ] && rank="-"
 
             if [ "$FIRST" = "true" ]; then FIRST=false; else echo "," >> bench_files_special/special_results.json; fi
 
             cat >> bench_files_special/special_results.json << EOJSON
-          {
-            "dataset": "$name",
-            "category": "$category",
-            "original_bytes": $orig_size,
-            "mbfa_bytes": $mbfa_size,
-            "mbfa_pct": $mbfa_pct,
-            "mbfa_ms": $mbfa_ms,
-            "mbfa_decomp_ms": $mbfa_decomp_ms,
-            "mbfa_roundtrip": "$roundtrip",
-            "mbfa_rank": $rank,
-            "gzip_bytes": $gz_size,
-            "gzip_pct": $gz_pct,
-            "gzip_ms": $gz_ms,
-            "zstd_bytes": $zst_size,
-            "zstd_pct": $zst_pct,
-            "zstd_ms": $zst_ms,
-            "xz_bytes": $xz_size,
-            "xz_pct": $xz_pct,
-            "xz_ms": $xz_ms,
-            "brotli_bytes": $br_size,
-            "brotli_pct": $br_pct,
-            "brotli_ms": $br_ms,
-            "zpaq_bytes": $zpaq_size,
-            "zpaq_pct": $zpaq_pct,
-            "zpaq_ms": $zpaq_ms,
-            "fold_detail": "$fold_detail"
-          }
-          EOJSON
+{
+  "dataset": "$name",
+  "category": "$category",
+  "original_bytes": $orig_size,
+  "mbfa_bytes": $mbfa_size,   "mbfa_pct": $mbfa_pct,   "mbfa_ms": $mbfa_ms,   "mbfa_decomp_ms": $mbfa_decomp_ms,
+  "mbfa_roundtrip": "$roundtrip",
+  "mbfa_rank": $rank,
+  "gzip_bytes": $gz_size,     "gzip_pct": $gz_pct,     "gzip_ms": $gz_ms,     "gzip_decomp_ms": $gz_decomp_ms,
+  "zstd_bytes": $zst_size,    "zstd_pct": $zst_pct,    "zstd_ms": $zst_ms,    "zstd_decomp_ms": $zst_decomp_ms,
+  "xz_bytes": $xz_size,       "xz_pct": $xz_pct,       "xz_ms": $xz_ms,       "xz_decomp_ms": $xz_decomp_ms,
+  "brotli_bytes": $br_size,   "brotli_pct": $br_pct,   "brotli_ms": $br_ms,   "brotli_decomp_ms": $br_decomp_ms,
+  "zpaq_bytes": $zpaq_size,   "zpaq_pct": $zpaq_pct,   "zpaq_ms": $zpaq_ms,   "zpaq_decomp_ms": $zpaq_decomp_ms,
+  "fold_detail": "$fold_detail"
+}
+EOJSON
 
             printf "%-28s [%-16s] %8s B | MBFA:%6s%%(#%-1s) C:%-4sms D:%-4sms | rt:%s\n" \
               "$name" "$category" "$orig_size" \
@@ -271,7 +291,7 @@ jobs:
           run_bench "DefaultEngine.ini" "Unreal_ini"       "Unreal"
 
           echo ""
-          echo "── Config & Script Formats ──────────────────────────────────────"
+          echo "── Config and Script Formats ────────────────────────────────────"
           run_bench "k8s_config.yaml"   "YAML_Config"      "Config"
           run_bench "services.toml"     "TOML_Config"      "Config"
           run_bench "platform.mdix"     "DixScript_mdix"   "DixScript"
@@ -281,6 +301,7 @@ jobs:
           run_bench "Assembly.dll"      "DLL_Assembly"     "Binary"
 
           echo "]" >> bench_files_special/special_results.json
+
           echo ""
           echo "================================================================"
           echo "Lower % = better. rt = roundtrip."
@@ -305,298 +326,54 @@ jobs:
           name: special-results-${{ github.run_number }}
           path: special_results/
 
-      - name: Generate special HTML report
+      - name: Generate special HTML report from template
         run: |
           BUILD_DATE=$(date -u)
           BUILD_NUM="${{ github.run_number }}"
           COMMIT="${{ github.sha }}"
           BRANCH="${{ github.ref_name }}"
-          RESULTS=$(cat special_results/special_results.json)
 
-          cat > special_results/index.html << HTMLEOF
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>MBFA Special Benchmark — Build #${BUILD_NUM}</title>
-            <style>
-              @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap');
-              :root {
-                --orange:#f78166;--blue:#79c0ff;--purple:#a371f7;
-                --green:#3fb950;--yellow:#e3b341;--red:#f85149;
-                --grey:#8b949e;--dim:#484f58;--bg:#0d1117;--card:#161b22;
-                --border:#30363d;--text:#e6edf3;
-              }
-              *{box-sizing:border-box;margin:0;padding:0;}
-              body{background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;padding:32px 20px;}
-              .container{max-width:1100px;margin:0 auto;}
-              header{border-bottom:2px solid var(--orange);padding-bottom:18px;margin-bottom:28px;}
-              header h1{font-size:1.9rem;font-weight:800;color:var(--orange);}
-              header h1 span{color:var(--text);}
-              .meta{color:var(--grey);font-family:'JetBrains Mono',monospace;font-size:0.8rem;margin-top:6px;}
-              .back-link{display:inline-flex;align-items:center;gap:6px;color:var(--grey);
-                font-size:0.8rem;text-decoration:none;margin-bottom:14px;padding:5px 12px;
-                background:var(--card);border:1px solid var(--border);border-radius:6px;}
-              .back-link:hover{color:var(--text);}
-              .section-title{font-size:1rem;font-weight:700;color:var(--orange);
-                border-left:3px solid var(--orange);padding-left:10px;margin:24px 0 12px;}
-              table{width:100%;border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:0.73rem;margin-bottom:8px;}
-              th{background:var(--card);color:var(--grey);padding:8px 10px;text-align:left;border-bottom:1px solid var(--border);}
-              td{padding:7px 10px;border-bottom:1px solid #1c2128;}
-              tr:hover td{background:rgba(255,255,255,0.02);}
-              .win{color:var(--green);font-weight:700;}
-              .ok{color:var(--yellow);}
-              .lose{color:var(--grey);}
-              .pass{color:var(--green);}
-              .fail{color:var(--red);font-weight:700;}
-              .cat-badge{font-size:0.65rem;padding:2px 6px;border-radius:8px;
-                background:rgba(121,192,255,0.1);border:1px solid rgba(121,192,255,0.3);
-                color:var(--blue);}
-              /* Upload section */
-              .upload-card{background:var(--card);border:1px solid var(--border);border-radius:10px;
-                padding:24px;margin-top:24px;}
-              .upload-card h2{font-size:1rem;font-weight:700;color:var(--text);margin-bottom:14px;
-                border-left:3px solid var(--purple);padding-left:10px;}
-              .drop-zone{border:2px dashed var(--border);border-radius:8px;padding:32px;
-                text-align:center;color:var(--grey);font-size:0.85rem;cursor:pointer;
-                transition:border-color 0.15s;}
-              .drop-zone:hover,.drop-zone.drag-over{border-color:var(--orange);color:var(--text);}
-              .upload-btn{background:rgba(247,129,102,0.1);border:1px solid var(--orange);
-                color:var(--orange);padding:8px 20px;border-radius:6px;cursor:pointer;
-                font-family:'Syne',sans-serif;font-size:0.85rem;margin-top:12px;}
-              .upload-btn:disabled{opacity:0.4;cursor:not-allowed;}
-              .result-box{background:var(--bg);border:1px solid var(--border);border-radius:6px;
-                padding:14px;margin-top:14px;font-family:'JetBrains Mono',monospace;font-size:0.75rem;
-                display:none;}
-              .result-row{display:flex;justify-content:space-between;padding:3px 0;
-                border-bottom:1px solid #1c2128;}
-              .result-row:last-child{border-bottom:none;}
-              .rl{color:var(--grey);}
-              .rv{color:var(--text);font-weight:700;}
-              .rv.good{color:var(--green);}
-              .rv.bad{color:var(--red);}
-              .progress-bar{height:4px;background:var(--border);border-radius:2px;
-                margin-top:8px;overflow:hidden;display:none;}
-              .progress-fill{height:100%;background:var(--orange);width:0%;
-                transition:width 0.3s;border-radius:2px;}
-            </style>
-          </head>
-          <body>
-          <div class="container">
-            <a class="back-link" href="../">← Main Benchmarks</a>
-            <header>
-              <h1>🎮 MBFA <span>Special Benchmark</span></h1>
-              <div class="meta">Build #${BUILD_NUM} | Branch: ${BRANCH} | Commit: ${COMMIT:0:8} | ${BUILD_DATE}</div>
-              <div class="meta" style="margin-top:4px;color:var(--blue)">
-                Game engine assets · 3D filter targets · Config formats · DixScript · File upload
-              </div>
-            </header>
+          cp .github/special-template.html special_results/index.html
 
-            <div id="results-container"></div>
+          sed -i "s/BUILD_NUM_PLACEHOLDER/${BUILD_NUM}/g"  special_results/index.html
+          sed -i "s/BRANCH_PLACEHOLDER/${BRANCH}/g"        special_results/index.html
+          sed -i "s/COMMIT_PLACEHOLDER/${COMMIT:0:8}/g"    special_results/index.html
+          sed -i "s|DATE_PLACEHOLDER|${BUILD_DATE}|g"      special_results/index.html
 
-            <!-- File Upload Section -->
-            <div class="upload-card">
-              <h2>📁 Direct File Test</h2>
-              <p style="color:var(--grey);font-size:0.82rem;margin-bottom:14px;">
-                Upload any file to compress and decompress it locally in your browser using MBFA WASM.
-                Results show ratio, compression time, decompression time, and size comparison.
-                <br><span style="color:var(--dim)">Note: WASM must be built and deployed separately.
-                If unavailable, results will show a notice.</span>
-              </p>
-              <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
-                <div>Drop a file here or click to browse</div>
-                <div style="font-size:0.72rem;margin-top:6px;color:var(--dim)">
-                  Any file type · Processed locally · Nothing uploaded
-                </div>
-              </div>
-              <input type="file" id="file-input" style="display:none">
-              <div class="progress-bar" id="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
-              <div class="result-box" id="result-box"></div>
-            </div>
-          </div>
-
-          <script>
-          const RESULTS = ${RESULTS};
-
-          function fmtBytes(n) {
-            if (n >= 1048576) return (n/1048576).toFixed(2) + ' MB';
-            if (n >= 1024) return (n/1024).toFixed(1) + ' KB';
-            return n + ' B';
-          }
-
-          function rankClass(rank) {
-            if (rank === 1) return 'win';
-            if (rank <= 2) return 'ok';
-            return 'lose';
-          }
-
-          function buildTable(rows) {
-            const cols = [
-              {h:'Dataset',        k:'dataset'},
-              {h:'Category',       k:'category'},
-              {h:'Original',       k:'original_bytes', fmt: r => fmtBytes(r.original_bytes)},
-              {h:'MBFA',           k:'mbfa_pct',       fmt: r => `<span class="${rankClass(r.mbfa_rank)}">${r.mbfa_pct}% (#${r.mbfa_rank})</span>`},
-              {h:'C ms',           k:'mbfa_ms'},
-              {h:'D ms',           k:'mbfa_decomp_ms'},
-              {h:'gzip',           k:'gzip_pct',        fmt: r => r.gzip_pct+'%'},
-              {h:'zstd',           k:'zstd_pct',        fmt: r => r.zstd_pct+'%'},
-              {h:'xz',             k:'xz_pct',          fmt: r => r.xz_pct+'%'},
-              {h:'brotli',         k:'brotli_pct',      fmt: r => r.brotli_pct+'%'},
-              {h:'zpaq',           k:'zpaq_pct',        fmt: r => r.zpaq_pct+'%'},
-              {h:'RT',             k:'mbfa_roundtrip',  fmt: r => `<span class="${r.mbfa_roundtrip==='PASS'?'pass':'fail'}">${r.mbfa_roundtrip}</span>`},
-            ];
-            let html = '<table><thead><tr>' + cols.map(c=>`<th>${c.h}</th>`).join('') + '</tr></thead><tbody>';
-            for (const r of rows) {
-              html += '<tr>' + cols.map(c => {
-                const val = c.fmt ? c.fmt(r) : (r[c.k] ?? '');
-                if (c.k === 'category') return `<td><span class="cat-badge">${val}</span></td>`;
-                return `<td>${val}</td>`;
-              }).join('') + '</tr>';
-            }
-            html += '</tbody></table>';
-            return html;
-          }
-
-          function renderResults() {
-            const categories = [...new Set(RESULTS.map(r => r.category))];
-            const container  = document.getElementById('results-container');
-            let html = '';
-            for (const cat of categories) {
-              const rows = RESULTS.filter(r => r.category === cat);
-              const catLabel = {
-                '3D_filter_target': '3D Filter Targets',
-                'Unity':  'Unity Project Files',
-                'Unreal': 'Unreal Project Files',
-                'Config': 'Config & Script Formats',
-                'DixScript': 'DixScript (.mdix)',
-                'Binary': 'Binary / Assembly',
-              }[cat] || cat;
-              html += `<div class="section-title">${catLabel}</div>`;
-              html += buildTable(rows);
-            }
-            container.innerHTML = html;
-          }
-
-          // ── File upload / compress ───────────────────────────────────────────
-          const dropZone  = document.getElementById('drop-zone');
-          const fileInput = document.getElementById('file-input');
-          const resultBox = document.getElementById('result-box');
-          const progBar   = document.getElementById('progress-bar');
-          const progFill  = document.getElementById('progress-fill');
-
-          dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
-          dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-          dropZone.addEventListener('drop', e => {
-            e.preventDefault();
-            dropZone.classList.remove('drag-over');
-            if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
-          });
-          fileInput.addEventListener('change', () => {
-            if (fileInput.files[0]) handleFile(fileInput.files[0]);
-          });
-
-          function showProgress(pct) {
-            progBar.style.display = 'block';
-            progFill.style.width  = pct + '%';
-          }
-
-          async function handleFile(file) {
-            resultBox.style.display = 'none';
-            showProgress(10);
-
-            const origSize = file.size;
-            const arrBuf   = await file.arrayBuffer();
-            const bytes    = new Uint8Array(arrBuf);
-            showProgress(30);
-
-            // Check for WASM availability
-            if (typeof window.mbfa_compress !== 'function') {
-              showProgress(100);
-              resultBox.style.display = 'block';
-              resultBox.innerHTML = `
-                <div class="result-row">
-                  <span class="rl">File</span>
-                  <span class="rv">${file.name} (${fmtBytes(origSize)})</span>
-                </div>
-                <div class="result-row">
-                  <span class="rl">WASM status</span>
-                  <span class="rv bad">MBFA WASM not loaded</span>
-                </div>
-                <div class="result-row">
-                  <span class="rl">Note</span>
-                  <span class="rv" style="color:var(--grey)">
-                    Build mbfa with wasm-pack and deploy mbfa_bg.wasm + mbfa.js
-                    to the gh-pages root to enable in-browser compression.
-                  </span>
-                </div>`;
-              return;
-            }
-
-            try {
-              showProgress(40);
-              const compStart  = performance.now();
-              const compressed = window.mbfa_compress(bytes);
-              const compMs     = (performance.now() - compStart).toFixed(1);
-              showProgress(70);
-
-              const decompStart    = performance.now();
-              const decompressed   = window.mbfa_decompress(compressed);
-              const decompMs       = (performance.now() - decompStart).toFixed(1);
-              showProgress(95);
-
-              const ratio    = (compressed.length / origSize * 100).toFixed(2);
-              const saved    = origSize - compressed.length;
-              const rtMatch  = decompressed.length === origSize;
-              showProgress(100);
-
-              resultBox.style.display = 'block';
-              resultBox.innerHTML = `
-                <div class="result-row"><span class="rl">File</span><span class="rv">${file.name}</span></div>
-                <div class="result-row"><span class="rl">Original</span><span class="rv">${fmtBytes(origSize)}</span></div>
-                <div class="result-row"><span class="rl">Compressed</span><span class="rv ${ratio < 100 ? 'good' : 'bad'}">${fmtBytes(compressed.length)}</span></div>
-                <div class="result-row"><span class="rl">Ratio</span><span class="rv ${ratio < 100 ? 'good' : 'bad'}">${ratio}%</span></div>
-                <div class="result-row"><span class="rl">Space saved</span><span class="rv">${fmtBytes(saved)}</span></div>
-                <div class="result-row"><span class="rl">Compress time</span><span class="rv">${compMs} ms</span></div>
-                <div class="result-row"><span class="rl">Decompress time</span><span class="rv">${decompMs} ms</span></div>
-                <div class="result-row"><span class="rl">Roundtrip</span>
-                  <span class="rv ${rtMatch ? 'good' : 'bad'}">${rtMatch ? 'PASS' : 'FAIL — size mismatch'}</span></div>`;
-
-            } catch(e) {
-              showProgress(100);
-              resultBox.style.display = 'block';
-              resultBox.innerHTML = `
-                <div class="result-row"><span class="rl">Error</span>
-                  <span class="rv bad">${e.message || String(e)}</span></div>`;
-            }
-          }
-
-          renderResults();
-          </script>
-          </body>
-          </html>
-          HTMLEOF
-          echo "HTML report generated"
+          echo "HTML report generated from template"
 
       - name: Deploy to gh-pages/special
         run: |
           git config --global user.name "MBFA CI"
           git config --global user.email "ci@mbfa.dev"
 
+          WORK=$(mktemp -d)
+
           if git fetch origin gh-pages:gh-pages 2>/dev/null; then
-            git worktree add /tmp/gh-pages gh-pages
+            git worktree add "$WORK" gh-pages
           else
-            git worktree add --orphan -b gh-pages /tmp/gh-pages
+            git worktree add --orphan -b gh-pages "$WORK"
           fi
 
-          mkdir -p /tmp/gh-pages/special/builds/build_${{ github.run_number }}
-          cp special_results/index.html /tmp/gh-pages/special/index.html
-          cp special_results/special_results.json /tmp/gh-pages/special/builds/build_${{ github.run_number }}/results.json
+          mkdir -p "$WORK/special"
+          cp special_results/index.html       "$WORK/special/index.html"
+          cp special_results/special_results.json "$WORK/special/results.json"
 
-          cd /tmp/gh-pages
-          git add .
-          git diff --staged --quiet && echo "No changes" && exit 0
+          cd "$WORK"
+          git add special/
+          git diff --staged --quiet && echo "No changes to special/" && exit 0
           git commit -m "MBFA special benchmark — Build #${{ github.run_number }} [skip ci]"
           git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
 
           echo "Deployed to https://mid-d-man.github.io/mbfa/special/"
+
+  summary:
+    runs-on: ubuntu-latest
+    needs: [parse-commit]
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "MBFA Special Benchmark — Build #${{ github.run_number }}"
+          echo "Triggered: ${{ needs.parse-commit.outputs.should_run }}"
+          echo "Use --special or --all in commit message to run special benchmarks."

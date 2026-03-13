@@ -466,21 +466,16 @@ jobs:
               echo "," >> bench_results/results.json
             fi
 
-            cat >> bench_results/results.json << EOJSON
-{
-  "dataset": "$name",
-  "original_bytes": $orig_size,
-  "mbfa_bytes": $mbfa_size,   "mbfa_pct": $mbfa_pct,   "mbfa_ms": $mbfa_ms,   "mbfa_decomp_ms": $mbfa_decomp_ms,
-  "mbfa_roundtrip": "$roundtrip",
-  "mbfa_rank": $rank,
-  "gzip_bytes": $gz_size,     "gzip_pct": $gz_pct,     "gzip_ms": $gz_ms,     "gzip_decomp_ms": $gz_decomp_ms,
-  "zstd_bytes": $zst_size,    "zstd_pct": $zst_pct,    "zstd_ms": $zst_ms,    "zstd_decomp_ms": $zst_decomp_ms,
-  "xz_bytes": $xz_size,       "xz_pct": $xz_pct,       "xz_ms": $xz_ms,       "xz_decomp_ms": $xz_decomp_ms,
-  "brotli_bytes": $br_size,   "brotli_pct": $br_pct,   "brotli_ms": $br_ms,   "brotli_decomp_ms": $br_decomp_ms,
-  "zpaq_bytes": $zpaq_size,   "zpaq_pct": $zpaq_pct,   "zpaq_ms": $zpaq_ms,   "zpaq_decomp_ms": $zpaq_decomp_ms,
-  "fold_detail": "$fold_detail"
-}
-EOJSON
+            printf '{\n  "dataset": "%s",\n  "original_bytes": %s,\n  "mbfa_bytes": %s, "mbfa_pct": %s, "mbfa_ms": %s, "mbfa_decomp_ms": %s,\n  "mbfa_roundtrip": "%s",\n  "mbfa_rank": %s,\n  "gzip_bytes": %s, "gzip_pct": %s, "gzip_ms": %s, "gzip_decomp_ms": %s,\n  "zstd_bytes": %s, "zstd_pct": %s, "zstd_ms": %s, "zstd_decomp_ms": %s,\n  "xz_bytes": %s, "xz_pct": %s, "xz_ms": %s, "xz_decomp_ms": %s,\n  "brotli_bytes": %s, "brotli_pct": %s, "brotli_ms": %s, "brotli_decomp_ms": %s,\n  "zpaq_bytes": %s, "zpaq_pct": %s, "zpaq_ms": %s, "zpaq_decomp_ms": %s,\n  "fold_detail": "%s"\n}' \
+              "$name" "$orig_size" \
+              "$mbfa_size" "$mbfa_pct" "$mbfa_ms" "$mbfa_decomp_ms" \
+              "$roundtrip" "$rank" \
+              "$gz_size" "$gz_pct" "$gz_ms" "$gz_decomp_ms" \
+              "$zst_size" "$zst_pct" "$zst_ms" "$zst_decomp_ms" \
+              "$xz_size" "$xz_pct" "$xz_ms" "$xz_decomp_ms" \
+              "$br_size" "$br_pct" "$br_ms" "$br_decomp_ms" \
+              "$zpaq_size" "$zpaq_pct" "$zpaq_ms" "$zpaq_decomp_ms" \
+              "$fold_detail" >> bench_results/results.json
 
             local rank_str="#${rank}"
             printf "%-28s %9s B | MBFA:%6s%%(%-2s) C:%-4sms D:%-4sms | gz C:%-4sms D:%-4sms | rt:%s\n" \

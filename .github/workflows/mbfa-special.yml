@@ -133,7 +133,6 @@ jobs:
             local orig_size
             orig_size=$(wc -c < "bench_files_special/$file")
 
-            # ── MBFA ──────────────────────────────────────────────────────────
             local mbfa_start mbfa_end mbfa_ms mbfa_size
             mbfa_start=$(date +%s%N)
             ./target/release/mbfa compress "bench_files_special/$file" \
@@ -159,7 +158,6 @@ jobs:
             fold_detail=$(grep -E "^(Original|Fold|Done|Joint|Entropy|Window|Filter)" \
               "/tmp/mbfa_log_${name}.txt" 2>/dev/null | tr '\n' '|' | sed 's/"/\\"/g')
 
-            # ── gzip ──────────────────────────────────────────────────────────
             local gz_start gz_end gz_ms gz_size gz_decomp_start gz_decomp_end gz_decomp_ms
             gz_start=$(date +%s%N)
             gzip -k -f "bench_files_special/$file" 2>/dev/null
@@ -171,7 +169,6 @@ jobs:
             gz_decomp_end=$(date +%s%N)
             gz_decomp_ms=$(( (gz_decomp_end - gz_decomp_start) / 1000000 ))
 
-            # ── zstd ──────────────────────────────────────────────────────────
             local zst_start zst_end zst_ms zst_size zst_decomp_start zst_decomp_end zst_decomp_ms
             zst_start=$(date +%s%N)
             zstd -q -f "bench_files_special/$file" -o "bench_files_special/${file}.zst" 2>/dev/null
@@ -183,7 +180,6 @@ jobs:
             zst_decomp_end=$(date +%s%N)
             zst_decomp_ms=$(( (zst_decomp_end - zst_decomp_start) / 1000000 ))
 
-            # ── xz ────────────────────────────────────────────────────────────
             local xz_start xz_end xz_ms xz_size xz_decomp_start xz_decomp_end xz_decomp_ms
             xz_start=$(date +%s%N)
             xz -k -f "bench_files_special/$file" 2>/dev/null
@@ -195,7 +191,6 @@ jobs:
             xz_decomp_end=$(date +%s%N)
             xz_decomp_ms=$(( (xz_decomp_end - xz_decomp_start) / 1000000 ))
 
-            # ── brotli ────────────────────────────────────────────────────────
             local br_start br_end br_ms br_size br_decomp_start br_decomp_end br_decomp_ms
             br_start=$(date +%s%N)
             brotli -k -f "bench_files_special/$file" -o "bench_files_special/${file}.br" 2>/dev/null
@@ -207,7 +202,6 @@ jobs:
             br_decomp_end=$(date +%s%N)
             br_decomp_ms=$(( (br_decomp_end - br_decomp_start) / 1000000 ))
 
-            # ── zpaq ──────────────────────────────────────────────────────────
             local zpaq_start zpaq_end zpaq_ms zpaq_size zpaq_decomp_ms
             zpaq_start=$(date +%s%N)
             zpaq a "bench_files_special/${file}.zpaq" "bench_files_special/$file" \
@@ -226,7 +220,6 @@ jobs:
               rm -rf "/tmp/zpaq_decomp_$$"
             fi
 
-            # ── percentages and rank ───────────────────────────────────────────
             local mbfa_pct gz_pct zst_pct xz_pct br_pct zpaq_pct
             mbfa_pct=$(fix_pct "$(echo "scale=2; $mbfa_size * 100 / $orig_size" | bc)")
             gz_pct=$(fix_pct   "$(echo "scale=2; $gz_size   * 100 / $orig_size" | bc)")
@@ -243,22 +236,16 @@ jobs:
 
             if [ "$FIRST" = "true" ]; then FIRST=false; else echo "," >> bench_files_special/special_results.json; fi
 
-            cat >> bench_files_special/special_results.json << EOJSON
-{
-  "dataset": "$name",
-  "category": "$category",
-  "original_bytes": $orig_size,
-  "mbfa_bytes": $mbfa_size,   "mbfa_pct": $mbfa_pct,   "mbfa_ms": $mbfa_ms,   "mbfa_decomp_ms": $mbfa_decomp_ms,
-  "mbfa_roundtrip": "$roundtrip",
-  "mbfa_rank": $rank,
-  "gzip_bytes": $gz_size,     "gzip_pct": $gz_pct,     "gzip_ms": $gz_ms,     "gzip_decomp_ms": $gz_decomp_ms,
-  "zstd_bytes": $zst_size,    "zstd_pct": $zst_pct,    "zstd_ms": $zst_ms,    "zstd_decomp_ms": $zst_decomp_ms,
-  "xz_bytes": $xz_size,       "xz_pct": $xz_pct,       "xz_ms": $xz_ms,       "xz_decomp_ms": $xz_decomp_ms,
-  "brotli_bytes": $br_size,   "brotli_pct": $br_pct,   "brotli_ms": $br_ms,   "brotli_decomp_ms": $br_decomp_ms,
-  "zpaq_bytes": $zpaq_size,   "zpaq_pct": $zpaq_pct,   "zpaq_ms": $zpaq_ms,   "zpaq_decomp_ms": $zpaq_decomp_ms,
-  "fold_detail": "$fold_detail"
-}
-EOJSON
+            printf '{\n  "dataset": "%s",\n  "category": "%s",\n  "original_bytes": %s,\n  "mbfa_bytes": %s, "mbfa_pct": %s, "mbfa_ms": %s, "mbfa_decomp_ms": %s,\n  "mbfa_roundtrip": "%s",\n  "mbfa_rank": %s,\n  "gzip_bytes": %s, "gzip_pct": %s, "gzip_ms": %s, "gzip_decomp_ms": %s,\n  "zstd_bytes": %s, "zstd_pct": %s, "zstd_ms": %s, "zstd_decomp_ms": %s,\n  "xz_bytes": %s, "xz_pct": %s, "xz_ms": %s, "xz_decomp_ms": %s,\n  "brotli_bytes": %s, "brotli_pct": %s, "brotli_ms": %s, "brotli_decomp_ms": %s,\n  "zpaq_bytes": %s, "zpaq_pct": %s, "zpaq_ms": %s, "zpaq_decomp_ms": %s,\n  "fold_detail": "%s"\n}' \
+              "$name" "$category" "$orig_size" \
+              "$mbfa_size" "$mbfa_pct" "$mbfa_ms" "$mbfa_decomp_ms" \
+              "$roundtrip" "$rank" \
+              "$gz_size" "$gz_pct" "$gz_ms" "$gz_decomp_ms" \
+              "$zst_size" "$zst_pct" "$zst_ms" "$zst_decomp_ms" \
+              "$xz_size" "$xz_pct" "$xz_ms" "$xz_decomp_ms" \
+              "$br_size" "$br_pct" "$br_ms" "$br_decomp_ms" \
+              "$zpaq_size" "$zpaq_pct" "$zpaq_ms" "$zpaq_decomp_ms" \
+              "$fold_detail" >> bench_files_special/special_results.json
 
             printf "%-28s [%-16s] %8s B | MBFA:%6s%%(#%-1s) C:%-4sms D:%-4sms | rt:%s\n" \
               "$name" "$category" "$orig_size" \
@@ -356,8 +343,8 @@ EOJSON
           fi
 
           mkdir -p "$WORK/special"
-          cp special_results/index.html       "$WORK/special/index.html"
-          cp special_results/special_results.json "$WORK/special/results.json"
+          cp special_results/index.html            "$WORK/special/index.html"
+          cp special_results/special_results.json  "$WORK/special/results.json"
 
           cd "$WORK"
           git add special/

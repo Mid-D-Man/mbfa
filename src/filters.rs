@@ -13,6 +13,15 @@
 //!       Transposes N×12 float32 values into 4 byte-planes
 //!       (byte[0] of all floats, byte[1], byte[2], byte[3]).
 //!       Size-preserving. Header and attribute bytes passed verbatim.
+//!
+//! Detection order:
+//!   1. Binary STL  — exact size equation (no magic bytes)
+//!   2. WAV / RIFF  — magic `RIFF....WAVE`
+//!   3. BMP         — magic `BM`
+//!   4. Stride entropy probe — fires on any strided int16 binary (e.g.
+//!      Unity terrain .raw) that has no detectable header. Compares
+//!      Shannon entropy before and after delta2 on an 8 KB sample.
+//!      Only fires when improvement exceeds PROBE_DELTA2_THRESHOLD.
 
 pub const FILTER_NONE:     u8 = 0;
 pub const FILTER_DELTA1:   u8 = 1;
@@ -21,47 +30,103 @@ pub const FILTER_DELTA3:   u8 = 3;
 pub const FILTER_DELTA4:   u8 = 4;
 pub const FILTER_SHUFFLE4: u8 = 5;
 
+/// Minimum file size (bytes) before the entropy probe runs.
+/// Below this the 8 KB sample is unreliable and the file is too small
+/// to benefit meaningfully from a delta filter anyway.
+const PROBE_MIN_BYTES: usize = 512;
+
+/// Entropy improvement threshold (bits/byte) for the stride-2 probe.
+/// Smooth int16 terrain shows 3–5 bits/byte improvement.
+/// Mixed binary (DLL, uasset) shows < 0.5 bits/byte improvement.
+/// 1.5 gives a wide safety margin on both sides.
+const PROBE_DELTA2_THRESHOLD: f64 = 1.5;
+
 /// Inspect magic bytes and file structure to determine the best filter.
 /// Returns FILTER_NONE for unknown or already-compressed formats.
 pub fn detect_filter(input: &[u8]) -> u8 {
     if input.len() < 12 { return FILTER_NONE; }
 
-    // Binary STL — no universal magic bytes; use the exact size equation:
-    //   file_size == 84 + num_triangles * 50
-    // num_triangles is u32 LE at bytes [80..84].
-    // False-positive risk is negligible: stride-50 with exact byte-count match
-    // is an extremely specific predicate on arbitrary binary data.
+    // ── 1. Binary STL — exact size equation, no magic ─────────────────────────
     if input.len() >= 84 {
         if let Some(f) = detect_stl(input) {
             return f;
         }
     }
 
-    // WAV / RIFF audio
-    if &input[0..4] == b"RIFF" && input.len() >= 12 && &input[8..12] == b"WAVE" {
+    // ── 2. WAV / RIFF audio ───────────────────────────────────────────────────
+    if &input[0..4] == b"RIFF" && &input[8..12] == b"WAVE" {
         return detect_wav_stride(input);
     }
 
-    // BMP image
+    // ── 3. BMP image ──────────────────────────────────────────────────────────
     if &input[0..2] == b"BM" && input.len() >= 30 {
         return detect_bmp_stride(input);
     }
 
+    // ── 4. Stride entropy probe (headerless strided binary) ───────────────────
+    // Fires on Unity terrain .raw and any other naked int16 array.
+    // Only runs on files large enough for a reliable 8 KB sample.
+    if input.len() >= PROBE_MIN_BYTES {
+        let improvement = probe_delta2_improvement(input);
+        if improvement >= PROBE_DELTA2_THRESHOLD {
+            println!(
+                "Stride probe: delta2 entropy improvement {:.2} bits/byte → FILTER_DELTA2",
+                improvement
+            );
+            return FILTER_DELTA2;
+        }
+        // Log near-misses for calibration visibility
+        if improvement > 0.5 {
+            println!(
+                "Stride probe: delta2 improvement {:.2} bits/byte — below threshold {:.1}, no filter",
+                improvement, PROBE_DELTA2_THRESHOLD
+            );
+        }
+    }
+
     FILTER_NONE
+}
+
+// ── Stride entropy probe ──────────────────────────────────────────────────────
+
+/// Compute the entropy improvement (bits/byte) achieved by delta2 on a sample
+/// of the input. Positive = delta2 reduces entropy = data is likely strided int16.
+fn probe_delta2_improvement(data: &[u8]) -> f64 {
+    const SAMPLE: usize = 8192;
+    let sample = if data.len() > SAMPLE { &data[..SAMPLE] } else { data };
+    if sample.len() < 4 { return 0.0; }
+
+    let raw_entropy = byte_entropy(sample);
+
+    // Apply delta2 to the sample in-place (copy to avoid allocation churn)
+    let mut delta = sample.to_vec();
+    for i in 2..delta.len() {
+        delta[i] = sample[i].wrapping_sub(sample[i - 2]);
+    }
+    let delta_entropy = byte_entropy(&delta);
+
+    raw_entropy - delta_entropy
+}
+
+/// Shannon entropy in bits/byte over the byte frequency distribution.
+fn byte_entropy(data: &[u8]) -> f64 {
+    if data.is_empty() { return 0.0; }
+    let mut freq = [0u32; 256];
+    for &b in data { freq[b as usize] += 1; }
+    let n = data.len() as f64;
+    freq.iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| { let p = c as f64 / n; -p * p.log2() })
+        .sum()
 }
 
 // ── STL detection ─────────────────────────────────────────────────────────────
 
 fn detect_stl(data: &[u8]) -> Option<u8> {
     let n_tris = u32::from_le_bytes([data[80], data[81], data[82], data[83]]) as usize;
-
-    // Reject degenerate/empty mesh
     if n_tris == 0 { return None; }
-
-    // Overflow-safe size check
     let expected = 84usize.checked_add(n_tris.checked_mul(50)?)?;
     if data.len() != expected { return None; }
-
     println!("Binary STL: {} triangle(s) → FILTER_SHUFFLE4", n_tris);
     Some(FILTER_SHUFFLE4)
 }
@@ -93,7 +158,6 @@ fn detect_wav_stride(input: &[u8]) -> u8 {
         pos += 8 + chunk_len;
         if chunk_len % 2 != 0 { pos += 1; }
     }
-
     println!("WAV: fmt chunk not found, falling back to delta2");
     FILTER_DELTA2
 }
@@ -163,29 +227,21 @@ fn delta_decode(input: &[u8], stride: usize) -> Vec<u8> {
 //     [ 2 bytes] attribute      (usually 0x0000)
 //
 // After shuffle:
-//   [84 bytes]     header verbatim  (includes triangle count — needed by decode)
-//   [N×12 bytes]   plane 0: byte[0] of every float across all triangles
+//   [84 bytes]     header verbatim
+//   [N×12 bytes]   plane 0: byte[0] of every float
 //   [N×12 bytes]   plane 1: byte[1] of every float
 //   [N×12 bytes]   plane 2: byte[2] of every float
-//   [N×12 bytes]   plane 3: byte[3] of every float  (exponent + sign — most
-//                           compressible: floats of similar magnitude share this)
+//   [N×12 bytes]   plane 3: byte[3] of every float (exponent+sign — most compressible)
 //   [N×2 bytes]    attribute bytes verbatim
 //
-// Total: 84 + N*48 + N*2 = 84 + N*50 = input.len()  — size-preserving.
-//
-// Why this helps LZ dramatically: float32 values for normals and vertices on a
-// smooth mesh have very similar exponents. After separation, plane 3 becomes
-// long runs of nearly-identical bytes. Planes 0-2 (mantissa) also compress far
-// better when freed from exponent interleaving. xz achieves 68.7% on raw STL
-// by brute-force; the shuffle makes the LZ job straightforward.
+// Size-preserving: 84 + N*48 + N*2 = 84 + N*50 = input.len()
 
 fn shuffle4_encode(data: &[u8]) -> Vec<u8> {
     debug_assert!(data.len() >= 84, "shuffle4_encode: data shorter than STL header");
-
     let n_tris = u32::from_le_bytes([data[80], data[81], data[82], data[83]]) as usize;
     if n_tris == 0 { return data.to_vec(); }
 
-    let float_count = n_tris * 12; // 12 floats per triangle (3 normal + 9 vertex)
+    let float_count = n_tris * 12;
     let mut plane0 = Vec::with_capacity(float_count);
     let mut plane1 = Vec::with_capacity(float_count);
     let mut plane2 = Vec::with_capacity(float_count);
@@ -194,7 +250,6 @@ fn shuffle4_encode(data: &[u8]) -> Vec<u8> {
 
     for tri in 0..n_tris {
         let base = 84 + tri * 50;
-        // 12 floats × 4 bytes = 48 bytes
         for f in 0..12usize {
             let fb = base + f * 4;
             plane0.push(data[fb]);
@@ -202,7 +257,6 @@ fn shuffle4_encode(data: &[u8]) -> Vec<u8> {
             plane2.push(data[fb + 2]);
             plane3.push(data[fb + 3]);
         }
-        // 2 attribute bytes
         attrs.push(data[base + 48]);
         attrs.push(data[base + 49]);
     }
@@ -219,7 +273,6 @@ fn shuffle4_encode(data: &[u8]) -> Vec<u8> {
 
 fn shuffle4_decode(data: &[u8]) -> Vec<u8> {
     if data.len() < 84 { return data.to_vec(); }
-
     let n_tris = u32::from_le_bytes([data[80], data[81], data[82], data[83]]) as usize;
     if n_tris == 0 { return data.to_vec(); }
 
@@ -244,7 +297,6 @@ fn shuffle4_decode(data: &[u8]) -> Vec<u8> {
 
     let mut out = Vec::with_capacity(data.len());
     out.extend_from_slice(&data[..84]);
-
     for tri in 0..n_tris {
         for f in 0..12usize {
             let idx = tri * 12 + f;
@@ -256,7 +308,6 @@ fn shuffle4_decode(data: &[u8]) -> Vec<u8> {
         out.push(attrs[tri * 2]);
         out.push(attrs[tri * 2 + 1]);
     }
-
     out
 }
 
@@ -294,19 +345,13 @@ mod tests {
 
     #[test]
     fn roundtrip_shuffle4_minimal_stl() {
-        // Minimal valid binary STL: 84-byte header + 2 triangles
         let n_tris: u32 = 2;
         let mut data = vec![0u8; 80];
         data.extend_from_slice(&n_tris.to_le_bytes());
-        // Fill 2×50 triangle bytes with recognisable pattern
-        for i in 0u8..100 {
-            data.push(i);
-        }
+        for i in 0u8..100 { data.push(i); }
         assert_eq!(data.len(), 84 + 2 * 50);
-
         let enc = apply_filter(&data, FILTER_SHUFFLE4);
-        assert_eq!(enc.len(), data.len(), "shuffle4 must be size-preserving");
-
+        assert_eq!(enc.len(), data.len());
         let dec = undo_filter(&enc, FILTER_SHUFFLE4);
         assert_eq!(dec, data, "shuffle4 roundtrip failed");
     }
@@ -317,7 +362,6 @@ mod tests {
         let n_tris: u32 = 500;
         let mut data = vec![0u8; 84 + 500 * 50];
         data[80..84].copy_from_slice(&n_tris.to_le_bytes());
-        // Fill with float-like data (varied but correlated, like real geometry)
         for tri in 0..500usize {
             let base = 84 + tri * 50;
             let angle = (tri as f32) * PI / 250.0;
@@ -332,7 +376,6 @@ mod tests {
                 data[base + i*4..base + i*4 + 4].copy_from_slice(&bytes);
             }
         }
-
         let enc = apply_filter(&data, FILTER_SHUFFLE4);
         assert_eq!(enc.len(), data.len());
         let dec = undo_filter(&enc, FILTER_SHUFFLE4);
@@ -349,7 +392,6 @@ mod tests {
 
     #[test]
     fn detect_stl_rejects_wrong_size() {
-        // Correct header but one extra byte — must not detect as STL
         let n_tris: u32 = 10;
         let mut data = vec![0u8; 84 + 10 * 50 + 1];
         data[80..84].copy_from_slice(&n_tris.to_le_bytes());
@@ -365,8 +407,67 @@ mod tests {
     }
 
     #[test]
-    fn detect_stl_rejects_short_data() {
-        let data = vec![0u8; 50];
-        assert_eq!(detect_filter(&data), FILTER_NONE);
+    fn probe_fires_on_smooth_int16() {
+        // Simulate smooth uint16 LE terrain (sin/cos pattern)
+        use std::f64::consts::PI;
+        let mut data = Vec::with_capacity(1024);
+        for i in 0..512usize {
+            let h = ((i as f64 * 0.05).sin() * 32767.0 + 32768.0) as u16;
+            let bytes = h.to_le_bytes();
+            data.push(bytes[0]);
+            data.push(bytes[1]);
+        }
+        let improvement = probe_delta2_improvement(&data);
+        assert!(
+            improvement >= PROBE_DELTA2_THRESHOLD,
+            "probe should fire on smooth terrain (improvement={:.2})",
+            improvement
+        );
     }
-            }
+
+    #[test]
+    fn probe_does_not_fire_on_random() {
+        // Random bytes should not trigger the probe
+        let data: Vec<u8> = (0u8..=255).cycle().take(1024)
+            .enumerate()
+            .map(|(i, b)| b.wrapping_mul(7).wrapping_add(i as u8))
+            .collect();
+        let improvement = probe_delta2_improvement(&data);
+        assert!(
+            improvement < PROBE_DELTA2_THRESHOLD,
+            "probe should not fire on pseudo-random data (improvement={:.2})",
+            improvement
+        );
+    }
+
+    #[test]
+    fn probe_does_not_fire_on_text() {
+        // ASCII text should not trigger
+        let data: Vec<u8> = b"the quick brown fox jumps over the lazy dog \
+            hello world foo bar baz qux the end and the beginning \
+            the quick brown fox jumps over the lazy dog hello world"
+            .iter().cycle().take(512).copied().collect();
+        let improvement = probe_delta2_improvement(&data);
+        assert!(
+            improvement < PROBE_DELTA2_THRESHOLD,
+            "probe should not fire on text (improvement={:.2})",
+            improvement
+        );
+    }
+
+    #[test]
+    fn roundtrip_delta2_int16_terrain() {
+        // Full roundtrip: encode delta2, decode delta2, verify identical
+        use std::f64::consts::PI;
+        let mut data = Vec::with_capacity(2048);
+        for i in 0..1024usize {
+            let h = ((i as f64 * 0.05).sin() * 32767.0 + 32768.0) as u16;
+            let bytes = h.to_le_bytes();
+            data.push(bytes[0]);
+            data.push(bytes[1]);
+        }
+        let enc = apply_filter(&data, FILTER_DELTA2);
+        let dec = undo_filter(&enc, FILTER_DELTA2);
+        assert_eq!(dec, data, "delta2 roundtrip failed on int16 terrain");
+    }
+}

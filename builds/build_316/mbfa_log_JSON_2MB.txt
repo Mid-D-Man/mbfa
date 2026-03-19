@@ -1,0 +1,21 @@
+Original size: 25154240 bits (3144280 bytes)
+  fingerprint: entropy=4.14 size=3144280
+  fingerprint Rule 3: default -> ob=17 lb=8
+  Phase B scan: ob=17 lb=8 chain_limit=64 raw_cost=2115562
+  ceiling check: length peak clear (lb=8 lb_ceil=229)
+  Step 2: early exit ratio=8.4104% < 15% threshold -- lb confirmed ok at step 1, skipping Phase C
+Window diagnostics: 63575/109836 tokens BACKREF (57.9%) | offset: 0.0% at max (131071) | 16.7% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 2115568 bits (264446 bytes)
+Fold 2 pairing pre-scan: Cantor fallback rate = 99.9% (threshold 77%)
+Fold 2 pairing skipped — high fallback rate
+  chain_limit (baseline ob=17): 512  raw_cost=2409308
+  discovery (capped 2MB/chain=256): discovered ob=18 lb=8
+  chain_limit (constrained ob=18): 512  raw_cost=2424685
+  entropy tiebreaker: constrained est=1923887b vs baseline est=1920422b -> baseline wins
+  baseline wins: ob=17 lb=8 raw_cost=2409308 vs constrained raw_cost=2424685
+Fold 2 (LZ): 2409312 bits (301164 bytes)
+Fold 2 not worth it (ratio 1.139), stopping at fold 1
+Entropy variant sizes (raw=264446B): v1=205422B v2=202548B v3=202647B v4=199767B v5=196893B v6=205856B
+Joint entropy flag=5: 264446 → 196893 B
+Done. 3144280 bytes → 196899 bytes

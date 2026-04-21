@@ -13,17 +13,18 @@
 #       run: |
 #         git clone "https://github.com/Mid-D-Man/mbfa.git" \
 #           "$(dirname "$GITHUB_WORKSPACE")/mbfa"
+#         git config --global --add safe.directory \
+#           "$(dirname "$GITHUB_WORKSPACE")/mbfa"
 #
 #   Cargo.toml in MPX keeps:  mbfa = { path = "../mbfa" }
 #   No changes to MPX's Cargo.toml are needed.
 
 name: MBFA — Source Export & Build Verification
 
-# ── Toggle ────────────────────────────────────────────────────────────────────
-# Set AUTO_RUN_ENABLED to 'false' to pause automatic runs.
-# workflow_dispatch always runs regardless.
-env:
-  AUTO_RUN_ENABLED: 'true'
+# To pause automatic runs, go to:
+#   Settings → Secrets and variables → Actions → Variables
+# and set AUTO_RUN_ENABLED = false
+# workflow_dispatch always runs regardless of that variable.
 
 on:
   push:
@@ -36,7 +37,7 @@ permissions:
 jobs:
   verify-and-export:
     runs-on: ubuntu-latest
-    if: ${{ env.AUTO_RUN_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ vars.AUTO_RUN_ENABLED != 'false' || github.event_name == 'workflow_dispatch' }}
 
     steps:
       - name: Checkout MBFA
@@ -83,6 +84,8 @@ jobs:
           echo "- name: Checkout MBFA (sibling path dependency)" >> $GITHUB_STEP_SUMMARY
           echo "  run: |" >> $GITHUB_STEP_SUMMARY
           echo "    git clone \"https://github.com/Mid-D-Man/mbfa.git\" \\" >> $GITHUB_STEP_SUMMARY
+          echo "      \"\$(dirname \"\$GITHUB_WORKSPACE\")/mbfa\"" >> $GITHUB_STEP_SUMMARY
+          echo "    git config --global --add safe.directory \\" >> $GITHUB_STEP_SUMMARY
           echo "      \"\$(dirname \"\$GITHUB_WORKSPACE\")/mbfa\"" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

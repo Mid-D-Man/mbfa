@@ -1,0 +1,92 @@
+# mbfa/.github/workflows/mbfa-expose.yml
+#
+# This workflow exposes MBFA as a consumable dependency for sibling repos
+# (primarily MPX). It verifies the build is sound on every push to main
+# so that any repo doing `git clone https://github.com/Mid-D-Man/mbfa.git`
+# can trust they are getting a buildable, tested source tree.
+#
+# HOW MPX CONSUMES THIS:
+#   In MPX CI, replace `actions/checkout` with `path: ../mbfa` (which fails
+#   for paths outside the workspace) with a direct clone step:
+#
+#     - name: Checkout MBFA (sibling path dependency)
+#       run: |
+#         git clone "https://github.com/Mid-D-Man/mbfa.git" \
+#           "$(dirname "$GITHUB_WORKSPACE")/mbfa"
+#
+#   Cargo.toml in MPX keeps:  mbfa = { path = "../mbfa" }
+#   No changes to MPX's Cargo.toml are needed.
+
+name: MBFA — Source Export & Build Verification
+
+# ── Toggle ────────────────────────────────────────────────────────────────────
+# Set AUTO_RUN_ENABLED to 'false' to pause automatic runs.
+# workflow_dispatch always runs regardless.
+env:
+  AUTO_RUN_ENABLED: 'true'
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-export:
+    runs-on: ubuntu-latest
+    if: ${{ env.AUTO_RUN_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
+
+    steps:
+      - name: Checkout MBFA
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-cargo-expose-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release (verify source is healthy)
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --verbose 2>&1 | tee test-expose.txt
+
+      - name: Upload source snapshot as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mbfa-source-${{ github.sha }}
+          path: |
+            src/
+            Cargo.toml
+            README.md
+          retention-days: 30
+
+      - name: Step summary
+        run: |
+          echo "## MBFA Source Export — Build #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: \`${GITHUB_SHA:0:8}\`  Branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### How to consume in MPX CI" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`yaml" >> $GITHUB_STEP_SUMMARY
+          echo "- name: Checkout MBFA (sibling path dependency)" >> $GITHUB_STEP_SUMMARY
+          echo "  run: |" >> $GITHUB_STEP_SUMMARY
+          echo "    git clone \"https://github.com/Mid-D-Man/mbfa.git\" \\" >> $GITHUB_STEP_SUMMARY
+          echo "      \"\$(dirname \"\$GITHUB_WORKSPACE\")/mbfa\"" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test results" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          cat test-expose.txt >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

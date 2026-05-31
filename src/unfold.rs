@@ -156,10 +156,8 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
-        // v7: removed — prose-tuned context split was retired after session 6.
-        // This arm is kept only for backwards compatibility so that any .mbfa
-        // files compressed with the short-lived v7 variant produce a clean
-        // error rather than silently corrupting data.
+        // v7: removed — prose-tuned context split retired after session 6.
+        // Kept for backward compat error messaging only.
         7 => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -180,11 +178,13 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         let lb = lb_for_fold(pass);
 
         if pass == 2 && pair_flag == 1 {
+            // Fold 2 used pair encoding (Exp-Golomb). Reconstruct fold-1
+            // tokens from the pair stream, then reconstruct bytes from those.
             let ob1 = ob_for_fold(1);
             let lb1 = lb_for_fold(1);
             let tokens = pair_decode(&current, ob1, lb1)?;
             current = reconstruct(&tokens);
-            println!("Unfold pass 2 (PAIR) + pass 1 (LZ): {} bytes", current.len());
+            println!("Unfold pass 2 (PAIR/EG) + pass 1 (LZ): {} bytes", current.len());
             break;
         } else {
             let tokens = read_tokens(&current, ob, lb)?;
@@ -194,11 +194,18 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     }
 
     // ── Post-filter ───────────────────────────────────────────────────────────
+    // Dispatches to filters::undo_filter which handles all flags:
+    //   1-4:  delta stride  (backward compat + current)
+    //   5:    simple STL shuffle  (backward compat only)
+    //   6:    simple PLY shuffle  (backward compat only)
+    //   7:    STL shuffle + per-plane delta1  (current)
+    //   8:    PLY shuffle + per-plane delta1  (current)
+    //   9:    x86 BCJ reverse transform  (current)
     if filter_flag != filters::FILTER_NONE {
         let before = current.len();
         current = filters::undo_filter(&current, filter_flag);
         println!(
-            "Filter delta{} reversed: {} bytes → {} bytes",
+            "Filter flag={} reversed: {} bytes → {} bytes",
             filter_flag, before, current.len()
         );
     }
@@ -242,4 +249,4 @@ fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) 
         vec![LENGTH_BITS_DEFAULT; fold_count],
         payload_start,
     )
-}
+                }

@@ -97,11 +97,9 @@ fn diag_stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
 
 /// If Phase C widened ob or lb beyond baseline, print both the actual ratio
 /// and the hypothetical baseline ratio from the same token stream.
-/// The baseline figure is a slight underestimate of true Phase B cost
-/// (Phase B tokens would differ) but sufficient for threshold calibration.
 fn log_phase_c_gain(tokens: &[Token], ob: u32, lb: u32, input_len: usize) {
     if ob <= DIAG_BASELINE_OB && lb <= DIAG_BASELINE_LB {
-        return; // Phase C did not widen — nothing to report
+        return;
     }
     let input_bits      = input_len as f64 * 8.0;
     let actual_cost     = diag_stream_bit_cost(tokens, ob, lb);
@@ -129,7 +127,6 @@ pub fn fold(input: &[u8], max_folds: u8)
     let mut final_used_pairing = false;
     let mut fold1_tokens: Option<Vec<Token>> = None;
 
-    // Task 4: pre-allocate — max_folds is the hard upper bound on entries
     let mut offset_bits_per_fold: Vec<u32> = Vec::with_capacity(max_folds as usize);
     let mut length_bits_per_fold: Vec<u32> = Vec::with_capacity(max_folds as usize);
 
@@ -143,7 +140,22 @@ pub fn fold(input: &[u8], max_folds: u8)
 
         // ── Fold 1: adaptive scan on raw input ───────────────────────────────
         if fold_num == 1 {
-            let (tokens, ob, lb) = scan_adaptive(&current);
+            let (tokens, ob, lb, definitely_incompressible) = scan_adaptive(&current);
+
+            // Incompressible signal: the scanner detected that even with optimal
+            // parameters this data will expand. Skip folding entirely.
+            // folds_done stays 0 → lib.rs writes fold_count=0 → passthrough.
+            // current is unchanged (still = input / filtered input), which is
+            // the correct payload for a fold_count=0 passthrough header.
+            if definitely_incompressible {
+                println!(
+                    "Fold 1: incompressible signal from scanner — passthrough \
+                     ({} bytes stored as-is)",
+                    current.len()
+                );
+                folds_done = 0;
+                break;
+            }
 
             log_window_diagnostics(&tokens, ob, lb);
 
@@ -227,7 +239,15 @@ pub fn fold(input: &[u8], max_folds: u8)
                 .expect("fold1_tokens must be Some when use_pairing is true");
             (pair_encode(tokens, current_ob, current_lb)?, 0u32, 0u32)
         } else {
-            let (tokens, ob, lb) = scan_adaptive(&current);
+            let (tokens, ob, lb, definitely_incompressible) = scan_adaptive(&current);
+            // If the fold 2+ scan bails, stop here — fold 1 output is our best result.
+            if definitely_incompressible {
+                println!(
+                    "Fold {}: incompressible signal — stopping at fold {}",
+                    fold_num, folds_done
+                );
+                break;
+            }
             let encoded = write_tokens(&tokens, ob, lb)?;
             (encoded, ob, lb)
         };
@@ -269,4 +289,4 @@ pub fn fold(input: &[u8], max_folds: u8)
     }
 
     Ok((current, folds_done, final_used_pairing, offset_bits_per_fold, length_bits_per_fold, fold1_tokens))
-}
+        }

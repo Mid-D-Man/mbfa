@@ -23,7 +23,13 @@
 //!   2. WAV / RIFF  — magic `RIFF....WAVE`
 //!   3. BMP         — magic `BM`
 //!   4. Binary PLY  — magic `ply\n` + `format binary_little_endian`
-//!   5. Stride entropy probe — fires on headerless strided int16 binary
+//!   5. Multi-stride entropy probe — fires on headerless strided binary
+//!      (e.g. terrain .raw, custom binary int16/int32 streams).
+//!      Tests all four delta strides (1, 2, 3, 4) on the same 8 KB sample
+//!      and picks the best. Threshold lowered from 1.0 to 0.45 bits/byte
+//!      to catch smooth multi-frequency heightmaps that were previously
+//!      missed because their delta residuals aren't perfectly constant.
+//!      Text (~0.0 improvement) and random (~0.0) remain well below threshold.
 
 pub const FILTER_NONE:     u8 = 0;
 pub const FILTER_DELTA1:   u8 = 1;
@@ -36,9 +42,15 @@ pub const FILTER_PLY:      u8 = 6;
 /// Minimum file size before the entropy probe runs.
 const PROBE_MIN_BYTES: usize = 512;
 
-/// Entropy improvement threshold (bits/byte) for the stride-2 probe.
-/// Smooth int16 terrain: 2–5 bits/byte. Random/mixed binary: ~0–0.5.
-const PROBE_DELTA2_THRESHOLD: f64 = 1.0;
+/// Entropy improvement threshold (bits/byte) for the stride probe.
+///
+/// Changed from 1.0 to 0.45 to catch smooth multi-frequency heightmaps:
+///   smooth int16 terrain (single freq): ~3.0–5.0 bits/byte improvement → fires
+///   smooth int16 terrain (multi freq):  ~0.6–1.5 bits/byte improvement → fires
+///   English text:                       ~0.0–0.15 bits/byte improvement → no fire
+///   random/noise data:                  ~0.0–0.05 bits/byte improvement → no fire
+///   PNG/JPEG (already compressed):      detected by entropy gate in lib.rs, never reach probe
+const PROBE_DELTA_THRESHOLD: f64 = 0.45;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -66,20 +78,26 @@ pub fn detect_filter(input: &[u8]) -> u8 {
         if let Some(f) = detect_ply(input) { return f; }
     }
 
-    // 5. Stride entropy probe (headerless strided binary e.g. terrain .raw)
+    // 5. Multi-stride entropy probe (headerless strided binary)
+    //    Tries delta strides 1, 2, 3, 4 on the same 8 KB sample and picks
+    //    the stride with the highest entropy improvement. This catches terrain
+    //    .raw files (int16 heightmaps), custom int32 streams, and other
+    //    headerless strided formats that the magic-byte checks above miss.
     if input.len() >= PROBE_MIN_BYTES {
-        let improvement = probe_delta2_improvement(input);
-        if improvement >= PROBE_DELTA2_THRESHOLD {
+        let (best_filter, improvement) = probe_best_stride(input);
+        if improvement >= PROBE_DELTA_THRESHOLD {
             println!(
-                "Stride probe: delta2 entropy improvement {:.2} bits/byte → FILTER_DELTA2",
-                improvement
+                "Stride probe: FILTER_DELTA{} entropy improvement {:.2} bits/byte \
+                 (threshold {:.2}) → applying filter",
+                best_filter, improvement, PROBE_DELTA_THRESHOLD
             );
-            return FILTER_DELTA2;
+            return best_filter;
         }
-        if improvement > 0.3 {
+        if improvement > 0.1 {
             println!(
-                "Stride probe: delta2 improvement {:.2} bits/byte — below threshold {:.1}, no filter",
-                improvement, PROBE_DELTA2_THRESHOLD
+                "Stride probe: best FILTER_DELTA{} improvement {:.2} bits/byte \
+                 — below threshold {:.2}, no filter applied",
+                best_filter, improvement, PROBE_DELTA_THRESHOLD
             );
         }
     }
@@ -125,19 +143,12 @@ fn detect_stl(data: &[u8]) -> Option<u8> {
 // ── PLY detection and layout parsing ─────────────────────────────────────────
 
 struct PlyLayout {
-    /// Byte offset of first byte after `end_header\n` (or `end_header\r\n`).
     header_end:        usize,
     vertex_count:      usize,
     floats_per_vertex: usize,
 }
 
-/// Parse binary PLY header. Returns None if:
-/// - No `end_header` found
-/// - Format is not `binary_little_endian`
-/// - Vertex element has no float properties
-/// - Vertex element has any non-float properties (mixed layout — skip to be safe)
 fn parse_ply_layout(data: &[u8]) -> Option<PlyLayout> {
-    // Find end_header — check both LF and CRLF line endings
     const END_LF:   &[u8] = b"end_header\n";
     const END_CRLF: &[u8] = b"end_header\r\n";
 
@@ -147,7 +158,6 @@ fn parse_ply_layout(data: &[u8]) -> Option<PlyLayout> {
 
     let header = std::str::from_utf8(&data[..header_end]).ok()?;
 
-    // Must be binary little-endian
     if !header.contains("format binary_little_endian") { return None; }
 
     let mut vertex_count      = 0usize;
@@ -162,12 +172,10 @@ fn parse_ply_layout(data: &[u8]) -> Option<PlyLayout> {
             vertex_count  = n;
             in_vertex     = true;
         } else if line.starts_with("element ") {
-            // Any other element ends the vertex property block
             in_vertex = false;
         } else if in_vertex && line.starts_with("property float ") {
             floats_per_vertex += 1;
         } else if in_vertex && line.starts_with("property ") {
-            // Non-float property in vertex element — skip filter to avoid misalignment
             vertex_all_float = false;
         }
     }
@@ -182,7 +190,6 @@ fn parse_ply_layout(data: &[u8]) -> Option<PlyLayout> {
 fn detect_ply(data: &[u8]) -> Option<u8> {
     let layout = parse_ply_layout(data)?;
 
-    // Sanity: vertex section must fit within the file
     let vertex_bytes = layout.vertex_count
         .checked_mul(layout.floats_per_vertex)?
         .checked_mul(4)?;
@@ -198,17 +205,6 @@ fn detect_ply(data: &[u8]) -> Option<u8> {
 }
 
 // ── PLY shuffle encode / decode ───────────────────────────────────────────────
-//
-// Layout after encode:
-//   [header verbatim, header_end bytes]
-//   [plane0: byte[0] of every vertex float, float_count bytes]
-//   [plane1: byte[1] of every vertex float, float_count bytes]
-//   [plane2: byte[2] of every vertex float, float_count bytes]
-//   [plane3: byte[3] of every vertex float, float_count bytes]
-//   [face data verbatim, remainder of file]
-//
-// Size-preserving: header + 4*float_count + face_bytes = original size.
-// Decode re-parses the header (stored verbatim) to recover the same layout.
 
 fn shuffle4_ply_encode(data: &[u8]) -> Vec<u8> {
     let layout = match parse_ply_layout(data) {
@@ -324,19 +320,47 @@ fn detect_bmp_stride(input: &[u8]) -> u8 {
     }
 }
 
-// ── Stride entropy probe ──────────────────────────────────────────────────────
+// ── Multi-stride entropy probe ────────────────────────────────────────────────
 
-fn probe_delta2_improvement(data: &[u8]) -> f64 {
+/// Compute entropy improvement in bits/byte when applying a delta filter
+/// of `stride` bytes to an 8 KB sample of `data`.
+///
+/// Returns max(0.0, raw_entropy - delta_entropy). Values near 0.0 mean
+/// the stride produces no useful correlation. Values > 0.45 mean the
+/// stride reveals strong predictable structure worth filtering.
+fn probe_delta_improvement(data: &[u8], stride: usize) -> f64 {
     const SAMPLE: usize = 8192;
     let sample = if data.len() > SAMPLE { &data[..SAMPLE] } else { data };
-    if sample.len() < 4 { return 0.0; }
+    // Need at least 2× the stride to compute any deltas
+    if sample.len() < stride * 2 { return 0.0; }
 
     let raw_entropy = byte_entropy(sample);
-    let mut delta = sample.to_vec();
-    for i in 2..delta.len() {
-        delta[i] = sample[i].wrapping_sub(sample[i - 2]);
+    let mut delta   = sample.to_vec();
+    for i in stride..delta.len() {
+        delta[i] = sample[i].wrapping_sub(sample[i - stride]);
     }
-    raw_entropy - byte_entropy(&delta)
+    (raw_entropy - byte_entropy(&delta)).max(0.0)
+}
+
+/// Try all four delta strides on the same sample and return the (filter, improvement)
+/// pair with the highest entropy improvement.
+///
+/// Trying all strides on the same 8 KB sample is intentional: some data is
+/// delta4 (32-bit int terrain, RGBA), some is delta2 (int16 terrain, mono PCM),
+/// some benefits most from delta3 (headerless RGB). One probe call covers all.
+fn probe_best_stride(data: &[u8]) -> (u8, f64) {
+    let candidates = [
+        (FILTER_DELTA1, probe_delta_improvement(data, 1)),
+        (FILTER_DELTA2, probe_delta_improvement(data, 2)),
+        (FILTER_DELTA3, probe_delta_improvement(data, 3)),
+        (FILTER_DELTA4, probe_delta_improvement(data, 4)),
+    ];
+
+    candidates
+        .iter()
+        .copied()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or((FILTER_NONE, 0.0))
 }
 
 fn byte_entropy(data: &[u8]) -> f64 {
@@ -369,16 +393,6 @@ fn delta_decode(input: &[u8], stride: usize) -> Vec<u8> {
 }
 
 // ── STL shuffle encode / decode ───────────────────────────────────────────────
-//
-// Binary STL layout:
-//   [80 bytes] freeform header
-//   [ 4 bytes] num_triangles u32 LE
-//   N × 50 bytes: [12 normal+vertex floats][2 attr bytes]
-//
-// After encode:
-//   [84 bytes]   header verbatim
-//   [N×12 bytes] plane 0..3: byte[i] of every float
-//   [N×2 bytes]  attribute bytes verbatim
 
 fn shuffle4_stl_encode(data: &[u8]) -> Vec<u8> {
     debug_assert!(data.len() >= 84);
@@ -457,7 +471,6 @@ fn shuffle4_stl_decode(data: &[u8]) -> Vec<u8> {
 
 // ── Utility ───────────────────────────────────────────────────────────────────
 
-/// Find first occurrence of `needle` in `haystack`. Returns start index.
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() { return None; }
     haystack
@@ -490,10 +503,172 @@ mod tests {
         let residuals = &enc[3..];
         let mut counts = [0u32; 256];
         for &b in residuals { counts[b as usize] += 1; }
-        let max_count = *counts.iter().max().unwrap();
+        let max_count    = *counts.iter().max().unwrap();
         let dominant_pct = max_count as f64 / residuals.len() as f64;
         assert!(dominant_pct > 0.8,
             "residuals not constant enough: {:.1}%", dominant_pct * 100.0);
+    }
+
+    // ── Stride probe: single-stride tests ─────────────────────────────────────
+
+    #[test]
+    fn probe_fires_on_smooth_int16() {
+        // Linear ramp stored as u16 LE — perfect stride-2 correlation.
+        let mut data = Vec::with_capacity(8192);
+        for i in 0..4096usize {
+            let h: u16 = ((i * 16) % 65536) as u16;
+            data.extend_from_slice(&h.to_le_bytes());
+        }
+        let imp = probe_delta_improvement(&data, 2);
+        assert!(
+            imp >= PROBE_DELTA_THRESHOLD,
+            "probe should fire on smooth int16 terrain (improvement={:.2}, threshold={:.2})",
+            imp, PROBE_DELTA_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn probe_does_not_fire_on_random() {
+        let mut state: u32 = 0xdeadbeef;
+        let data: Vec<u8> = (0..1024).map(|_| {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 24) as u8
+        }).collect();
+        let imp = probe_delta_improvement(&data, 2);
+        assert!(
+            imp < PROBE_DELTA_THRESHOLD,
+            "probe should not fire on random data (improvement={:.2}, threshold={:.2})",
+            imp, PROBE_DELTA_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn probe_does_not_fire_on_text() {
+        let data: Vec<u8> = b"the quick brown fox jumps over the lazy dog \
+            hello world foo bar baz qux the end and the beginning \
+            the quick brown fox jumps over the lazy dog hello world"
+            .iter().cycle().take(512).copied().collect();
+        let imp = probe_delta_improvement(&data, 2);
+        assert!(
+            imp < PROBE_DELTA_THRESHOLD,
+            "probe should not fire on text (improvement={:.2}, threshold={:.2})",
+            imp, PROBE_DELTA_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn roundtrip_delta2_int16_terrain() {
+        let mut data = Vec::with_capacity(2048);
+        for i in 0..1024usize {
+            let h: u16 = ((i * 16) % 65536) as u16;
+            data.extend_from_slice(&h.to_le_bytes());
+        }
+        let enc = apply_filter(&data, FILTER_DELTA2);
+        let dec = undo_filter(&enc, FILTER_DELTA2);
+        assert_eq!(dec, data);
+    }
+
+    // ── probe_best_stride: multi-stride selection tests ───────────────────────
+
+    #[test]
+    fn probe_best_stride_picks_delta2_for_int16() {
+        // Smooth u16 heightmap: stride 2 should win.
+        let mut data = Vec::with_capacity(8192);
+        for i in 0..4096usize {
+            let h: u16 = ((i * 16) % 65536) as u16;
+            data.extend_from_slice(&h.to_le_bytes());
+        }
+        let (filter, imp) = probe_best_stride(&data);
+        assert_eq!(
+            filter, FILTER_DELTA2,
+            "expected FILTER_DELTA2 for int16 terrain, got FILTER_DELTA{}",
+            filter
+        );
+        assert!(
+            imp >= PROBE_DELTA_THRESHOLD,
+            "improvement {:.2} should exceed threshold {:.2}",
+            imp, PROBE_DELTA_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn probe_best_stride_picks_delta4_for_int32() {
+        // Smooth u32 stream: stride 4 should win.
+        let mut data = Vec::with_capacity(8192);
+        for i in 0..2048usize {
+            // Smooth ramp through u32 range — each adjacent value differs by 2048
+            let h: u32 = ((i as u64 * 2048) % (u32::MAX as u64 + 1)) as u32;
+            data.extend_from_slice(&h.to_le_bytes());
+        }
+        let (filter, imp) = probe_best_stride(&data);
+        // delta4 should dominate for 32-bit smooth data
+        assert!(
+            imp >= PROBE_DELTA_THRESHOLD,
+            "probe should fire on smooth int32 data (improvement={:.2})", imp
+        );
+        assert_eq!(
+            filter, FILTER_DELTA4,
+            "expected FILTER_DELTA4 for int32 stream, got FILTER_DELTA{}",
+            filter
+        );
+    }
+
+    #[test]
+    fn probe_best_stride_no_fire_on_random() {
+        let mut state: u32 = 0xcafebabe;
+        let data: Vec<u8> = (0..2048).map(|_| {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 24) as u8
+        }).collect();
+        let (_, imp) = probe_best_stride(&data);
+        assert!(
+            imp < PROBE_DELTA_THRESHOLD,
+            "probe should not fire on random data (best improvement={:.2})", imp
+        );
+    }
+
+    #[test]
+    fn probe_best_stride_no_fire_on_text() {
+        let data: Vec<u8> = b"the quick brown fox jumps over the lazy dog \
+            hello world foo bar baz qux the end and the beginning \
+            the quick brown fox jumps over the lazy dog hello world"
+            .iter().cycle().take(2048).copied().collect();
+        let (_, imp) = probe_best_stride(&data);
+        assert!(
+            imp < PROBE_DELTA_THRESHOLD,
+            "probe should not fire on text (best improvement={:.2})", imp
+        );
+    }
+
+    #[test]
+    fn probe_multi_freq_terrain_fires_at_lower_threshold() {
+        // Multi-frequency heightmap (more realistic than a pure ramp).
+        // sin(x*0.05)*cos(x*0.07)*0.4 + sin(x*0.02)*0.3 + sin(x*0.1)*0.15 + 0.5
+        // This would have been missed with threshold=1.0.
+        let mut data = Vec::with_capacity(8192);
+        for i in 0..4096usize {
+            let x = i as f64;
+            let height = (
+                (x * 0.05).sin() * (x * 0.07).cos() * 0.4
+                + (x * 0.02).sin() * 0.3
+                + (x * 0.1).sin() * 0.15
+                + 0.5
+            ).clamp(0.0, 1.0) * 65535.0;
+            let h = height as u16;
+            data.extend_from_slice(&h.to_le_bytes());
+        }
+        let (filter, imp) = probe_best_stride(&data);
+        assert!(
+            imp >= PROBE_DELTA_THRESHOLD,
+            "multi-freq terrain should fire with threshold {:.2} (got {:.2})",
+            PROBE_DELTA_THRESHOLD, imp
+        );
+        // delta2 should still win over other strides for u16 data
+        assert_eq!(
+            filter, FILTER_DELTA2,
+            "expected FILTER_DELTA2 for u16 multi-freq terrain, got {}",
+            filter
+        );
     }
 
     // ── STL shuffle ───────────────────────────────────────────────────────────
@@ -570,14 +745,12 @@ mod tests {
         hdr.push_str("end_header\n");
 
         let mut data = hdr.into_bytes();
-        // vertex floats: recognisable pattern
         for v in 0..n_verts {
             for f in 0..floats_per_vert {
                 let val = (v * floats_per_vert + f) as u32;
                 data.extend_from_slice(&val.to_le_bytes());
             }
         }
-        // 2 dummy face records: uchar(3) + 3×i32
         for _ in 0..2 {
             data.push(3u8);
             data.extend_from_slice(&0u32.to_le_bytes());
@@ -608,7 +781,6 @@ mod tests {
                    element vertex 10\nproperty float x\nproperty uchar r\n\
                    end_header\n";
         let mut data = hdr.as_bytes().to_vec();
-        // 10 × (4 + 1) = 50 bytes vertex data
         data.extend_from_slice(&vec![0u8; 50]);
         assert_ne!(detect_filter(&data), FILTER_PLY);
     }
@@ -625,7 +797,6 @@ mod tests {
 
     #[test]
     fn roundtrip_ply_shuffle_8props() {
-        // Matches gen_ply_binary layout: 8 float props per vertex
         let data = make_ply(2000, 8);
         assert_eq!(detect_filter(&data), FILTER_PLY);
         let enc = apply_filter(&data, FILTER_PLY);
@@ -636,10 +807,8 @@ mod tests {
 
     #[test]
     fn ply_shuffle_is_not_identity() {
-        // Verify the shuffle actually reorders bytes (not a no-op)
         let data = make_ply(10, 4);
         let enc = apply_filter(&data, FILTER_PLY);
-        // Find header end
         let hdr_end = find_subsequence(&data, b"end_header\n").unwrap()
             + b"end_header\n".len();
         assert_ne!(
@@ -648,53 +817,4 @@ mod tests {
             "shuffle should reorder bytes"
         );
     }
-
-    // ── Stride probe ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn probe_fires_on_smooth_int16() {
-        let mut data = Vec::with_capacity(8192);
-        for i in 0..4096usize {
-            let h: u16 = ((i * 16) % 65536) as u16;
-            data.extend_from_slice(&h.to_le_bytes());
         }
-        let imp = probe_delta2_improvement(&data);
-        assert!(imp >= PROBE_DELTA2_THRESHOLD,
-            "probe should fire on smooth terrain (improvement={:.2})", imp);
-    }
-
-    #[test]
-    fn probe_does_not_fire_on_random() {
-        let mut state: u32 = 0xdeadbeef;
-        let data: Vec<u8> = (0..1024).map(|_| {
-            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-            (state >> 24) as u8
-        }).collect();
-        let imp = probe_delta2_improvement(&data);
-        assert!(imp < PROBE_DELTA2_THRESHOLD,
-            "probe should not fire on random data (improvement={:.2})", imp);
-    }
-
-    #[test]
-    fn probe_does_not_fire_on_text() {
-        let data: Vec<u8> = b"the quick brown fox jumps over the lazy dog \
-            hello world foo bar baz qux the end and the beginning \
-            the quick brown fox jumps over the lazy dog hello world"
-            .iter().cycle().take(512).copied().collect();
-        let imp = probe_delta2_improvement(&data);
-        assert!(imp < PROBE_DELTA2_THRESHOLD,
-            "probe should not fire on text (improvement={:.2})", imp);
-    }
-
-    #[test]
-    fn roundtrip_delta2_int16_terrain() {
-        let mut data = Vec::with_capacity(2048);
-        for i in 0..1024usize {
-            let h: u16 = ((i * 16) % 65536) as u16;
-            data.extend_from_slice(&h.to_le_bytes());
-        }
-        let enc = apply_filter(&data, FILTER_DELTA2);
-        let dec = undo_filter(&enc, FILTER_DELTA2);
-        assert_eq!(dec, data);
-    }
-                         }

@@ -1,8 +1,21 @@
 // src/fold.rs
-// read_tokens import removed — fold1_tokens cache eliminates both decode
-// passes that previously occurred here (Task 6):
-//   1. cantor_fallback_rate pre-scan — now reads fold1_tokens directly
-//   2. pair_encode input — now reads fold1_tokens directly
+//
+// Changes from previous version:
+//   - Cantor-related code removed (cantor(), cantor_fallback_rate(),
+//     MAX_CANTOR_FALLBACK_RATE). Pair encoding now uses EG internally
+//     (see pairing.rs) and always produces valid output, so no pre-check needed.
+//
+//   - Fold 2+ strategy is now: try pair encoding first (if applicable),
+//     fall back to LZ if pair doesn't improve. Previously, pairing was
+//     either tried OR LZ was tried (never both). The new structure lets
+//     LZ still run for files like TOML_Config where pair fails but
+//     allow_lz_on_packed is true. This prevents the regression where removing
+//     the Cantor gate would have lost the LZ fold 2 improvement for such files.
+//
+//   - scan_adaptive now returns (Vec<Token>, u32, u32, bool) — the bool is
+//     the incompressible signal. When true, we stop folding and let lib.rs
+//     emit a fold_count=0 passthrough. See encoder.rs for details.
+
 use crate::encoder::scan_adaptive;
 use crate::bitwriter::write_tokens;
 use crate::pairing::pair_encode;
@@ -11,34 +24,16 @@ use crate::opcode::{
     LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits,
 };
 
-const MIN_IMPROVEMENT_RATIO:    f64   = 0.985;
-const MIN_FOLD_BITS:            usize = 64;
-const MIN_PAIR_BYTES:           usize = 512;
-const MAX_CANTOR_FALLBACK_RATE: f64   = 0.77;
-const FOLD2_LZ_MAX_RATIO:       f64   = 0.10;
+const MIN_IMPROVEMENT_RATIO: f64   = 0.985;
+const MIN_FOLD_BITS:         usize = 64;
+const MIN_PAIR_BYTES:        usize = 512;
+/// LZ on fold 2+ bytes only when fold-1 compressed very aggressively.
+/// When the ratio is already below 10%, fold 2 LZ can extract more.
+const FOLD2_LZ_MAX_RATIO:    f64   = 0.10;
 
-/// Baseline parameters used by Phase B in encoder.rs — mirrored here
-/// solely for the Phase C gain diagnostic. Do not use for anything else.
+/// Baseline parameters mirrored from encoder.rs for the Phase C diagnostic.
 const DIAG_BASELINE_OB: u32 = 17;
 const DIAG_BASELINE_LB: u32 = 8;
-
-fn cantor(x: u32, y: u32) -> u64 {
-    let s = (x + y) as u64;
-    s * (s + 1) / 2 + y as u64
-}
-
-fn cantor_fallback_rate(tokens: &[Token]) -> f64 {
-    let mut total_br: u64 = 0;
-    let mut fallbacks: u64 = 0;
-    for t in tokens {
-        if let Token::Backref { offset, length } = t {
-            total_br += 1;
-            if cantor(*offset, *length) >= 65536 { fallbacks += 1; }
-        }
-    }
-    if total_br == 0 { return 0.0; }
-    fallbacks as f64 / total_br as f64
-}
 
 fn log_window_diagnostics(tokens: &[Token], offset_bits: u32, length_bits: u32) {
     let max_off = (1u32 << offset_bits) - 1;
@@ -84,8 +79,6 @@ fn log_window_diagnostics(tokens: &[Token], offset_bits: u32, length_bits: u32) 
     );
 }
 
-/// Compute raw bit cost of a token stream at given ob/lb.
-/// Used only for the Phase C gain diagnostic — not for any compression decision.
 fn diag_stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
     let br_bits = backref_total_bits(ob, lb) as u64;
     tokens.iter().map(|t| match t {
@@ -95,18 +88,14 @@ fn diag_stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
     }).sum()
 }
 
-/// If Phase C widened ob or lb beyond baseline, print both the actual ratio
-/// and the hypothetical baseline ratio from the same token stream.
 fn log_phase_c_gain(tokens: &[Token], ob: u32, lb: u32, input_len: usize) {
-    if ob <= DIAG_BASELINE_OB && lb <= DIAG_BASELINE_LB {
-        return;
-    }
-    let input_bits      = input_len as f64 * 8.0;
-    let actual_cost     = diag_stream_bit_cost(tokens, ob, lb);
-    let baseline_cost   = diag_stream_bit_cost(tokens, DIAG_BASELINE_OB, DIAG_BASELINE_LB);
-    let actual_pct      = actual_cost   as f64 / input_bits * 100.0;
-    let baseline_pct    = baseline_cost as f64 / input_bits * 100.0;
-    let gain_pp         = baseline_pct - actual_pct;
+    if ob <= DIAG_BASELINE_OB && lb <= DIAG_BASELINE_LB { return; }
+    let input_bits    = input_len as f64 * 8.0;
+    let actual_cost   = diag_stream_bit_cost(tokens, ob, lb);
+    let baseline_cost = diag_stream_bit_cost(tokens, DIAG_BASELINE_OB, DIAG_BASELINE_LB);
+    let actual_pct    = actual_cost   as f64 / input_bits * 100.0;
+    let baseline_pct  = baseline_cost as f64 / input_bits * 100.0;
+    let gain_pp       = baseline_pct - actual_pct;
     println!(
         "  DIAG phase_c_gain: ob={} lb={} \
          actual_ratio={:.4}% baseline_hyp_ratio={:.4}% \
@@ -115,8 +104,13 @@ fn log_phase_c_gain(tokens: &[Token], ob: u32, lb: u32, input_len: usize) {
     );
 }
 
-/// Returns (compressed_bytes, folds_done, used_pairing,
-///          offset_bits_per_fold, length_bits_per_fold, fold1_tokens)
+/// Orchestrate fold passes. Returns:
+///   (compressed_bytes, folds_done, used_pairing,
+///    offset_bits_per_fold, length_bits_per_fold, fold1_tokens)
+///
+/// When folds_done == 0, compressed_bytes is the unmodified input (passthrough).
+/// This happens either because fold 1 didn't improve, or because scan_adaptive
+/// signalled the data is incompressible.
 pub fn fold(input: &[u8], max_folds: u8)
     -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>, Vec<u32>, Option<Vec<Token>>)>
 {
@@ -142,15 +136,13 @@ pub fn fold(input: &[u8], max_folds: u8)
         if fold_num == 1 {
             let (tokens, ob, lb, definitely_incompressible) = scan_adaptive(&current);
 
-            // Incompressible signal: the scanner detected that even with optimal
-            // parameters this data will expand. Skip folding entirely.
-            // folds_done stays 0 → lib.rs writes fold_count=0 → passthrough.
-            // current is unchanged (still = input / filtered input), which is
-            // the correct payload for a fold_count=0 passthrough header.
             if definitely_incompressible {
+                // Scanner detected expansion during the scan itself, or Phase B/C
+                // confirmed the data cannot compress. Stop immediately — lib.rs
+                // will emit fold_count=0 (passthrough). `current` is still the
+                // raw input bytes (or filtered bytes), which is the correct payload.
                 println!(
-                    "Fold 1: incompressible signal from scanner — passthrough \
-                     ({} bytes stored as-is)",
+                    "Fold 1: incompressible signal — passthrough ({} bytes stored as-is)",
                     current.len()
                 );
                 folds_done = 0;
@@ -158,9 +150,6 @@ pub fn fold(input: &[u8], max_folds: u8)
             }
 
             log_window_diagnostics(&tokens, ob, lb);
-
-            // Diagnostic: show how much Phase C gained over baseline ob=17
-            // (only prints when ob or lb was widened beyond baseline)
             log_phase_c_gain(&tokens, ob, lb, current.len());
 
             println!(
@@ -188,6 +177,7 @@ pub fn fold(input: &[u8], max_folds: u8)
                 fold1_tokens = Some(tokens);
                 break;
             }
+
             current_ob   = ob;
             current_lb   = lb;
             current      = folded;
@@ -199,93 +189,136 @@ pub fn fold(input: &[u8], max_folds: u8)
             continue;
         }
 
-        // ── Fold 2+: decide strategy ─────────────────────────────────────────
+        // ── Fold 2+: strategy selection ───────────────────────────────────────
+        //
+        // allow_lz_on_packed: fold-1 produced very small output (< 10% of
+        // original). Running LZ again on the packed token stream can extract
+        // additional structure. Only worth it at extreme compression.
         let allow_lz_on_packed = current_ratio < FOLD2_LZ_MAX_RATIO;
 
-        let consider_pairing = fold_num == 2
+        // consider_pair: fold-2 on fold-1 tokens using EG pair encoding.
+        // No Cantor fallback rate check — EG always produces valid output.
+        // If pair expands, the ratio check below stops it and we fall through to LZ.
+        let consider_pair = fold_num == 2
             && folds_done == 1
             && current.len() >= MIN_PAIR_BYTES;
 
-        let use_pairing = if consider_pairing {
+        // ── Try pair encoding first (fold 2 only) ────────────────────────────
+        if consider_pair {
             let tokens = fold1_tokens.as_ref()
                 .expect("fold1_tokens must be Some when folds_done == 1");
-            let fallback_rate = cantor_fallback_rate(tokens);
-            println!(
-                "Fold {} pairing pre-scan: Cantor fallback rate = {:.1}% (threshold {}%)",
-                fold_num, fallback_rate * 100.0,
-                (MAX_CANTOR_FALLBACK_RATE * 100.0) as u32
-            );
-            if fallback_rate > MAX_CANTOR_FALLBACK_RATE {
-                println!("Fold {} pairing skipped — high fallback rate", fold_num);
-                false
-            } else {
-                true
-            }
-        } else {
-            false
-        };
+            let pair_result = pair_encode(tokens, current_ob, current_lb)?;
+            let pair_bits   = pair_result.len() * 8;
+            let pair_ratio  = pair_bits as f64 / prev_size as f64;
 
-        if fold_num >= 2 && !use_pairing && !allow_lz_on_packed {
             println!(
-                "Fold {} skipped — LZ on packed bytes not beneficial \
-                 (current ratio {:.3}, threshold {:.2})",
-                fold_num, current_ratio, FOLD2_LZ_MAX_RATIO
+                "Fold {} (PAIR/EG): {} bits ({} bytes)",
+                fold_num, pair_bits, pair_result.len()
+            );
+
+            if pair_ratio < MIN_IMPROVEMENT_RATIO {
+                // Pair encoding improved things — accept.
+                if pair_bits <= MIN_FOLD_BITS {
+                    println!("Hit minimum size floor at fold {} (PAIR)", fold_num);
+                    current_ob = 0;
+                    current_lb = 0;
+                    current    = pair_result;
+                    folds_done = fold_num;
+                    offset_bits_per_fold.push(0);
+                    length_bits_per_fold.push(0);
+                    final_used_pairing = true;
+                    break;
+                }
+                current_ob = 0;
+                current_lb = 0;
+                current    = pair_result;
+                folds_done = fold_num;
+                prev_size  = pair_bits;
+                offset_bits_per_fold.push(0);
+                length_bits_per_fold.push(0);
+                final_used_pairing = true;
+                continue;
+            }
+
+            // Pair didn't help (expanded or negligible improvement).
+            // Fall through to LZ check — don't break yet.
+            println!(
+                "Fold {} PAIR not worth it (ratio {:.3}) — checking LZ fallback",
+                fold_num, pair_ratio
+            );
+        }
+
+        // ── Try LZ (fold 3+, or fold 2 LZ fallback after pair fails) ─────────
+        //
+        // For TOML_Config: consider_pair=true (size OK), pair expands (EG hurts
+        // large offsets), falls through here with allow_lz_on_packed=true
+        // (ratio 0.094 < 0.10), LZ runs and saves ~400 bytes. Correct behavior.
+        //
+        // For WarAndPeace/YAML: consider_pair=true, pair expands, falls through,
+        // allow_lz_on_packed=false (ratio 0.47/0.13), breaks here. Correct.
+        if !allow_lz_on_packed {
+            if !consider_pair {
+                // Fold 3+ with no LZ opportunity — stop.
+                println!(
+                    "Fold {} skipped — LZ on packed bytes not beneficial \
+                     (current ratio {:.3}, threshold {:.2})",
+                    fold_num, current_ratio, FOLD2_LZ_MAX_RATIO
+                );
+            } else {
+                // Pair failed and LZ not applicable — stop at fold 1.
+                println!(
+                    "Fold {} PAIR failed and LZ not applicable \
+                     (ratio {:.3} >= threshold {:.2}) — stopping at fold {}",
+                    fold_num, current_ratio, FOLD2_LZ_MAX_RATIO, folds_done
+                );
+            }
+            break;
+        }
+
+        // LZ scan on the current (fold-1 packed) bytes.
+        let (lz_tokens, lz_ob, lz_lb, definitely_incompressible) = scan_adaptive(&current);
+        if definitely_incompressible {
+            println!(
+                "Fold {}: LZ scan incompressible signal — stopping at fold {}",
+                fold_num, folds_done
             );
             break;
         }
 
-        let (folded, candidate_ob, candidate_lb) = if use_pairing {
-            let tokens = fold1_tokens.as_ref()
-                .expect("fold1_tokens must be Some when use_pairing is true");
-            (pair_encode(tokens, current_ob, current_lb)?, 0u32, 0u32)
-        } else {
-            let (tokens, ob, lb, definitely_incompressible) = scan_adaptive(&current);
-            // If the fold 2+ scan bails, stop here — fold 1 output is our best result.
-            if definitely_incompressible {
-                println!(
-                    "Fold {}: incompressible signal — stopping at fold {}",
-                    fold_num, folds_done
-                );
-                break;
-            }
-            let encoded = write_tokens(&tokens, ob, lb)?;
-            (encoded, ob, lb)
-        };
-
-        let folded_bits = folded.len() * 8;
-        let fold_type   = if use_pairing { "PAIR" } else { "LZ" };
+        let encoded     = write_tokens(&lz_tokens, lz_ob, lz_lb)?;
+        let folded_bits = encoded.len() * 8;
         println!(
-            "Fold {} ({}): {} bits ({} bytes)",
-            fold_num, fold_type, folded_bits, folded.len()
+            "Fold {} (LZ): {} bits ({} bytes)",
+            fold_num, folded_bits, encoded.len()
         );
 
         let ratio = folded_bits as f64 / prev_size as f64;
         if ratio >= MIN_IMPROVEMENT_RATIO {
-            println!("Fold {} not worth it (ratio {:.3}), stopping at fold {}",
-                     fold_num, ratio, folds_done);
+            println!(
+                "Fold {} LZ not worth it (ratio {:.3}), stopping at fold {}",
+                fold_num, ratio, folds_done
+            );
             break;
         }
 
         if folded_bits <= MIN_FOLD_BITS {
-            println!("Hit minimum size floor at fold {}", fold_num);
-            current_ob = candidate_ob;
-            current_lb = candidate_lb;
-            current    = folded;
+            println!("Hit minimum size floor at fold {} (LZ)", fold_num);
+            current_ob = lz_ob;
+            current_lb = lz_lb;
+            current    = encoded;
             folds_done = fold_num;
-            offset_bits_per_fold.push(candidate_ob);
-            length_bits_per_fold.push(candidate_lb);
-            if use_pairing { final_used_pairing = true; }
+            offset_bits_per_fold.push(lz_ob);
+            length_bits_per_fold.push(lz_lb);
             break;
         }
 
-        current_ob = candidate_ob;
-        current_lb = candidate_lb;
-        current    = folded;
+        current_ob = lz_ob;
+        current_lb = lz_lb;
+        current    = encoded;
         folds_done = fold_num;
         prev_size  = folded_bits;
-        offset_bits_per_fold.push(candidate_ob);
-        length_bits_per_fold.push(candidate_lb);
-        if use_pairing { final_used_pairing = true; }
+        offset_bits_per_fold.push(lz_ob);
+        length_bits_per_fold.push(lz_lb);
     }
 
     Ok((current, folds_done, final_used_pairing, offset_bits_per_fold, length_bits_per_fold, fold1_tokens))

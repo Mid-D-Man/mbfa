@@ -18,43 +18,44 @@
 //          instead of the correct 131B at ob=10 lb=21.
 //          Does NOT fire for JSON_2MB (matches 5-30 bytes, lb_ceil=229 never hit).
 //
-//       2. Early exit (safe ONLY after length peak passes):
+//       1.5. Expansion bail (NEW — runs in the else branch after step 1 clears):
+//          If Phase B raw_cost > input_bits * 1.02 (2% expansion), the data is
+//          incompressible at these parameters. Since step 1 already confirmed lb
+//          is adequate, no Phase C can help. Returns incompressible signal.
+//          Unity_Terrain_2K: was 1003ms, now ~40ms (in-scan bail at first 64KB).
+//          Unity_Terrain_1K: was 159ms, now ~20ms (parallel path bail).
+//          Does NOT fire when step 1 fires (wrong lb might cause apparent expansion
+//          that wider lb would fix — Phase C is still warranted in that case).
+//
+//       2. Early exit (safe ONLY after length peak passes AND expansion bail clears):
 //          If Phase B ratio < PHASE_B_EARLY_EXIT_RATIO (15%), Phase C gain is
-//          negligible. Safe here because length field confirmed adequate.
-//          Calibrated from JSON_2MB: ratio=8.41%, Phase C gain=0.33pp at cost
-//          of a full extra scan on 3.1MB (~1200ms).
-//          JSON_2MB never hits length peak (short field names/values), so
-//          reaches this step and exits fast at ob=17.
+//          negligible. Calibrated from JSON_2MB: ratio=8.41%.
 //
 //       3. Offset peak + upper-half (softer, runs only when early exit doesn't fire):
 //          Any Backref offset >= 90% of max_off, OR >= 20% of Backrefs in
-//          upper half of window. Catches WarAndPeace (3MB, backrefs naturally
-//          reach near the edge of the 128KB window at ob=17) and other large
-//          prose/source/binary needing wider ob.
-//          JSON_2MB does NOT reach this step (early exit fires at step 2).
-//          WarAndPeace DOES reach this step (ratio ~60% >> 15%), offset peak
-//          fires (some backrefs > 117963 in 128KB window), Phase C → ob=21.
+//          upper half of window. Catches WarAndPeace at ob=17.
 //
-//     Phase A/B is skipped entirely for files <= PARALLEL_SCAN_THRESHOLD (1 MB).
+//   In-scan expansion bail (inside scan() itself):
+//     Checked every SCAN_EXPANSION_CHECK_INTERVAL (64KB) of input consumed.
+//     Fires when BOTH: token_bits > input_bits * 1.02 AND lit_fraction > 95%.
+//     The dual condition prevents false positives on data like STL (7.8% backrefs,
+//     92% literals — below the 95% threshold, bail does not fire even though
+//     token_bits is near input_bits). Terrain (4.8% backrefs = 95.2% literals —
+//     above threshold, bail fires at first check after 64KB). WarAndPeace (70.9%
+//     backrefs = 29.1% literals — far below threshold, never fires).
+//     Returns (Vec::new(), true) meaning "incompressible, discard".
+//
+//   Return type of scan_adaptive changed to (Vec<Token>, u32, u32, bool) where
+//   the bool = is_incompressible. Callers check this before using tokens.
 //
 //   Phase A fingerprint rules (applied only when input > 1 MB):
 //     Rule 1: entropy < 2.0 (highly repetitive) -> defer to Phase C.
 //     Rule 2: size < 32 KB -> predict ob = ceil(log2(size)), lb = 8.
 //     Rule 3: default -> predict baseline (ob=17, lb=8).
 //
-//   Phase C -- discovery path:
-//     Run scan_discover() -> compute wide_ob/wide_lb -> constrained re-scan if
-//     different -> entropy safety cap check -> pick best result.
-//     Baseline and discovery run IN PARALLEL via rayon::join when
-//     input.len() <= PARALLEL_SCAN_THRESHOLD (1 MB).
+//   Phase C -- discovery path: unchanged from previous version.
 //
-//   Dynamic chain limit (full scan only):
-//     ob <= 16   window <=  64KB                        -> 256
-//     ob 17-18   window <= 256KB
-//       input <= PARALLEL_SCAN_THRESHOLD (1 MB)         -> 512  (small/medium: quality)
-//       input >  PARALLEL_SCAN_THRESHOLD                -> 64   (large: avoid divergence)
-//     ob 19-20   window <=   1MB                        -> 256
-//     ob >= 21   window >=   2MB                        -> 128
+//   Dynamic chain limit (full scan only): unchanged.
 //
 //   log_window_diagnostics and log_phase_c_gain are defined in fold.rs and
 //   called there after scan_adaptive returns. Do NOT add them here.
@@ -75,11 +76,6 @@ const ENTROPY_MIN_BYTES_FOR_SCAN: usize = 400;
 const ENTROPY_TIE_THRESHOLD:      f64   = 0.05;
 
 // -- Phase B early-exit threshold ---------------------------------------------
-// Applied at step 2, AFTER length peak saturation confirms lb is adequate.
-// JSON_2MB: ratio=8.41% < 15% → exits fast at ob=17. Safe because step 1
-// already confirmed lb=8 is not saturated (matches are short).
-// Repetitive_2MB never reaches this step (length peak fires at step 1).
-// WarAndPeace never early-exits (ratio ~60% >> 15%).
 const PHASE_B_EARLY_EXIT_RATIO: f64 = 0.15;
 
 // -- Fingerprint constants ----------------------------------------------------
@@ -102,6 +98,23 @@ const PARALLEL_SCAN_THRESHOLD: usize = 1_048_576;
 // -- Discovery scan constants -------------------------------------------------
 const DISCOVER_CHAIN_LIMIT:   usize = 256;
 const DISCOVER_MAX_PREV_SIZE: usize = 2 * 1024 * 1024;
+
+// -- In-scan expansion bail ---------------------------------------------------
+/// If token_bits * 100 > input_bits * this value, data is expanding.
+/// 102 = 2% expansion threshold.
+const EXPANSION_BAIL_PCT: u64  = 102;
+
+/// Check for expansion every N input bytes (must be a power of 2 for bitmask check).
+const SCAN_EXPANSION_CHECK_INTERVAL: usize = 65_536; // 64 KB
+const SCAN_EXPANSION_INTERVAL_MASK: usize  = SCAN_EXPANSION_CHECK_INTERVAL - 1;
+
+/// If literal token fraction > this percent, data is likely incompressible.
+/// Terrain (4.8% backrefs → 95.2% literals): fires. STL (7.8% backrefs → 92.2%
+/// literals): does NOT fire. Both conditions must be true to bail.
+const EXPANSION_LIT_PCT: usize = 95;
+
+/// Minimum token count before the in-scan expansion check is meaningful.
+const EXPANSION_MIN_TOKENS: usize = 128;
 
 // -- Tiered chain limit -------------------------------------------------------
 
@@ -176,8 +189,20 @@ fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
 }
 
 // -- Core scanner -------------------------------------------------------------
+//
+// Returns (tokens, bailed_early) where bailed_early=true means the scan
+// detected clear incompressibility and returned early. In that case, the
+// returned token Vec is empty and must be discarded by the caller.
+//
+// The in-scan bail fires when BOTH:
+//   (a) running token bit cost exceeds input bit cost by >2%, AND
+//   (b) more than 95% of tokens so far are literals.
+//
+// This dual condition prevents false positives on data like STL meshes that
+// have ~8% backrefs (slightly below the 95% literal threshold) while reliably
+// catching terrain data with ~5% backrefs (slightly above 95%).
 
-pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
+pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> (Vec<Token>, bool) {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
     let backref_bits = backref_total_bits(offset_bits, length_bits);
@@ -191,8 +216,33 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
     let mut tokens    = Vec::with_capacity(n / 2 + 1);
     let mut rep_slots = RepSlots::new();
     let mut i         = 0;
+    let mut lit_count: usize = 0; // tracks literal token count for expansion check
 
     while i < n {
+        // -- In-scan expansion bail (every 64 KB) ---------------------------------
+        if i > 0 && (i & SCAN_EXPANSION_INTERVAL_MASK) == 0 {
+            let total_tokens = tokens.len();
+            if total_tokens >= EXPANSION_MIN_TOKENS {
+                let backref_count = total_tokens - lit_count;
+                // Integer arithmetic only — no floats in hot path.
+                // token_bits = lit_count*10 + backref_count*(1+ob+lb)
+                let token_bits: u64 = (lit_count * (LIT_TOTAL_BITS as usize)
+                    + backref_count * (backref_bits as usize)) as u64;
+                let input_bits: u64 = (i as u64) * 8;
+                // Condition (a): expanding by more than 2%
+                let expanding = token_bits * 100 > input_bits * EXPANSION_BAIL_PCT;
+                // Condition (b): more than 95% of tokens are literals
+                // (lit_count / total_tokens > 0.95 → lit_count * 100 > total_tokens * 95)
+                let mostly_lits = lit_count * 100 > total_tokens * EXPANSION_LIT_PCT;
+                if expanding && mostly_lits {
+                    // Incompressible: return empty vec with bail signal.
+                    // Caller (scan_adaptive) will detect this and return its own
+                    // incompressible signal up to fold(), which passhthroughs.
+                    return (Vec::new(), true);
+                }
+            }
+        }
+
         let h = hash3(input, i);
         let (mut best_offset, mut best_len) =
             find_match(input, i, h, &head, &prev, max_off, max_len, window_mask, chain_limit);
@@ -247,6 +297,7 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
                 prev[i & window_mask] = head[h];
                 head[h] = i as u32;
                 tokens.push(Token::Lit { byte: input[i] });
+                lit_count += 1;
                 i += 1;
             } else {
                 for k in 0..best_len {
@@ -267,12 +318,13 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
             prev[i & window_mask] = head[h];
             head[h] = i as u32;
             tokens.push(Token::Lit { byte: input[i] });
+            lit_count += 1;
             i += 1;
         }
     }
 
     tokens.push(Token::End);
-    tokens
+    (tokens, false) // normal completion
 }
 
 pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
@@ -482,23 +534,6 @@ fn fingerprint_predict(data: &[u8]) -> Option<(u32, u32)> {
 }
 
 // -- Ceiling checks -----------------------------------------------------------
-//
-// Split into two independent functions with different responsibilities:
-//
-// length_peak_saturated  — HARD gate, must run BEFORE early exit.
-//   Checks only lb: if any match length >= 90% of max_len, lb is too small.
-//   Repetitive_2MB: pattern repeats every ~175 bytes, every match hits
-//   max_len=255 (lb=8), lb_ceil=229 → fires immediately.
-//   JSON_2MB: field names 2-5 chars, values vary, lengths 5-30 bytes,
-//   lb_ceil=229 never reached → does NOT fire.
-//   WarAndPeace at lb=8: literary phrases rarely exceed 229 bytes → does NOT fire.
-//   (WarAndPeace reaches Phase C via offset_or_upper_half_saturated at step 3.)
-//
-// offset_or_upper_half_saturated — softer gate, runs AFTER early exit.
-//   Checks ob: offset >= 90% of max_off, OR >= 20% of backrefs in upper half.
-//   JSON_2MB never reaches this (early exit fires at step 2).
-//   WarAndPeace: 3.35MB scanned with 128KB window, some backrefs naturally
-//   reach near 117963 (90% of 131071) → offset peak fires → Phase C.
 
 fn length_peak_saturated(tokens: &[Token], lb: u32) -> bool {
     let max_len = max_length(lb);
@@ -589,12 +624,15 @@ fn phase_c_from_baseline(
         return (baseline.tokens, baseline.ob, baseline.lb);
     }
 
-    let constrained = ScanResult::new(
-        scan(input, wide_ob, wide_lb),
-        wide_ob,
-        wide_lb,
-        "constrained",
-    );
+    // Constrained re-scan at discovered parameters. If the scan bails
+    // (incompressible even with wider parameters), fall back to baseline.
+    let (constrained_tokens, constrained_bailed) = scan(input, wide_ob, wide_lb);
+    if constrained_bailed {
+        println!("  Phase C constrained scan bailed early — baseline wins (still expanding)");
+        return (baseline.tokens, baseline.ob, baseline.lb);
+    }
+
+    let constrained = ScanResult::new(constrained_tokens, wide_ob, wide_lb, "constrained");
     println!(
         "  chain_limit (constrained ob={}): {}  raw_cost={}",
         wide_ob,
@@ -605,8 +643,16 @@ fn phase_c_from_baseline(
     if constrained.lb > ENTROPY_SAFE_LENGTH_BITS {
         let constrained_bytes = (constrained.raw_cost as usize + 7) / 8;
         if constrained_bytes >= ENTROPY_MIN_BYTES_FOR_SCAN {
+            let (capped_tokens, capped_bailed) =
+                scan(input, constrained.ob, ENTROPY_SAFE_LENGTH_BITS);
+
+            if capped_bailed {
+                println!("  Phase C capped scan bailed — baseline wins");
+                return (baseline.tokens, baseline.ob, baseline.lb);
+            }
+
             let capped = ScanResult::new(
-                scan(input, constrained.ob, ENTROPY_SAFE_LENGTH_BITS),
+                capped_tokens,
                 constrained.ob,
                 ENTROPY_SAFE_LENGTH_BITS,
                 "capped",
@@ -645,8 +691,12 @@ fn phase_c_from_baseline(
 }
 
 // -- Public API ---------------------------------------------------------------
+//
+// Returns (tokens, offset_bits, length_bits, is_incompressible).
+// When is_incompressible=true: tokens is empty, caller should passthrough
+// original input without folding (fold_count=0 in the file header).
 
-pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
+pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32, bool) {
 
     if input.len() > PARALLEL_SCAN_THRESHOLD {
         match fingerprint_predict(input) {
@@ -654,8 +704,14 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
                 // Rule 1: highly repetitive -- fall through to Phase C.
             }
             Some((pred_ob, pred_lb)) => {
-                let tokens = scan(input, pred_ob, pred_lb);
-                let result = ScanResult::new(tokens, pred_ob, pred_lb, "phase_b");
+                // Phase B: full-quality scan at fingerprint-predicted parameters.
+                let (phase_b_tokens, phase_b_bailed) = scan(input, pred_ob, pred_lb);
+                if phase_b_bailed {
+                    println!("  Phase B: in-scan expansion bail — incompressible, skipping Phase C");
+                    return (Vec::new(), pred_ob, pred_lb, true);
+                }
+
+                let result = ScanResult::new(phase_b_tokens, pred_ob, pred_lb, "phase_b");
 
                 println!(
                     "  Phase B scan: ob={} lb={} chain_limit={} raw_cost={}",
@@ -665,34 +721,43 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
                 );
 
                 // ── Step 1: Length peak saturation (HARD, before early exit) ──────
-                //
-                // Repetitive_2MB: pattern repeats every 175 bytes, every match at
-                // ob=17 lb=8 gets capped at max_len=255, lb_ceil=229 fires instantly.
-                // Phase B ratio is also ~<1% but we CANNOT early-exit — lb=8 is
-                // genuinely too small. Must discover lb=21 via Phase C.
-                //
-                // JSON_2MB: matches are field names (2-5 chars) and short values.
-                // lb_ceil=229 is never hit. Passes through to step 2.
-                //
-                // WarAndPeace at lb=8: literary phrases rarely exceed 229 bytes.
-                // Does NOT fire here. Reaches Phase C via step 3 instead.
                 if length_peak_saturated(&result.tokens, pred_lb) {
                     println!("  Step 1: length peak -- Phase C required");
                     if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
                         let baseline  = ScanResult { label: "baseline", ..result };
                         let discovery = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
-                        return phase_c_from_baseline(baseline, discovery, input);
+                        let (tokens, ob, lb) = phase_c_from_baseline(baseline, discovery, input);
+                        return (tokens, ob, lb, false);
                     }
                     // pred_ob != baseline (Rule 2, not reached for >1MB in practice):
                     // fall through to parallel Phase C below.
                 } else {
-                    // ── Step 2: Early exit (lb confirmed adequate at step 1) ────────
+                    // ── Step 1.5: Expansion bail (NEW — lb confirmed OK at step 1) ─
                     //
-                    // JSON_2MB: ratio=8.41% < 15% → return Phase B at ob=17 fast.
-                    // This is safe because step 1 confirmed lb=8 is not saturated.
+                    // If Phase B is already expanding (ratio > 1.02), Phase C cannot
+                    // help — the data is incompressible with any parameters. This fires
+                    // for smooth terrain (4.8% backrefs, ratio ~1.10) but NOT for
+                    // WarAndPeace (70.9% backrefs, ratio ~0.47) or JSON (ratio ~0.08).
                     //
+                    // NOT reached when step 1 fires: wrong lb might cause apparent
+                    // expansion that wider lb would fix. Phase C is still warranted.
+                    {
+                        let input_bits = input.len() as u64 * 8;
+                        if result.raw_cost * 100 >= input_bits * EXPANSION_BAIL_PCT {
+                            println!(
+                                "  Step 1.5: Phase B expanding ({:.3}) — incompressible, \
+                                 no Phase C",
+                                result.raw_cost as f64 / input_bits as f64
+                            );
+                            return (Vec::new(), pred_ob, pred_lb, true);
+                        }
+                    }
+
+                    // ── Step 2: Early exit (safe — lb OK at 1, not expanding at 1.5) ─
+                    //
+                    // JSON_2MB: ratio=8.41% < 15% → exits fast at ob=17.
                     // WarAndPeace: ratio ~60% >> 15% → does NOT early-exit.
-                    // Repetitive_2MB: never reaches here (step 1 fired).
+                    // Terrain: never reaches here (step 1.5 fired).
                     let phase_b_ratio = result.raw_cost as f64
                         / (input.len() as f64 * 8.0);
 
@@ -703,29 +768,25 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
                             phase_b_ratio * 100.0,
                             PHASE_B_EARLY_EXIT_RATIO * 100.0,
                         );
-                        return (result.tokens, result.ob, result.lb);
+                        return (result.tokens, result.ob, result.lb, false);
                     }
 
-                    // ── Step 3: Offset peak + upper-half (after early exit) ─────────
+                    // ── Step 3: Offset peak + upper-half ───────────────────────────
                     //
-                    // WarAndPeace: 3.35MB scanned with ob=17 (128KB window). Backrefs
-                    // naturally reach close to 128KB → some offset >= ob_ceil=117963
-                    // → fires → Phase C → ob=21.
-                    //
-                    // JSON_2MB: never reaches here (early exit at step 2).
+                    // WarAndPeace: some backrefs near 128KB edge → fires → Phase C.
+                    // JSON_2MB: never reaches (early exit at step 2).
                     if offset_or_upper_half_saturated(&result.tokens, pred_ob) {
                         println!("  Step 3: offset/upper-half -- Phase C needed");
                         if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
                             let baseline  = ScanResult { label: "baseline", ..result };
                             let discovery = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
-                            return phase_c_from_baseline(baseline, discovery, input);
+                            let (tokens, ob, lb) = phase_c_from_baseline(baseline, discovery, input);
+                            return (tokens, ob, lb, false);
                         }
                         // pred_ob != baseline: fall through to parallel Phase C below.
                     } else {
-                        // All three checks passed: window is adequate, ratio is above
-                        // threshold but ceiling is clear. Phase B wins.
                         println!("  Step 3: ceiling clear -- Phase B wins (1 scan total)");
-                        return (result.tokens, result.ob, result.lb);
+                        return (result.tokens, result.ob, result.lb, false);
                     }
                 }
             }
@@ -737,23 +798,60 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32) {
     //   (a) files <= PARALLEL_SCAN_THRESHOLD — rayon::join baseline + discovery
     //   (b) files > threshold, fingerprint returned None (Rule 1: repetitive)
     //   (c) files > threshold, pred_ob != BASELINE (Rule 2, not reached in practice)
+    //
+    // Expansion bail fires after the parallel scans complete if baseline is
+    // still expanding. This saves the Phase C re-scan for clearly incompressible
+    // data (e.g. Unity_Terrain_1K at 526KB hits this path and bails here).
+
     let (baseline, wide_discovery) = if input.len() <= PARALLEL_SCAN_THRESHOLD {
-        let (bt, disc) = rayon::join(
+        let ((bt_tokens, bt_bailed), disc) = rayon::join(
             || scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS),
             || scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX),
         );
+        if bt_bailed {
+            println!("  Parallel baseline: in-scan expansion bail — incompressible");
+            return (Vec::new(), BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, true);
+        }
         (
-            ScanResult::new(bt, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, "baseline"),
+            ScanResult::new(bt_tokens, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, "baseline"),
             disc,
         )
     } else {
-        let bt   = scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS);
+        // Sequential fallback for large files in the parallel path (Rule 1 / Rule 2 cases)
+        let (bt_tokens, bt_bailed) = scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS);
+        if bt_bailed {
+            println!("  Sequential baseline (parallel path): expansion bail — incompressible");
+            return (Vec::new(), BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, true);
+        }
         let disc = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
         (
-            ScanResult::new(bt, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, "baseline"),
+            ScanResult::new(bt_tokens, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, "baseline"),
             disc,
         )
     };
 
-    phase_c_from_baseline(baseline, wide_discovery, input)
+    // Post-scan expansion check: complete scan may still be expanding.
+    // This catches cases where the in-scan bail didn't fire (e.g. expansion
+    // ratio was just below 102% per interval but accumulates to > 102% overall).
+    {
+        let input_bits = input.len() as u64 * 8;
+        if baseline.raw_cost * 100 >= input_bits * EXPANSION_BAIL_PCT {
+            println!(
+                "  Parallel path post-scan: baseline expanding ({:.3}) — \
+                 incompressible, skipping Phase C re-scan",
+                baseline.raw_cost as f64 / input_bits as f64
+            );
+            return (Vec::new(), BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, true);
         }
+    }
+
+    println!(
+        "  chain_limit (baseline ob={}): {}  raw_cost={}",
+        BASELINE_OFFSET_BITS,
+        compute_chain_limit(input.len(), BASELINE_OFFSET_BITS),
+        baseline.raw_cost,
+    );
+
+    let (tokens, ob, lb) = phase_c_from_baseline(baseline, wide_discovery, input);
+    (tokens, ob, lb, false)
+}

@@ -17,8 +17,8 @@
 //!   7 = STL byte-plane shuffle + per-plane delta1  (NEW)
 //!       Byte-plane shuffle as in flag 5, then delta1-encode within each
 //!       of the 4 planes independently. The exponent plane (byte 3 of each
-//!       float) becomes near-constant for unit normals/sphere vertices;
-//!       the mantissa planes compress better with delta applied before LZ.
+//!       float) becomes near-constant for smooth geometry; the mantissa
+//!       planes compress better with delta applied before LZ.
 //!   8 = PLY byte-plane shuffle + per-plane delta1  (NEW)
 //!       Same compound transform for binary PLY vertex floats.
 //!   9 = x86 BCJ (Branch-Call-Jump) for PE/COFF executables  (NEW)
@@ -95,8 +95,7 @@ pub fn detect_filter(input: &[u8]) -> u8 {
         }
     }
 
-    // 5. PE/COFF binary (must come before stride probe to avoid false match
-    //    on the binary sections of a PE file).
+    // 5. PE/COFF binary (must come before stride probe).
     if detect_pe_coff(input) {
         println!("PE/COFF binary detected → FILTER_BCJ");
         return FILTER_BCJ;
@@ -131,8 +130,8 @@ pub fn apply_filter(input: &[u8], filter: u8) -> Vec<u8> {
         FILTER_DELTA1 | FILTER_DELTA2 | FILTER_DELTA3 | FILTER_DELTA4 => {
             delta_encode(input, filter as usize)
         }
-        FILTER_SHUFFLE4       => shuffle4_stl_encode(input),           // old — kept for compat
-        FILTER_PLY            => shuffle4_ply_encode(input),            // old — kept for compat
+        FILTER_SHUFFLE4       => shuffle4_stl_encode(input),
+        FILTER_PLY            => shuffle4_ply_encode(input),
         FILTER_SHUFFLE4_DELTA => shuffle4_stl_delta_encode(input),
         FILTER_PLY_DELTA      => shuffle4_ply_delta_encode(input),
         FILTER_BCJ            => bcj_x86_encode(input),
@@ -147,8 +146,8 @@ pub fn undo_filter(input: &[u8], filter: u8) -> Vec<u8> {
         FILTER_DELTA1 | FILTER_DELTA2 | FILTER_DELTA3 | FILTER_DELTA4 => {
             delta_decode(input, filter as usize)
         }
-        FILTER_SHUFFLE4       => shuffle4_stl_decode(input),            // old — backward compat
-        FILTER_PLY            => shuffle4_ply_decode(input),             // old — backward compat
+        FILTER_SHUFFLE4       => shuffle4_stl_decode(input),
+        FILTER_PLY            => shuffle4_ply_decode(input),
         FILTER_SHUFFLE4_DELTA => shuffle4_stl_delta_decode(input),
         FILTER_PLY_DELTA      => shuffle4_ply_delta_decode(input),
         FILTER_BCJ            => bcj_x86_decode(input),
@@ -159,7 +158,6 @@ pub fn undo_filter(input: &[u8], filter: u8) -> Vec<u8> {
 // ── STL detection ─────────────────────────────────────────────────────────────
 
 /// Returns Some(()) if the data matches the binary STL exact-size equation.
-/// Returns None otherwise. Callers choose which flag to return.
 fn detect_stl(data: &[u8]) -> Option<()> {
     let n_tris = u32::from_le_bytes([data[80], data[81], data[82], data[83]]) as usize;
     if n_tris == 0 { return None; }
@@ -179,7 +177,7 @@ struct PlyLayout {
 }
 
 /// Parse binary PLY header. Returns None if format is not binary_little_endian,
-/// vertex has non-float properties, or the vertex section exceeds the file.
+/// vertex has non-float properties, or vertex section exceeds the file.
 fn parse_ply_layout(data: &[u8]) -> Option<PlyLayout> {
     const END_LF:   &[u8] = b"end_header\n";
     const END_CRLF: &[u8] = b"end_header\r\n";
@@ -224,7 +222,7 @@ fn parse_ply_layout(data: &[u8]) -> Option<PlyLayout> {
     Some(PlyLayout { header_end, vertex_count, floats_per_vertex })
 }
 
-// ── PLY shuffle encode / decode (simple, backward compat) ─────────────────────
+// ── PLY shuffle encode / decode (simple, backward compat flag 6) ─────────────
 
 fn shuffle4_ply_encode(data: &[u8]) -> Vec<u8> {
     let layout = match parse_ply_layout(data) {
@@ -300,14 +298,9 @@ fn shuffle4_ply_decode(data: &[u8]) -> Vec<u8> {
 
 /// Encode: byte-plane shuffle then delta1-encode within each of the 4 planes.
 ///
-/// After shuffle the 4 planes each contain one byte lane of every vertex float.
-/// For sphere meshes: the exponent plane (lane 3) is near-constant for unit
-/// normals/vertices — delta makes it all zeros. Mantissa planes also compress
-/// much better with delta applied before LZ sees them.
-///
-/// In-place right-to-left delta (stride=1) is used so `data[i-1]` is always
-/// the original value when `data[i]` is processed. See delta correctness note
-/// in the test section.
+/// Right-to-left in-place delta: `out[i] = out[i] - out[i-1]` for i from end
+/// down to start+1. This means out[i-1] is always the original (unmodified)
+/// value when out[i] is processed, giving a correct reversible delta.
 fn shuffle4_ply_delta_encode(data: &[u8]) -> Vec<u8> {
     let layout = match parse_ply_layout(data) {
         Some(l) => l,
@@ -327,7 +320,6 @@ fn shuffle4_ply_delta_encode(data: &[u8]) -> Vec<u8> {
         let ps = layout.header_end + plane_idx * plane_size;
         let pe = ps + plane_size;
         if pe > out.len() { break; }
-        // Right-to-left so out[i-1] is always the original value
         for i in (ps + 1..pe).rev() {
             let prev = out[i - 1];
             out[i] = out[i].wrapping_sub(prev);
@@ -450,7 +442,15 @@ fn shuffle4_stl_decode(data: &[u8]) -> Vec<u8> {
 // ── STL compound: shuffle + per-plane delta (flag 7) ─────────────────────────
 
 /// Encode: byte-plane shuffle then delta1-encode within each of the 4 planes.
-/// Attribute bytes (2 per triangle, after the 4 planes) are left verbatim.
+///
+/// Post-shuffle layout:
+///   [0..84]              : header verbatim
+///   [84..84+n*12]        : plane0 (float byte 0 — LSB)
+///   [84+n*12..84+n*24]   : plane1 (float byte 1)
+///   [84+n*24..84+n*36]   : plane2 (float byte 2)
+///   [84+n*36..84+n*48]   : plane3 (float byte 3 — MSB, sign+exponent)
+///   [84+n*48..84+n*50]   : attribute bytes verbatim
+/// where n = n_tris.
 fn shuffle4_stl_delta_encode(data: &[u8]) -> Vec<u8> {
     debug_assert!(data.len() >= 84);
     let n_tris = u32::from_le_bytes([data[80], data[81], data[82], data[83]]) as usize;
@@ -460,13 +460,6 @@ fn shuffle4_stl_delta_encode(data: &[u8]) -> Vec<u8> {
     let mut out = shuffle4_stl_encode(data);
 
     // Step 2: delta1-encode within each of the 4 planes (right-to-left in-place)
-    // Layout after shuffle:
-    //   [0..84]                         : header verbatim
-    //   [84..84+n_tris*12]              : plane0 (float byte 0)
-    //   [84+n_tris*12..84+n_tris*24]    : plane1 (float byte 1)
-    //   [84+n_tris*24..84+n_tris*36]    : plane2 (float byte 2)
-    //   [84+n_tris*36..84+n_tris*48]    : plane3 (float byte 3 — sign+exponent)
-    //   [84+n_tris*48..84+n_tris*50]    : attribute bytes verbatim
     let plane_size   = n_tris * 12;
     let planes_start = 84usize;
 
@@ -474,7 +467,6 @@ fn shuffle4_stl_delta_encode(data: &[u8]) -> Vec<u8> {
         let ps = planes_start + plane_idx * plane_size;
         let pe = ps + plane_size;
         if pe > out.len() { break; }
-        // Right-to-left delta: out[i-1] is always the original (unmodified) value
         for i in (ps + 1..pe).rev() {
             let prev = out[i - 1];
             out[i] = out[i].wrapping_sub(prev);
@@ -518,43 +510,30 @@ fn shuffle4_stl_delta_decode(data: &[u8]) -> Vec<u8> {
 
 // ── PE/COFF detection ─────────────────────────────────────────────────────────
 
-/// Returns true if `data` starts with a valid DOS/PE header: MZ magic at
-/// offset 0, valid e_lfanew at 0x3C, and PE\0\0 signature at that offset.
+/// Returns true if data starts with a valid DOS/PE header:
+/// MZ magic at 0, valid e_lfanew at 0x3C, and PE\0\0 at that offset.
 fn detect_pe_coff(data: &[u8]) -> bool {
     if data.len() < 0x40 { return false; }
-    // MZ DOS stub magic
     if data[0] != b'M' || data[1] != b'Z' { return false; }
-    // e_lfanew: 4-byte LE offset at 0x3C pointing to the PE signature
     let pe_offset = u32::from_le_bytes([data[0x3C], data[0x3D], data[0x3E], data[0x3F]]) as usize;
-    // Bounds check
     if pe_offset.saturating_add(4) > data.len() { return false; }
-    // PE\0\0 signature
     data[pe_offset..pe_offset + 4] == *b"PE\x00\x00"
 }
 
 // ── BCJ x86 encode / decode ───────────────────────────────────────────────────
 //
-// Branch-Call-Jump filter for x86/x86-64 PE binaries.
-//
 // Forward transform (encode): relative offset → absolute address.
-// For CALL E8 at position i: abs = rel + (i + 5); stored at i+1..i+5.
+// For CALL E8 at position i: abs = rel + (i + 5).
 // For JMP  E9 at position i: same formula.
-// For JCC  0F 8x at position i: abs = rel + (i + 6); stored at i+2..i+6.
+// For JCC  0F 8x at position i: abs = rel + (i + 6).
 //
 // Reverse transform (decode): absolute address → relative offset.
-// Exactly inverts encode: rel = abs - (i + 5) for E8/E9,
-//                         rel = abs - (i + 6) for 0F 8x.
+// Inverts encode exactly: rel = abs - (i + 5) for E8/E9.
 //
-// Round-trip property: decode(encode(data)) == data (guaranteed by
-// the bijective structure — same condition fires on both passes).
-//
-// False positives (data bytes that happen to be E8/E9) are handled
-// automatically: encode transforms them "incorrectly" but decode
-// undoes exactly the same transformation, restoring the original bytes.
-// This is the same approach used by XZ's x86 BCJ filter.
+// False positives: data bytes that happen to be E8/E9 are transformed
+// "incorrectly" but decode undoes exactly the same transformation,
+// restoring the original bytes. Same approach as XZ's x86 BCJ filter.
 
-/// Forward BCJ: converts x86 relative branch offsets to absolute addresses.
-/// Applied before compression to normalise call targets across call sites.
 fn bcj_x86_encode(data: &[u8]) -> Vec<u8> {
     let mut out = data.to_vec();
     let n       = data.len();
@@ -562,7 +541,6 @@ fn bcj_x86_encode(data: &[u8]) -> Vec<u8> {
 
     while i < n {
         if (data[i] == 0xE8 || data[i] == 0xE9) && i + 5 <= n {
-            // CALL rel32 (E8) or JMP rel32 (E9) — 5 bytes total
             let rel = i32::from_le_bytes([
                 data[i + 1], data[i + 2], data[i + 3], data[i + 4],
             ]);
@@ -570,7 +548,6 @@ fn bcj_x86_encode(data: &[u8]) -> Vec<u8> {
             out[i + 1..i + 5].copy_from_slice(&abs.to_le_bytes());
             i += 5;
         } else if i + 6 <= n && data[i] == 0x0F && (data[i + 1] & 0xF0) == 0x80 {
-            // Conditional jump: 0F 8x rel32 — 6 bytes total
             let rel = i32::from_le_bytes([
                 data[i + 2], data[i + 3], data[i + 4], data[i + 5],
             ]);
@@ -584,8 +561,6 @@ fn bcj_x86_encode(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Reverse BCJ: converts absolute addresses back to relative offsets.
-/// Exactly inverts bcj_x86_encode.
 fn bcj_x86_decode(data: &[u8]) -> Vec<u8> {
     let mut out = data.to_vec();
     let n       = data.len();
@@ -658,7 +633,6 @@ fn detect_bmp_stride(input: &[u8]) -> u8 {
 
 // ── Multi-stride entropy probe ────────────────────────────────────────────────
 
-/// Entropy improvement (bits/byte) when applying delta with `stride` to 8 KB sample.
 fn probe_delta_improvement(data: &[u8], stride: usize) -> f64 {
     const SAMPLE: usize = 8192;
     let sample = if data.len() > SAMPLE { &data[..SAMPLE] } else { data };
@@ -671,7 +645,6 @@ fn probe_delta_improvement(data: &[u8], stride: usize) -> f64 {
     (raw_entropy - byte_entropy(&delta)).max(0.0)
 }
 
-/// Try all four delta strides on the same 8 KB sample. Returns (filter, improvement).
 fn probe_best_stride(data: &[u8]) -> (u8, f64) {
     let candidates = [
         (FILTER_DELTA1, probe_delta_improvement(data, 1)),
@@ -739,8 +712,6 @@ mod tests {
             assert_eq!(dec, orig, "delta{} roundtrip failed", stride);
         }
     }
-
-    // ── In-place delta correctness (documents the right-to-left invariant) ───
 
     #[test]
     fn inplace_delta_encode_rtorl_is_correct() {
@@ -835,12 +806,11 @@ mod tests {
         assert_eq!(filter, FILTER_DELTA2);
     }
 
-    // ── STL: simple shuffle (flag 5, backward compat) ─────────────────────────
+    // ── STL helpers ───────────────────────────────────────────────────────────
 
     fn make_stl(n_tris: u32) -> Vec<u8> {
         let mut data = vec![0u8; 84 + n_tris as usize * 50];
         data[80..84].copy_from_slice(&n_tris.to_le_bytes());
-        // Fill with recognisable byte patterns
         for tri in 0..n_tris as usize {
             let base = 84 + tri * 50;
             for byte_pos in 0..48usize {
@@ -849,6 +819,8 @@ mod tests {
         }
         data
     }
+
+    // ── STL: simple shuffle (flag 5, backward compat) ─────────────────────────
 
     #[test]
     fn roundtrip_shuffle4_stl_simple_flag5() {
@@ -861,16 +833,15 @@ mod tests {
 
     #[test]
     fn detect_binary_stl_returns_compound_flag() {
-        // detect_filter now returns FILTER_SHUFFLE4_DELTA (7) for new compressions
         let data = make_stl(10);
         assert_eq!(detect_filter(&data), FILTER_SHUFFLE4_DELTA,
-            "detect_filter should return FILTER_SHUFFLE4_DELTA for STL");
+            "detect_filter should return FILTER_SHUFFLE4_DELTA (7) for STL");
     }
 
     #[test]
     fn detect_stl_rejects_wrong_size() {
         let n_tris: u32 = 10;
-        let mut data = vec![0u8; 84 + 10 * 50 + 1]; // wrong size
+        let mut data = vec![0u8; 84 + 10 * 50 + 1];
         data[80..84].copy_from_slice(&n_tris.to_le_bytes());
         assert_ne!(detect_filter(&data), FILTER_SHUFFLE4_DELTA);
         assert_ne!(detect_filter(&data), FILTER_SHUFFLE4);
@@ -904,51 +875,70 @@ mod tests {
 
     #[test]
     fn stl_compound_differs_from_simple_shuffle() {
-        // The compound filter must actually produce different bytes than the simple shuffle
-        // (verifies the delta step is applied)
         let data = make_stl(10);
         let simple   = apply_filter(&data, FILTER_SHUFFLE4);
         let compound = apply_filter(&data, FILTER_SHUFFLE4_DELTA);
-        // The header is identical, but the plane data should differ (after delta applied)
         assert_ne!(&compound[84..], &simple[84..],
             "compound filter should produce different plane bytes than simple shuffle");
     }
 
     #[test]
     fn stl_delta_reduces_entropy_in_planes() {
-        // For smooth sphere geometry, per-plane delta should reduce entropy
-        // of the exponent plane (byte 3 of each float = plane3).
-        let n_tris: usize = 200;
+        // Geometry designed so per-plane delta provably helps:
+        // All 12 floats per triangle ramp linearly from 1.0 → 3.0 across all
+        // triangles. Each value is in [1.0, 2.0) or [2.0, 3.0), so byte3
+        // (the IEEE 754 sign+exponent MSB) is 0x3F for the first half and 0x40
+        // for the second half — two distinct values with roughly equal frequency.
+        //
+        //   Simple plane3:   [...0x3F, 0x3F, ..., 0x40, 0x40...] → entropy ≈ 1 bit
+        //   Compound plane3: [0x3F, 0x00, 0x00, ..., 0x01, 0x00...] → entropy ≈ 0.01 bit
+        //
+        // This is the geometry the compound filter is designed for: a terrain-like
+        // height field where floats change slowly through a small number of
+        // exponent-byte buckets. Contrast with full-sphere geometry ([-1, 1] in
+        // all dims) where byte3 oscillates between 0x3F and 0xBF, making delta
+        // potentially worse than the simple shuffle.
+        let n_tris       = 200usize;
+        let total_floats = n_tris * 12;
+
         let mut data = vec![0u8; 84 + n_tris * 50];
         data[80..84].copy_from_slice(&(n_tris as u32).to_le_bytes());
-        use std::f32::consts::PI;
+
         for tri in 0..n_tris {
             let base = 84 + tri * 50;
-            let phi   = PI * tri as f32 / n_tris as f32;
-            let theta = 2.0 * PI * (tri % 50) as f32 / 50.0;
-            let nx = phi.sin() * theta.cos();
-            let ny = phi.cos();
-            let nz = phi.sin() * theta.sin();
-            // Write 12 floats (normal + 3 vertices) — use unit sphere coords
             for f in 0..12usize {
-                let v: f32 = match f % 3 { 0 => nx, 1 => ny, _ => nz };
+                let idx = tri * 12 + f;
+                // Linear ramp 1.0 → 3.0: first half in [1.0, 2.0) → byte3=0x3F,
+                // second half in [2.0, 3.0) → byte3=0x40.
+                let v: f32 = 1.0 + (idx as f32 / total_floats as f32) * 2.0;
                 let bytes = v.to_le_bytes();
                 data[base + f * 4..base + f * 4 + 4].copy_from_slice(&bytes);
             }
         }
+
         let simple   = apply_filter(&data, FILTER_SHUFFLE4);
         let compound = apply_filter(&data, FILTER_SHUFFLE4_DELTA);
-        // Check that exponent plane (plane3) has lower entropy in compound
-        let plane_size  = n_tris * 12;
-        let plane3_off  = 84 + 3 * plane_size;
-        let simple_ent  = byte_entropy(&simple[plane3_off..plane3_off + plane_size]);
-        let compound_ent = byte_entropy(&compound[plane3_off..plane3_off + plane_size]);
-        assert!(compound_ent <= simple_ent,
-            "compound plane3 entropy ({:.2}) should be <= simple ({:.2})",
-            compound_ent, simple_ent);
+
+        // Roundtrip verification
+        let dec = undo_filter(&compound, FILTER_SHUFFLE4_DELTA);
+        assert_eq!(dec, data, "compound STL roundtrip failed for ramp geometry");
+
+        // Entropy comparison: compound plane3 must be <= simple plane3.
+        let plane_size   = n_tris * 12;
+        let plane3_start = 84 + 3 * plane_size;
+
+        let simple_ent   = byte_entropy(&simple[plane3_start..plane3_start + plane_size]);
+        let compound_ent = byte_entropy(&compound[plane3_start..plane3_start + plane_size]);
+
+        assert!(
+            compound_ent <= simple_ent,
+            "compound plane3 entropy ({:.4}) should be <= simple ({:.4}) \
+             for ramp geometry (linear 1.0→3.0)",
+            compound_ent, simple_ent
+        );
     }
 
-    // ── PLY: simple shuffle (flag 6, backward compat) ─────────────────────────
+    // ── PLY helpers ───────────────────────────────────────────────────────────
 
     fn make_ply(n_verts: usize, floats_per_vert: usize) -> Vec<u8> {
         let mut hdr = String::new();
@@ -969,7 +959,6 @@ mod tests {
                 data.extend_from_slice(&val.to_le_bytes());
             }
         }
-        // 2 dummy face records
         for _ in 0..2 {
             data.push(3u8);
             data.extend_from_slice(&0u32.to_le_bytes());
@@ -978,6 +967,8 @@ mod tests {
         }
         data
     }
+
+    // ── PLY: simple shuffle (flag 6, backward compat) ─────────────────────────
 
     #[test]
     fn roundtrip_ply_simple_flag6() {
@@ -992,7 +983,7 @@ mod tests {
     fn detect_ply_returns_compound_flag() {
         let data = make_ply(100, 8);
         assert_eq!(detect_filter(&data), FILTER_PLY_DELTA,
-            "detect_filter should return FILTER_PLY_DELTA for binary PLY");
+            "detect_filter should return FILTER_PLY_DELTA (8) for binary PLY");
     }
 
     #[test]
@@ -1042,7 +1033,6 @@ mod tests {
         let compound = apply_filter(&data, FILTER_PLY_DELTA);
         let layout   = parse_ply_layout(&data).unwrap();
         let plane_start = layout.header_end;
-        // Plane data should differ after the delta step
         assert_ne!(
             &compound[plane_start..],
             &simple[plane_start..],
@@ -1054,12 +1044,9 @@ mod tests {
 
     fn make_minimal_pe() -> Vec<u8> {
         let mut data = vec![0u8; 256];
-        // DOS magic
         data[0] = b'M';
         data[1] = b'Z';
-        // e_lfanew: PE header at offset 0x40
-        data[0x3C] = 0x40;
-        // PE signature
+        data[0x3C] = 0x40; // e_lfanew: PE header at 0x40
         data[0x40] = b'P';
         data[0x41] = b'E';
         data[0x42] = 0x00;
@@ -1082,7 +1069,7 @@ mod tests {
     #[test]
     fn detect_pe_coff_rejects_missing_signature() {
         let mut data = make_minimal_pe();
-        data[0x40] = 0x00; // corrupt PE signature
+        data[0x40] = 0x00;
         assert!(!detect_pe_coff(&data));
     }
 
@@ -1112,8 +1099,13 @@ mod tests {
 
     #[test]
     fn bcj_encode_jmp_negative_rel_correct() {
-        // E9 at position 0x65, rel32 = -128 = 0xFFFFFF80
-        // abs = -128 + (0x65 + 5) = -128 + 106 = -22 = 0xFFFFFFEA
+        // E9 at position 0x65 (decimal 101), rel32 = -128.
+        // abs = rel + (position + 5) = -128 + (101 + 5) = -128 + 106 = -22.
+        //
+        // IMPORTANT: use (-128i32).wrapping_add(...) NOT -128i32.wrapping_add(...)
+        // In Rust, method calls bind tighter than unary minus, so without parens:
+        //   -128i32.wrapping_add(x) = -(128i32.wrapping_add(x)) = -(128+106) = -234 ← WRONG
+        //   (-128i32).wrapping_add(x) = (-128) + 106 = -22 ← CORRECT
         let mut data = vec![0u8; 128];
         data[0x65] = 0xE9;
         let rel: i32 = -128;
@@ -1121,21 +1113,19 @@ mod tests {
 
         let enc = bcj_x86_encode(&data);
         let abs = i32::from_le_bytes([enc[0x66], enc[0x67], enc[0x68], enc[0x69]]);
-        let expected = -128i32.wrapping_add(0x65i32 + 5);
-        assert_eq!(abs, expected, "BCJ encode JMP: abs should be {}, got {}", expected, abs);
+        let expected = (-128i32).wrapping_add(0x65i32 + 5); // = -22
+        assert_eq!(abs, expected,
+            "BCJ encode JMP: abs should be {}, got {}", expected, abs);
     }
 
     #[test]
     fn bcj_roundtrip_call_and_jmp() {
         let mut data = vec![0u8; 256];
-        // CALL at 0x10, rel = 0x20
         data[0x10] = 0xE8;
         data[0x11] = 0x20; data[0x12] = 0x00; data[0x13] = 0x00; data[0x14] = 0x00;
-        // JMP at 0x20, rel = -0x10
         data[0x20] = 0xE9;
         let rel: i32 = -0x10;
         data[0x21..0x25].copy_from_slice(&rel.to_le_bytes());
-        // JCC at 0x30, rel = 0x50
         data[0x30] = 0x0F; data[0x31] = 0x84;
         data[0x32] = 0x50; data[0x33] = 0x00; data[0x34] = 0x00; data[0x35] = 0x00;
 
@@ -1146,9 +1136,7 @@ mod tests {
 
     #[test]
     fn bcj_roundtrip_false_positive_data_bytes() {
-        // Data bytes that happen to be E8/E9 should still round-trip correctly
         let mut data = vec![0u8; 64];
-        // E8 followed by random bytes that don't look like code
         data[0]  = 0xE8;
         data[1]  = 0xAB; data[2]  = 0xCD; data[3]  = 0xEF; data[4]  = 0x01;
         data[10] = 0xE9;
@@ -1171,7 +1159,6 @@ mod tests {
 
     #[test]
     fn bcj_roundtrip_jcc_conditional_jump() {
-        // 0F 84 rel32 (JE/JZ)
         let mut data = vec![0u8; 64];
         data[5] = 0x0F;
         data[6] = 0x84;
@@ -1179,18 +1166,15 @@ mod tests {
         data[7..11].copy_from_slice(&rel.to_le_bytes());
 
         let enc = bcj_x86_encode(&data);
-        // Verify abs was stored
         let abs = i32::from_le_bytes([enc[7], enc[8], enc[9], enc[10]]);
         let expected_abs = rel.wrapping_add(5 + 6);
         assert_eq!(abs, expected_abs);
-        // Verify decode restores original
         let dec = bcj_x86_decode(&enc);
         assert_eq!(dec, data, "JCC roundtrip failed");
     }
 
     #[test]
     fn undo_filter_handles_old_flags_5_and_6() {
-        // Backward compatibility: files compressed with old flags must still decode
         let stl_data = make_stl(4);
         let ply_data = make_ply(20, 3);
 

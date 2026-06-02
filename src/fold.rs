@@ -15,6 +15,14 @@
 //   - scan_adaptive now returns (Vec<Token>, u32, u32, bool) — the bool is
 //     the incompressible signal. When true, we stop folding and let lib.rs
 //     emit a fold_count=0 passthrough. See encoder.rs for details.
+//
+//   - fold() now takes filter_flag: u8. When filter_flag != 0 (a structural
+//     pre-filter was applied), scan_adaptive is called with
+//     skip_incompressible_bail=true so the scanner never bails on filtered
+//     data. The filter has already validated exploitable structure exists.
+//     Also, the fold-1 worthiness threshold is relaxed: for filtered data any
+//     LZ improvement (ratio < 1.0) is accepted, whereas for unfiltered data
+//     the existing MIN_IMPROVEMENT_RATIO (0.985) applies.
 
 use crate::encoder::scan_adaptive;
 use crate::bitwriter::write_tokens;
@@ -111,9 +119,23 @@ fn log_phase_c_gain(tokens: &[Token], ob: u32, lb: u32, input_len: usize) {
 /// When folds_done == 0, compressed_bytes is the unmodified input (passthrough).
 /// This happens either because fold 1 didn't improve, or because scan_adaptive
 /// signalled the data is incompressible.
-pub fn fold(input: &[u8], max_folds: u8)
+///
+/// filter_flag: the filter applied before folding (0 = FILTER_NONE).
+/// When filter_flag != 0, incompressible bail is suppressed in scan_adaptive,
+/// and the fold-1 worthiness threshold is relaxed to accept any LZ improvement.
+pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
     -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>, Vec<u32>, Option<Vec<Token>>)>
 {
+    // When a structural filter was applied, the scanner must not bail on
+    // apparently-incompressible data. The filter reorganised bytes for LZ;
+    // the scanner needs to run to completion to exploit that structure.
+    // Also relax the fold-1 worthiness threshold: any LZ improvement is
+    // acceptable when a filter has already transformed the data.
+    let skip_incompressible_bail = filter_flag != 0u8;
+    // Threshold: for filtered data accept ratio < 1.0 (any reduction).
+    //            for unfiltered data require meaningful gain (< 0.985).
+    let fold1_min_improvement = if skip_incompressible_bail { 1.0_f64 } else { MIN_IMPROVEMENT_RATIO };
+
     let mut current            = input.to_vec();
     let mut folds_done: u8     = 0;
     let mut prev_size          = input.len() * 8;
@@ -134,13 +156,14 @@ pub fn fold(input: &[u8], max_folds: u8)
 
         // ── Fold 1: adaptive scan on raw input ───────────────────────────────
         if fold_num == 1 {
-            let (tokens, ob, lb, definitely_incompressible) = scan_adaptive(&current);
+            let (tokens, ob, lb, definitely_incompressible) =
+                scan_adaptive(&current, skip_incompressible_bail);
 
             if definitely_incompressible {
-                // Scanner detected expansion during the scan itself, or Phase B/C
-                // confirmed the data cannot compress. Stop immediately — lib.rs
-                // will emit fold_count=0 (passthrough). `current` is still the
-                // raw input bytes (or filtered bytes), which is the correct payload.
+                // Scanner detected expansion. For unfiltered data this means
+                // passthrough. For filtered data this path is unreachable since
+                // skip_incompressible_bail=true prevents the bail — but keep
+                // the check for completeness.
                 println!(
                     "Fold 1: incompressible signal — passthrough ({} bytes stored as-is)",
                     current.len()
@@ -162,7 +185,9 @@ pub fn fold(input: &[u8], max_folds: u8)
             println!("Fold 1 (LZ): {} bits ({} bytes)", folded_bits, folded.len());
 
             let ratio = folded_bits as f64 / prev_size as f64;
-            if ratio >= MIN_IMPROVEMENT_RATIO {
+            if ratio >= fold1_min_improvement {
+                // For unfiltered data: not worth it (< 1.5% improvement).
+                // For filtered data: only skip if LZ actually expanded (>= 1.0).
                 println!("Fold 1 not worth it (ratio {:.3}), stopping at fold 0", ratio);
                 break;
             }
@@ -249,23 +274,14 @@ pub fn fold(input: &[u8], max_folds: u8)
         }
 
         // ── Try LZ (fold 3+, or fold 2 LZ fallback after pair fails) ─────────
-        //
-        // For TOML_Config: consider_pair=true (size OK), pair expands (EG hurts
-        // large offsets), falls through here with allow_lz_on_packed=true
-        // (ratio 0.094 < 0.10), LZ runs and saves ~400 bytes. Correct behavior.
-        //
-        // For WarAndPeace/YAML: consider_pair=true, pair expands, falls through,
-        // allow_lz_on_packed=false (ratio 0.47/0.13), breaks here. Correct.
         if !allow_lz_on_packed {
             if !consider_pair {
-                // Fold 3+ with no LZ opportunity — stop.
                 println!(
                     "Fold {} skipped — LZ on packed bytes not beneficial \
                      (current ratio {:.3}, threshold {:.2})",
                     fold_num, current_ratio, FOLD2_LZ_MAX_RATIO
                 );
             } else {
-                // Pair failed and LZ not applicable — stop at fold 1.
                 println!(
                     "Fold {} PAIR failed and LZ not applicable \
                      (ratio {:.3} >= threshold {:.2}) — stopping at fold {}",
@@ -276,7 +292,9 @@ pub fn fold(input: &[u8], max_folds: u8)
         }
 
         // LZ scan on the current (fold-1 packed) bytes.
-        let (lz_tokens, lz_ob, lz_lb, definitely_incompressible) = scan_adaptive(&current);
+        // Fold 2+ always runs with skip_incompressible_bail=false — the packed
+        // token stream is not filtered data and normal bail logic applies.
+        let (lz_tokens, lz_ob, lz_lb, definitely_incompressible) = scan_adaptive(&current, false);
         if definitely_incompressible {
             println!(
                 "Fold {}: LZ scan incompressible signal — stopping at fold {}",
@@ -322,4 +340,4 @@ pub fn fold(input: &[u8], max_folds: u8)
     }
 
     Ok((current, folds_done, final_used_pairing, offset_bits_per_fold, length_bits_per_fold, fold1_tokens))
-        }
+}

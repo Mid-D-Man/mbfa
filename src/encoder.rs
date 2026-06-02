@@ -22,6 +22,7 @@
 //          If Phase B raw_cost > input_bits * 1.02 (2% expansion), the data is
 //          incompressible at these parameters. Since step 1 already confirmed lb
 //          is adequate, no Phase C can help. Returns incompressible signal.
+//          SKIPPED when skip_incompressible_bail=true (structural filter active).
 //          Unity_Terrain_2K: was 1003ms, now ~40ms (in-scan bail at first 64KB).
 //          Unity_Terrain_1K: was 159ms, now ~20ms (parallel path bail).
 //          Does NOT fire when step 1 fires (wrong lb might cause apparent expansion
@@ -37,25 +38,22 @@
 //
 //   In-scan expansion bail (inside scan() itself):
 //     Checked every SCAN_EXPANSION_CHECK_INTERVAL (64KB) of input consumed.
-//     Fires when BOTH: token_bits > input_bits * 1.02 AND lit_fraction > 95%.
-//     The dual condition prevents false positives on data like STL (7.8% backrefs,
-//     92% literals — below the 95% threshold, bail does not fire even though
-//     token_bits is near input_bits). Terrain (4.8% backrefs = 95.2% literals —
-//     above threshold, bail fires at first check after 64KB). WarAndPeace (70.9%
-//     backrefs = 29.1% literals — far below threshold, never fires).
-//     Returns (Vec::new(), true) meaning "incompressible, discard".
+//     SKIPPED when skip_bail=true (structural filter active — detect_filter
+//     already validated exploitable structure exists; scanner must run to completion).
+//     When skip_bail=false (normal operation): fires when BOTH token_bits >
+//     input_bits * 1.02 AND lit_fraction > 95%. Returns (Vec::new(), true) meaning
+//     "incompressible, discard".
+//
+//   skip_incompressible_bail / skip_bail:
+//     When a structural pre-filter (flag != FILTER_NONE: delta, STL shuffle+delta,
+//     PLY shuffle+delta, BCJ) was applied before folding, the scanner must not bail
+//     early on apparently-incompressible data. The filter has already validated that
+//     exploitable structure exists; high lit_fraction or apparent expansion in the
+//     first 64KB simply means the LZ window hasn't yet reached the compressible
+//     regions reorganised by the filter.
 //
 //   Return type of scan_adaptive changed to (Vec<Token>, u32, u32, bool) where
 //   the bool = is_incompressible. Callers check this before using tokens.
-//
-//   Phase A fingerprint rules (applied only when input > 1 MB):
-//     Rule 1: entropy < 2.0 (highly repetitive) -> defer to Phase C.
-//     Rule 2: size < 32 KB -> predict ob = ceil(log2(size)), lb = 8.
-//     Rule 3: default -> predict baseline (ob=17, lb=8).
-//
-//   Phase C -- discovery path: unchanged from previous version.
-//
-//   Dynamic chain limit (full scan only): unchanged.
 //
 //   log_window_diagnostics and log_phase_c_gain are defined in fold.rs and
 //   called there after scan_adaptive returns. Do NOT add them here.
@@ -194,7 +192,13 @@ fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
 // detected clear incompressibility and returned early. In that case, the
 // returned token Vec is empty and must be discarded by the caller.
 //
-// The in-scan bail fires when BOTH:
+// skip_bail: when true, the in-scan expansion bail is suppressed entirely.
+// This must be set when a structural filter (STL shuffle+delta, PLY shuffle+delta,
+// delta stride, BCJ) was applied before the scan. The filter has validated that
+// exploitable structure exists; the scanner must run to completion.
+//
+// When skip_bail=false (normal operation):
+// The bail fires when BOTH:
 //   (a) running token bit cost exceeds input bit cost by >2%, AND
 //   (b) more than 95% of tokens so far are literals.
 //
@@ -202,7 +206,7 @@ fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
 // have ~8% backrefs (slightly below the 95% literal threshold) while reliably
 // catching terrain data with ~5% backrefs (slightly above 95%).
 
-pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> (Vec<Token>, bool) {
+pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -> (Vec<Token>, bool) {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
     let backref_bits = backref_total_bits(offset_bits, length_bits);
@@ -220,7 +224,8 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> (Vec<Token>, bo
 
     while i < n {
         // -- In-scan expansion bail (every 64 KB) ---------------------------------
-        if i > 0 && (i & SCAN_EXPANSION_INTERVAL_MASK) == 0 {
+        // Skipped entirely when skip_bail=true (structural filter was applied).
+        if i > 0 && (i & SCAN_EXPANSION_INTERVAL_MASK) == 0 && !skip_bail {
             let total_tokens = tokens.len();
             if total_tokens >= EXPANSION_MIN_TOKENS {
                 let backref_count = total_tokens - lit_count;
@@ -236,8 +241,6 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32) -> (Vec<Token>, bo
                 let mostly_lits = lit_count * 100 > total_tokens * EXPANSION_LIT_PCT;
                 if expanding && mostly_lits {
                     // Incompressible: return empty vec with bail signal.
-                    // Caller (scan_adaptive) will detect this and return its own
-                    // incompressible signal up to fold(), which passhthroughs.
                     return (Vec::new(), true);
                 }
             }
@@ -598,9 +601,10 @@ fn offset_or_upper_half_saturated(tokens: &[Token], ob: u32) -> bool {
 // -- Phase C inner logic ------------------------------------------------------
 
 fn phase_c_from_baseline(
-    baseline:       ScanResult,
-    wide_discovery: Vec<Token>,
-    input:          &[u8],
+    baseline:               ScanResult,
+    wide_discovery:         Vec<Token>,
+    input:                  &[u8],
+    skip_incompressible_bail: bool,
 ) -> (Vec<Token>, u32, u32) {
 
     println!(
@@ -624,9 +628,9 @@ fn phase_c_from_baseline(
         return (baseline.tokens, baseline.ob, baseline.lb);
     }
 
-    // Constrained re-scan at discovered parameters. If the scan bails
-    // (incompressible even with wider parameters), fall back to baseline.
-    let (constrained_tokens, constrained_bailed) = scan(input, wide_ob, wide_lb);
+    // Constrained re-scan at discovered parameters. Pass skip_bail through so
+    // filtered data is not incorrectly treated as incompressible here either.
+    let (constrained_tokens, constrained_bailed) = scan(input, wide_ob, wide_lb, skip_incompressible_bail);
     if constrained_bailed {
         println!("  Phase C constrained scan bailed early — baseline wins (still expanding)");
         return (baseline.tokens, baseline.ob, baseline.lb);
@@ -644,7 +648,7 @@ fn phase_c_from_baseline(
         let constrained_bytes = (constrained.raw_cost as usize + 7) / 8;
         if constrained_bytes >= ENTROPY_MIN_BYTES_FOR_SCAN {
             let (capped_tokens, capped_bailed) =
-                scan(input, constrained.ob, ENTROPY_SAFE_LENGTH_BITS);
+                scan(input, constrained.ob, ENTROPY_SAFE_LENGTH_BITS, skip_incompressible_bail);
 
             if capped_bailed {
                 println!("  Phase C capped scan bailed — baseline wins");
@@ -695,8 +699,12 @@ fn phase_c_from_baseline(
 // Returns (tokens, offset_bits, length_bits, is_incompressible).
 // When is_incompressible=true: tokens is empty, caller should passthrough
 // original input without folding (fold_count=0 in the file header).
+//
+// skip_incompressible_bail: when true, all expansion bail paths are suppressed.
+// Set by fold() when filter_flag != FILTER_NONE. The structural filter already
+// validated that exploitable structure exists; the scanner must run to completion.
 
-pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32, bool) {
+pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token>, u32, u32, bool) {
 
     if input.len() > PARALLEL_SCAN_THRESHOLD {
         match fingerprint_predict(input) {
@@ -705,8 +713,11 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32, bool) {
             }
             Some((pred_ob, pred_lb)) => {
                 // Phase B: full-quality scan at fingerprint-predicted parameters.
-                let (phase_b_tokens, phase_b_bailed) = scan(input, pred_ob, pred_lb);
+                let (phase_b_tokens, phase_b_bailed) = scan(input, pred_ob, pred_lb, skip_incompressible_bail);
                 if phase_b_bailed {
+                    // phase_b_bailed is false when skip_incompressible_bail=true
+                    // (scan() never bails when skip_bail=true). This branch is dead
+                    // code in that case but kept for logical completeness.
                     println!("  Phase B: in-scan expansion bail — incompressible, skipping Phase C");
                     return (Vec::new(), pred_ob, pred_lb, true);
                 }
@@ -726,22 +737,19 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32, bool) {
                     if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
                         let baseline  = ScanResult { label: "baseline", ..result };
                         let discovery = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
-                        let (tokens, ob, lb) = phase_c_from_baseline(baseline, discovery, input);
+                        let (tokens, ob, lb) = phase_c_from_baseline(baseline, discovery, input, skip_incompressible_bail);
                         return (tokens, ob, lb, false);
                     }
                     // pred_ob != baseline (Rule 2, not reached for >1MB in practice):
                     // fall through to parallel Phase C below.
                 } else {
-                    // ── Step 1.5: Expansion bail (NEW — lb confirmed OK at step 1) ─
+                    // ── Step 1.5: Expansion bail (skipped when filter active) ──────
                     //
-                    // If Phase B is already expanding (ratio > 1.02), Phase C cannot
-                    // help — the data is incompressible with any parameters. This fires
-                    // for smooth terrain (4.8% backrefs, ratio ~1.10) but NOT for
-                    // WarAndPeace (70.9% backrefs, ratio ~0.47) or JSON (ratio ~0.08).
-                    //
-                    // NOT reached when step 1 fires: wrong lb might cause apparent
-                    // expansion that wider lb would fix. Phase C is still warranted.
-                    {
+                    // When skip_incompressible_bail=true a structural filter has
+                    // validated exploitable structure. Do NOT bail even if Phase B
+                    // appears to expand — the filter reorganised bytes that LZ will
+                    // exploit once it builds a sufficient history window.
+                    if !skip_incompressible_bail {
                         let input_bits = input.len() as u64 * 8;
                         if result.raw_cost * 100 >= input_bits * EXPANSION_BAIL_PCT {
                             println!(
@@ -754,10 +762,6 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32, bool) {
                     }
 
                     // ── Step 2: Early exit (safe — lb OK at 1, not expanding at 1.5) ─
-                    //
-                    // JSON_2MB: ratio=8.41% < 15% → exits fast at ob=17.
-                    // WarAndPeace: ratio ~60% >> 15% → does NOT early-exit.
-                    // Terrain: never reaches here (step 1.5 fired).
                     let phase_b_ratio = result.raw_cost as f64
                         / (input.len() as f64 * 8.0);
 
@@ -772,15 +776,12 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32, bool) {
                     }
 
                     // ── Step 3: Offset peak + upper-half ───────────────────────────
-                    //
-                    // WarAndPeace: some backrefs near 128KB edge → fires → Phase C.
-                    // JSON_2MB: never reaches (early exit at step 2).
                     if offset_or_upper_half_saturated(&result.tokens, pred_ob) {
                         println!("  Step 3: offset/upper-half -- Phase C needed");
                         if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
                             let baseline  = ScanResult { label: "baseline", ..result };
                             let discovery = scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX);
-                            let (tokens, ob, lb) = phase_c_from_baseline(baseline, discovery, input);
+                            let (tokens, ob, lb) = phase_c_from_baseline(baseline, discovery, input, skip_incompressible_bail);
                             return (tokens, ob, lb, false);
                         }
                         // pred_ob != baseline: fall through to parallel Phase C below.
@@ -799,16 +800,17 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32, bool) {
     //   (b) files > threshold, fingerprint returned None (Rule 1: repetitive)
     //   (c) files > threshold, pred_ob != BASELINE (Rule 2, not reached in practice)
     //
-    // Expansion bail fires after the parallel scans complete if baseline is
-    // still expanding. This saves the Phase C re-scan for clearly incompressible
-    // data (e.g. Unity_Terrain_1K at 526KB hits this path and bails here).
+    // When skip_incompressible_bail=true the post-scan expansion check is
+    // suppressed — filtered data must proceed to Phase C regardless of apparent
+    // expansion in the baseline scan.
 
     let (baseline, wide_discovery) = if input.len() <= PARALLEL_SCAN_THRESHOLD {
         let ((bt_tokens, bt_bailed), disc) = rayon::join(
-            || scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS),
+            || scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, skip_incompressible_bail),
             || scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX),
         );
         if bt_bailed {
+            // bt_bailed is false when skip_incompressible_bail=true.
             println!("  Parallel baseline: in-scan expansion bail — incompressible");
             return (Vec::new(), BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, true);
         }
@@ -818,7 +820,7 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32, bool) {
         )
     } else {
         // Sequential fallback for large files in the parallel path (Rule 1 / Rule 2 cases)
-        let (bt_tokens, bt_bailed) = scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS);
+        let (bt_tokens, bt_bailed) = scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, skip_incompressible_bail);
         if bt_bailed {
             println!("  Sequential baseline (parallel path): expansion bail — incompressible");
             return (Vec::new(), BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, true);
@@ -831,9 +833,8 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32, bool) {
     };
 
     // Post-scan expansion check: complete scan may still be expanding.
-    // This catches cases where the in-scan bail didn't fire (e.g. expansion
-    // ratio was just below 102% per interval but accumulates to > 102% overall).
-    {
+    // Suppressed when skip_incompressible_bail=true — filter guarantees structure exists.
+    if !skip_incompressible_bail {
         let input_bits = input.len() as u64 * 8;
         if baseline.raw_cost * 100 >= input_bits * EXPANSION_BAIL_PCT {
             println!(
@@ -852,6 +853,6 @@ pub fn scan_adaptive(input: &[u8]) -> (Vec<Token>, u32, u32, bool) {
         baseline.raw_cost,
     );
 
-    let (tokens, ob, lb) = phase_c_from_baseline(baseline, wide_discovery, input);
+    let (tokens, ob, lb) = phase_c_from_baseline(baseline, wide_discovery, input, skip_incompressible_bail);
     (tokens, ob, lb, false)
-}
+             }

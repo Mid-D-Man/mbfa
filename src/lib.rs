@@ -36,7 +36,9 @@ fn sample_entropy(data: &[u8]) -> f64 {
 ///   Byte 0:          fold_count
 ///   Byte 1:          pair_flag    (1 = fold 2 used pair encoding)
 ///   Byte 2:          entropy_flag (0 = none, 1-6 = entropy variant)
-///   Byte 3:          filter_flag  (0 = none, 1-4 = delta stride 1-4, 5 = shuffle4)
+///   Byte 3:          filter_flag  (0 = none, 1-4 = delta stride,
+///                                  7 = STL shuffle+delta, 8 = PLY shuffle+delta,
+///                                  9 = BCJ x86 xz-style)
 ///   Bytes 4..4+N:    offset_bits[0..N]  N = fold_count
 ///   Bytes 4+N..4+2N: length_bits[0..N]
 ///   Remaining:       compressed payload
@@ -85,8 +87,10 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     }
 
     // ── Fold passes ───────────────────────────────────────────────────────────
+    // filter_flag is forwarded so fold() can suppress incompressible-bail
+    // when a structural pre-filter was applied.
     let (compressed, folds_done, used_pairing, offset_bits_per_fold, length_bits_per_fold, fold1_tokens_opt) =
-        fold::fold(to_fold, max_folds)?;
+        fold::fold(to_fold, max_folds, filter_flag)?;
 
     let ob1 = offset_bits_per_fold
         .first().copied().unwrap_or(opcode::OFFSET_BITS_MIN);
@@ -458,4 +462,4 @@ fn pair_vs_entropy(
 
 pub fn decompress(input: &[u8]) -> io::Result<Vec<u8>> {
     unfold::unfold(input)
-}
+        }

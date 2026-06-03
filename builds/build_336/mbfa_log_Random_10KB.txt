@@ -1,0 +1,4 @@
+Original size: 80000 bits (10000 bytes)
+  Parallel path post-scan: baseline expanding (1.250) — incompressible, skipping Phase C re-scan
+Fold 1: incompressible signal — passthrough (10000 bytes stored as-is)
+Done. 10000 bytes → 10004 bytes

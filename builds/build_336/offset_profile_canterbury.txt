@@ -1,0 +1,121 @@
+File                       BACKREFs     Hit@1     Hit@2     Hit@3       Pct@1       Pct@2       Pct@3
+---------------------------------------------------------------------------------------------------------
+Original size: 1216712 bits (152089 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=551012
+  chain_limit (baseline ob=17): 512  raw_cost=551012
+  discovery (capped 2MB/chain=256): discovered ob=18 lb=8
+  chain_limit (constrained ob=18): 512  raw_cost=568334
+  entropy tiebreaker: constrained est=416983b vs baseline est=416758b -> baseline wins
+  baseline wins: ob=17 lb=8 raw_cost=551012 vs constrained raw_cost=568334
+Window diagnostics: 17780/26653 tokens BACKREF (66.7%) | offset: 0.0% at max (131071) | 8.9% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 551016 bits (68877 bytes)
+alice29.txt                   17780        11        32        48       0.06%       0.18%       0.27%   est saving ~0.2% of offset bits
+Original size: 1001432 bits (125179 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=516530
+  chain_limit (baseline ob=17): 512  raw_cost=516530
+  discovery (capped 2MB/chain=256): discovered ob=17 lb=8
+  wide agrees with baseline -- no re-scan needed
+Window diagnostics: 16508/25240 tokens BACKREF (65.4%) | offset: 0.0% at max (131071) | 6.6% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 516536 bits (64567 bytes)
+asyoulik.txt                  16508         7        24        30       0.04%       0.15%       0.18%   est saving ~0.2% of offset bits
+Original size: 196824 bits (24603 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=91964
+  chain_limit (baseline ob=17): 512  raw_cost=91964
+  discovery (capped 2MB/chain=256): discovered ob=15 lb=8
+  chain_limit (constrained ob=15): 256  raw_cost=87430
+  constrained wins: ob=15 lb=8 raw_cost=87430 vs baseline raw_cost=91964
+Window diagnostics: 2267/5569 tokens BACKREF (40.7%) | offset: 0.0% at max (32767) | 1.9% upper half | length: 0.0% at max (255) | offset_bits=15 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=15 (window=32767 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 87432 bits (10929 bytes)
+cp.html                        2267        23        35        39       1.01%       1.54%       1.72%   est saving ~1.5% of offset bits
+Original size: 89200 bits (11150 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=37346
+  chain_limit (baseline ob=17): 512  raw_cost=37346
+  discovery (capped 2MB/chain=256): discovered ob=14 lb=8
+  chain_limit (constrained ob=14): 256  raw_cost=34394
+  constrained wins: ob=14 lb=8 raw_cost=34394 vs baseline raw_cost=37346
+Window diagnostics: 984/2160 tokens BACKREF (45.6%) | offset: 0.0% at max (16383) | 0.6% upper half | length: 0.0% at max (255) | offset_bits=14 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=14 (window=16383 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 34400 bits (4300 bytes)
+fields.c                        984        39        52        58       3.96%       5.28%       5.89%   est saving ~5.1% of offset bits
+Original size: 29768 bits (3721 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=15550
+  chain_limit (baseline ob=17): 512  raw_cost=15550
+  discovery (capped 2MB/chain=256): discovered ob=12 lb=8
+  chain_limit (constrained ob=12): 256  raw_cost=13810
+  constrained wins: ob=12 lb=8 raw_cost=13810 vs baseline raw_cost=15550
+Window diagnostics: 348/998 tokens BACKREF (34.9%) | offset: 0.0% at max (4095) | 1.1% upper half | length: 0.0% at max (255) | offset_bits=12 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 13816 bits (1727 bytes)
+grammar.lsp                     348         8        16        16       2.30%       4.60%       4.60%   est saving ~3.8% of offset bits
+Original size: 8237952 bits (1029744 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=2909914
+  chain_limit (baseline ob=17): 512  raw_cost=2909914
+  discovery (capped 2MB/chain=256): discovered ob=20 lb=8
+  chain_limit (constrained ob=20): 256  raw_cost=3141094
+  baseline wins: ob=17 lb=8 raw_cost=2909914 vs constrained raw_cost=3141094
+Window diagnostics: 80632/161980 tokens BACKREF (49.8%) | offset: 0.0% at max (131071) | 9.7% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 2909920 bits (363740 bytes)
+kennedy.xls                   80632     64174     67486     68765      79.59%      83.70%      85.28%   est saving ~75.2% of offset bits
+Original size: 3414032 bits (426754 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=1381278
+  chain_limit (baseline ob=17): 512  raw_cost=1381278
+  discovery (capped 2MB/chain=256): discovered ob=19 lb=8
+  chain_limit (constrained ob=19): 256  raw_cost=1402464
+  entropy tiebreaker: constrained est=1055910b vs baseline est=1074514b -> constrained wins
+  constrained wins: ob=19 lb=8 raw_cost=1402464 vs baseline raw_cost=1381278
+Window diagnostics: 43479/61984 tokens BACKREF (70.1%) | offset: 0.0% at max (524287) | 2.8% upper half | length: 0.0% at max (255) | offset_bits=19 length_bits=8 — OK
+  DIAG phase_c_gain: ob=19 lb=8 actual_ratio=41.0794% baseline_hyp_ratio=38.5323% gain_pp=-2.5471pp input_bytes=426754
+Fold 1 adaptive: offset_bits=19 (window=524287 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 1402464 bits (175308 bytes)
+lcet10.txt                    43479        46       125       156       0.11%       0.29%       0.36%   est saving ~0.3% of offset bits
+Original size: 3854888 bits (481861 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=1917268
+  chain_limit (baseline ob=17): 512  raw_cost=1917268
+  discovery (capped 2MB/chain=256): discovered ob=19 lb=8
+  chain_limit (constrained ob=19): 256  raw_cost=1960556
+  entropy tiebreaker: constrained est=1459985b vs baseline est=1466109b -> constrained wins
+  constrained wins: ob=19 lb=8 raw_cost=1960556 vs baseline raw_cost=1917268
+Window diagnostics: 60143/87798 tokens BACKREF (68.5%) | offset: 0.0% at max (524287) | 4.2% upper half | length: 0.0% at max (255) | offset_bits=19 length_bits=8 — OK
+  DIAG phase_c_gain: ob=19 lb=8 actual_ratio=50.8590% baseline_hyp_ratio=47.7386% gain_pp=-3.1204pp input_bytes=481861
+Fold 1 adaptive: offset_bits=19 (window=524287 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 1960560 bits (245070 bytes)
+plrabn12.txt                  60143        22        46        58       0.04%       0.08%       0.10%   est saving ~0.1% of offset bits
+Original size: 4105728 bits (513216 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=593152
+  chain_limit (baseline ob=17): 512  raw_cost=593152
+  discovery (capped 2MB/chain=256): discovered ob=19 lb=16
+  chain_limit (constrained ob=19): 256  raw_cost=711714
+  lb cap: constrained lb=16 output=88965B >= threshold 400B -- capped raw_cost=699382 chain_limit=256
+  baseline wins over capped
+Window diagnostics: 15955/33787 tokens BACKREF (47.2%) | offset: 0.0% at max (131071) | 13.1% upper half | length: 3.1% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 593152 bits (74144 bytes)
+ptt5                          15955      1479      2552      3149       9.27%      15.99%      19.74%   est saving ~17.4% of offset bits
+Original size: 305920 bits (38240 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=150154
+  chain_limit (baseline ob=17): 512  raw_cost=150154
+  discovery (capped 2MB/chain=256): discovered ob=16 lb=10
+  chain_limit (constrained ob=16): 256  raw_cost=153711
+  entropy tiebreaker: constrained est=104412b vs baseline est=104618b -> constrained wins
+  constrained wins: ob=16 lb=10 raw_cost=153711 vs baseline raw_cost=150154
+Window diagnostics: 3587/9273 tokens BACKREF (38.7%) | offset: 0.0% at max (65535) | 0.0% upper half | length: 0.0% at max (1023) | offset_bits=16 length_bits=10 — OK
+  DIAG phase_c_gain: ob=16 lb=10 actual_ratio=50.2455% baseline_hyp_ratio=49.0730% gain_pp=-1.1725pp input_bytes=38240
+Fold 1 adaptive: offset_bits=16 (window=65535 bytes) length_bits=10 (max_len=1023)
+Fold 1 (LZ): 153712 bits (19214 bytes)
+sum                            3587       721       939      1006      20.10%      26.18%      28.05%   est saving ~24.5% of offset bits
+Original size: 33816 bits (4227 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=21940
+  chain_limit (baseline ob=17): 512  raw_cost=21940
+  discovery (capped 2MB/chain=256): discovered ob=12 lb=8
+  chain_limit (constrained ob=12): 256  raw_cost=19500
+  constrained wins: ob=12 lb=8 raw_cost=19500 vs baseline raw_cost=21940
+Window diagnostics: 488/1413 tokens BACKREF (34.5%) | offset: 0.0% at max (4095) | 8.2% upper half | length: 0.0% at max (255) | offset_bits=12 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 19504 bits (2438 bytes)
+xargs.1                         488        15        19        19       3.07%       3.89%       3.89%   est saving ~3.2% of offset bits
+---------------------------------------------------------------------------------------------------------
+TOTAL                        242171     66545     71326     73344      27.48%      29.45%      30.29%

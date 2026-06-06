@@ -164,4 +164,91 @@ mod tests {
     use crate::filters::{apply_filter, detect_filter, undo_filter, FILTER_SHUFFLE4_DELTA};
     use crate::filters::probe::byte_entropy;
 
-    fn make_stl(n_tris
+    fn make_stl(n_tris: u32) -> Vec<u8> {
+let mut data = vec![0u8; 84 + n_tris as usize * 50];
+data[80..84].copy_from_slice(&n_tris.to_le_bytes());
+for tri in 0..n_tris as usize {
+let base = 84 + tri * 50;
+for byte_pos in 0..48usize {
+data[base + byte_pos] = ((tri * 48 + byte_pos) & 0xFF) as u8;
+}
+}
+data
+    }#[test]
+fn detect_binary_stl_returns_compound_flag() {
+    let data = make_stl(10);
+    assert_eq!(
+        detect_filter(&data), FILTER_SHUFFLE4_DELTA,
+        "detect_filter should return FILTER_SHUFFLE4_DELTA (7) for STL"
+    );
+}
+
+#[test]
+fn detect_stl_rejects_wrong_size() {
+    let n_tris: u32 = 10;
+    let mut data = vec![0u8; 84 + 10 * 50 + 1]; // one byte too many
+    data[80..84].copy_from_slice(&n_tris.to_le_bytes());
+    assert_ne!(detect_filter(&data), FILTER_SHUFFLE4_DELTA);
+}
+
+#[test]
+fn detect_stl_rejects_zero_tris() {
+    let data = vec![0u8; 84];
+    assert_eq!(detect_filter(&data), crate::filters::FILTER_NONE);
+}
+
+#[test]
+fn roundtrip_shuffle4_stl_delta_minimal() {
+    let data = make_stl(2);
+    let enc = apply_filter(&data, FILTER_SHUFFLE4_DELTA);
+    assert_eq!(enc.len(), data.len(), "compound STL filter must be size-preserving");
+    let dec = undo_filter(&enc, FILTER_SHUFFLE4_DELTA);
+    assert_eq!(dec, data, "STL compound roundtrip failed");
+}
+
+#[test]
+fn roundtrip_shuffle4_stl_delta_larger() {
+    let data = make_stl(500);
+    let enc = apply_filter(&data, FILTER_SHUFFLE4_DELTA);
+    assert_eq!(enc.len(), data.len());
+    let dec = undo_filter(&enc, FILTER_SHUFFLE4_DELTA);
+    assert_eq!(dec, data, "STL compound roundtrip failed for 500 tris");
+}
+
+#[test]
+fn stl_delta_reduces_entropy_in_planes() {
+    let n_tris       = 200usize;
+    let total_floats = n_tris * 12;
+
+    let mut data = vec![0u8; 84 + n_tris * 50];
+    data[80..84].copy_from_slice(&(n_tris as u32).to_le_bytes());
+
+    // Fill with a smoothly-increasing float ramp so delta1 should reduce entropy.
+    for tri in 0..n_tris {
+        let base = 84 + tri * 50;
+        for f in 0..12usize {
+            let idx = tri * 12 + f;
+            let v: f32 = 1.0 + (idx as f32 / total_floats as f32) * 2.0;
+            let bytes = v.to_le_bytes();
+            data[base + f * 4..base + f * 4 + 4].copy_from_slice(&bytes);
+        }
+    }
+
+    let compound = apply_filter(&data, FILTER_SHUFFLE4_DELTA);
+    let dec      = undo_filter(&compound, FILTER_SHUFFLE4_DELTA);
+    assert_eq!(dec, data, "compound STL roundtrip failed for ramp geometry");
+
+    // Compare entropy in plane3 (exponent byte) vs simple shuffle.
+    let simple     = shuffle4_stl_encode(&data);
+    let plane_size = n_tris * 12;
+    let p3s        = 84 + 3 * plane_size;
+
+    let simple_ent   = byte_entropy(&simple[p3s..p3s + plane_size]);
+    let compound_ent = byte_entropy(&compound[p3s..p3s + plane_size]);
+
+    assert!(
+        compound_ent <= simple_ent,
+        "compound plane3 entropy ({:.4}) should be ≤ simple ({:.4}) for ramp geometry",
+        compound_ent, simple_ent
+    );
+        }}

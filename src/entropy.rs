@@ -35,10 +35,10 @@
 //
 // Core algorithm (fold/unfold/LZ/pairing) is untouched by this module.
 //
-// Frequency counting uses fixed arrays instead of HashMap:
-//   - Lit/length channel: vec![0u64; 65536]
-//   - Offset bucket channel: [u64; 64]
-//   - Slot channel: [u64; NUM_SLOTS]
+// P6: NUM_SLOTS reduced from 8 to 4 to match MAX_RING_SLOTS (opcode.rs).
+// This is a breaking change for existing v4/v5 files — acceptable pre-release.
+// Note: resolve_ring() is called in lib.rs BEFORE entropy functions see tokens,
+// so the LZ ring and the Huffman offset slots are completely independent systems.
 
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
@@ -61,8 +61,13 @@ pub type EncodeTable = HashMap<u32, (u32, u32)>;
 pub type DecodeTable = HashMap<(u32, u32), u32>;
 
 // ── Recent-offset slot reuse ──────────────────────────────────────────────────
+//
+// P6: NUM_SLOTS reduced from 8 to 4 to match the LZ ring buffer size.
+// These slots are for Huffman entropy coding of offsets in v4/v5 variants,
+// operating on resolved Backref tokens (never RepRef — resolve_ring() is
+// called before entropy functions see any tokens).
 
-pub const NUM_SLOTS:        usize = 8;
+pub const NUM_SLOTS:        usize = 4;  // P6: was 8
 pub const SLOT_SYMBOL_BASE: u32   = 1000;
 
 pub struct OffsetSlots {

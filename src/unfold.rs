@@ -1,4 +1,11 @@
 // src/unfold.rs
+//
+// P6 changes vs previous version:
+//   - Parse ring_flag from bit 1 of pair_flag byte in the header.
+//   - Pass ring_active = (pass == 1 && ring_flag) to bitreader::read_tokens.
+//     Fold 1's LZ bitstream uses ring-active opcodes when ring_flag = 1.
+//     All other passes (fold 2+, pair decode) are unaffected.
+
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
 use crate::entropy;
@@ -13,18 +20,21 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     if input.is_empty() { return Ok(Vec::new()); }
     if input.len() < 4  { return Ok(input.to_vec()); }
 
-    let fold_count   = input[0] as usize;
-    let pair_flag    = input[1];
-    let entropy_flag = input[2];
-    let filter_flag  = input[3];
+    let fold_count    = input[0] as usize;
+    let pair_flag_raw = input[1];
+    let pair_flag     = pair_flag_raw & 0x01;       // bit 0: fold 2 used pair encoding
+    let ring_flag     = (pair_flag_raw >> 1) & 0x01 != 0; // bit 1: fold 1 uses ring opcodes (P6)
+    let entropy_flag  = input[2];
+    let filter_flag   = input[3];
 
     let (offset_bits_per_fold, length_bits_per_fold, payload_start) =
         parse_header(input, fold_count);
 
     println!(
-        "Unfolding {} pass(es) | pair_flag={} | entropy_flag={} | filter_flag={} | \
+        "Unfolding {} pass(es) | pair_flag={} | ring_flag={} | \
+         entropy_flag={} | filter_flag={} | \
          offset_bits={:?} | length_bits={:?}",
-        fold_count, pair_flag, entropy_flag, filter_flag,
+        fold_count, pair_flag, ring_flag as u8, entropy_flag, filter_flag,
         offset_bits_per_fold, length_bits_per_fold
     );
 
@@ -43,7 +53,6 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     // ── Entropy decode ────────────────────────────────────────────────────────
     let (mut current, folds_to_undo) = match entropy_flag {
 
-        // v1: joint lit/length + offset bucket
         1 => {
             let payload = &input[payload_start..];
             let (lit_enc, lit_c) = entropy::deserialize_table(payload)?;
@@ -57,7 +66,6 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
-        // v2: 2-context lit/length + offset bucket
         2 => {
             let payload = &input[payload_start..];
             let (enc0, c0) = entropy::deserialize_table(payload)?;
@@ -73,7 +81,6 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
-        // v3: 8-context heuristic category lit/length + offset bucket
         3 => {
             let payload = &input[payload_start..];
             let mut cursor = 0usize;
@@ -100,7 +107,6 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
-        // v4: joint lit/length + slotted offset
         4 => {
             let payload = &input[payload_start..];
             let (lit_enc, lit_c) = entropy::deserialize_table(payload)?;
@@ -114,7 +120,6 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
-        // v5: 2-context lit/length + slotted offset
         5 => {
             let payload = &input[payload_start..];
             let (enc0, c0) = entropy::deserialize_table(payload)?;
@@ -130,7 +135,6 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
-        // v6: separate literal stream + sequence stream
         6 => {
             let payload = &input[payload_start..];
             let (lit_enc, lit_c) = entropy::deserialize_table(payload)
@@ -147,31 +151,27 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let off_dt = entropy::decode_table_from_encode(&off_enc);
             let tokens = entropy::read_tokens_v6(
                 &payload[lit_c + seq_c + off_c..],
-                &lit_dt,
-                &seq_dt,
-                &off_dt,
+                &lit_dt, &seq_dt, &off_dt,
             )?;
             let rec = reconstruct(&tokens);
             println!("Entropy v6 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
 
-        // v7: removed — prose-tuned context split retired after session 6.
         7 => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "entropy flag 7 (prose-tuned v7) has been removed — \
-                 this file was compressed with a development build and cannot be decompressed",
+                 this file was compressed with a development build",
             ));
         }
 
-        // 0 or unknown: no entropy, raw payload
         _ => {
             (input[payload_start..].to_vec(), fold_count)
         }
     };
 
-    // ── LZ/PAIR unfold passes ─────────────────────────────────────────────────
+    // ── LZ / PAIR unfold passes ───────────────────────────────────────────────
     for pass in (1..=folds_to_undo).rev() {
         let ob = ob_for_fold(pass);
         let lb = lb_for_fold(pass);
@@ -184,18 +184,20 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             println!("Unfold pass 2 (PAIR/EG) + pass 1 (LZ): {} bytes", current.len());
             break;
         } else {
-            let tokens = read_tokens(&current, ob, lb)?;
+            // P6: fold 1's bitstream uses ring-active opcodes when ring_flag=1.
+            // All other passes use the legacy opcode set (ring_active=false).
+            let ring_active = pass == 1 && ring_flag;
+            let tokens = read_tokens(&current, ob, lb, ring_active)?;
             current = reconstruct(&tokens);
-            println!("Unfold pass {} (LZ): {} bytes", pass, current.len());
+            println!("Unfold pass {} (LZ{}): {} bytes",
+                pass,
+                if ring_active { "+ring" } else { "" },
+                current.len()
+            );
         }
     }
 
     // ── Post-filter ───────────────────────────────────────────────────────────
-    // Dispatches to filters::undo_filter which handles:
-    //   1-4: delta stride
-    //   7:   STL byte-plane shuffle + per-plane delta
-    //   8:   PLY byte-plane shuffle + per-plane delta
-    //   9:   x86 BCJ (xz-style) reverse transform
     if filter_flag != filters::FILTER_NONE {
         let before = current.len();
         current = filters::undo_filter(&current, filter_flag);
@@ -244,4 +246,4 @@ fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) 
         vec![LENGTH_BITS_DEFAULT; fold_count],
         payload_start,
     )
-        }
+                     }

@@ -11,7 +11,7 @@
 //     applies three checks IN STRICT ORDER before deciding whether to run Phase C:
 //
 //       1. Length peak saturation (HARD, runs before early exit):
-//          Any Backref length >= 90% of max_len. Means lb is too small.
+//          Any Backref/RepRef length >= 90% of max_len. Means lb is too small.
 //          MUST run before early exit — Repetitive_2MB has a very low Phase B
 //          ratio but lb=8 is genuinely wrong (every match hits max_len=255).
 //          Early exit would bypass Phase C and return ob=17 lb=8 giving 183B
@@ -23,43 +23,28 @@
 //          incompressible at these parameters. Since step 1 already confirmed lb
 //          is adequate, no Phase C can help. Returns incompressible signal.
 //          SKIPPED when skip_incompressible_bail=true (structural filter active).
-//          Unity_Terrain_2K: was 1003ms, now ~40ms (in-scan bail at first 64KB).
-//          Unity_Terrain_1K: was 159ms, now ~20ms (parallel path bail).
-//          Does NOT fire when step 1 fires (wrong lb might cause apparent expansion
-//          that wider lb would fix — Phase C is still warranted in that case).
 //
 //       2. Early exit (safe ONLY after length peak passes AND expansion bail clears):
 //          If Phase B ratio < PHASE_B_EARLY_EXIT_RATIO (15%), Phase C gain is
-//          negligible. Calibrated from JSON_2MB: ratio=8.41%.
+//          negligible.
 //
 //       3. Offset peak + upper-half (softer, runs only when early exit doesn't fire):
 //          Any Backref offset >= 90% of max_off, OR >= 20% of Backrefs in
-//          upper half of window. Catches WarAndPeace at ob=17.
+//          upper half of window.
 //
 //   In-scan expansion bail (inside scan() itself):
 //     Checked every SCAN_EXPANSION_CHECK_INTERVAL (64KB) of input consumed.
-//     SKIPPED when skip_bail=true (structural filter active — detect_filter
-//     already validated exploitable structure exists; scanner must run to completion).
-//     When skip_bail=false (normal operation): fires when BOTH token_bits >
-//     input_bits * 1.02 AND lit_fraction > 95%. Returns (Vec::new(), true) meaning
-//     "incompressible, discard".
+//     SKIPPED when skip_bail=true.
+//     When skip_bail=false: fires when BOTH token_bits > input_bits * 1.02
+//     AND lit_fraction > 95%.
 //
-//   skip_incompressible_bail / skip_bail:
-//     When a structural pre-filter (flag != FILTER_NONE: delta, STL shuffle+delta,
-//     PLY shuffle+delta, BCJ) was applied before folding, the scanner must not bail
-//     early on apparently-incompressible data. The filter has already validated that
-//     exploitable structure exists; high lit_fraction or apparent expansion in the
-//     first 64KB simply means the LZ window hasn't yet reached the compressible
-//     regions reorganised by the filter.
-//
-//   Return type of scan_adaptive changed to (Vec<Token>, u32, u32, bool) where
-//   the bool = is_incompressible. Callers check this before using tokens.
-//
-//   log_window_diagnostics and log_phase_c_gain are defined in fold.rs and
-//   called there after scan_adaptive returns. Do NOT add them here.
+//   P6: scan() now emits Token::RepRef for ring-buffer hits, saving (ob-4) bits
+//   per hit vs Token::Backref.  REP_SLOTS raised from 3 to 4 (MAX_RING_SLOTS).
+//   RepSlots::push() mirrors the decoder's ring update (no-op if offset==ring[0]).
+//   RepSlots::move_to_front(k) mirrors the decoder's LRU move for RepRef hits.
 
 use crate::opcode::{
-    Token, LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits,
+    Token, LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits, repref_total_bits,
     max_offset, max_length,
     OFFSET_BITS_MIN, OFFSET_BITS_MAX, LENGTH_BITS_MAX, LENGTH_BITS_MIN,
     compute_optimal_offset_bits, compute_optimal_length_bits,
@@ -85,7 +70,8 @@ const CEILING_SATURATION_THRESHOLD: f64 = 0.9;
 const CEILING_UPPER_HALF_THRESHOLD: f64 = 0.20;
 
 // -- Rep-match tiebreaking ----------------------------------------------------
-const REP_SLOTS: usize = 3;
+// P6: raised from 3 to 4 to match MAX_RING_SLOTS in opcode.rs.
+const REP_SLOTS: usize = 4;
 
 const HASH_SIZE:  usize = 1 << 16;
 const HASH_MASK:  usize = HASH_SIZE - 1;
@@ -107,8 +93,6 @@ const SCAN_EXPANSION_CHECK_INTERVAL: usize = 65_536; // 64 KB
 const SCAN_EXPANSION_INTERVAL_MASK: usize  = SCAN_EXPANSION_CHECK_INTERVAL - 1;
 
 /// If literal token fraction > this percent, data is likely incompressible.
-/// Terrain (4.8% backrefs → 95.2% literals): fires. STL (7.8% backrefs → 92.2%
-/// literals): does NOT fire. Both conditions must be true to bail.
 const EXPANSION_LIT_PCT: usize = 95;
 
 /// Minimum token count before the in-scan expansion check is meaningful.
@@ -148,6 +132,11 @@ fn hash3(input: &[u8], pos: usize) -> usize {
 }
 
 // -- Rep-match slot tracker ---------------------------------------------------
+//
+// P6: REP_SLOTS=4, push() shifts 4 entries, move_to_front() for RepRef hits.
+// The LRU update rules MUST mirror decoder.rs ring[] exactly:
+//   push(offset)       : no-op if offset==slots[0]; else shift right and set slots[0].
+//   move_to_front(k)   : rotate slots[0..=k] right by 1 (slots[k] → slots[0]).
 
 struct RepSlots {
     slots: [u32; REP_SLOTS],
@@ -158,13 +147,26 @@ impl RepSlots {
     #[inline]
     fn new() -> Self { Self { slots: [0u32; REP_SLOTS], len: 0 } }
 
+    /// Push a new offset to the front (no-op when offset already equals slots[0]).
+    /// Called when a Token::Backref is emitted.
     #[inline]
     fn push(&mut self, offset: u32) {
         if self.len > 0 && self.slots[0] == offset { return; }
+        if REP_SLOTS > 3 { self.slots[3] = self.slots[2]; }
         if REP_SLOTS > 2 { self.slots[2] = self.slots[1]; }
         if REP_SLOTS > 1 { self.slots[1] = self.slots[0]; }
         self.slots[0] = offset;
         if self.len < REP_SLOTS { self.len += 1; }
+    }
+
+    /// Move ring slot k to the front (LRU move-to-front).
+    /// Called when a Token::RepRef { slot: k } is emitted.
+    #[inline]
+    fn move_to_front(&mut self, k: usize) {
+        if k == 0 { return; }
+        let offset = self.slots[k];
+        for j in (1..=k).rev() { self.slots[j] = self.slots[j - 1]; }
+        self.slots[0] = offset;
     }
 
     #[inline]
@@ -189,27 +191,25 @@ fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
 // -- Core scanner -------------------------------------------------------------
 //
 // Returns (tokens, bailed_early) where bailed_early=true means the scan
-// detected clear incompressibility and returned early. In that case, the
-// returned token Vec is empty and must be discarded by the caller.
+// detected clear incompressibility and returned early.
 //
-// skip_bail: when true, the in-scan expansion bail is suppressed entirely.
-// This must be set when a structural filter (STL shuffle+delta, PLY shuffle+delta,
-// delta stride, BCJ) was applied before the scan. The filter has validated that
-// exploitable structure exists; the scanner must run to completion.
+// P6 changes:
+//   - repref_bits computed alongside backref_bits.
+//   - rep_slots loop now enumerate()s to capture slot index k.
+//   - best_slot: Option<usize> tracks whether the winning match is a ring hit.
+//   - ref_worthwhile uses repref_bits cost when best_slot.is_some().
+//   - Emits Token::RepRef { slot: k, length } on ring hit; calls move_to_front(k).
+//   - Emits Token::Backref as before on hash-chain hit; calls push(offset).
 //
-// When skip_bail=false (normal operation):
-// The bail fires when BOTH:
-//   (a) running token bit cost exceeds input bit cost by >2%, AND
-//   (b) more than 95% of tokens so far are literals.
-//
-// This dual condition prevents false positives on data like STL meshes that
-// have ~8% backrefs (slightly below the 95% literal threshold) while reliably
-// catching terrain data with ~5% backrefs (slightly above 95%).
+// The in-scan expansion bail uses backref_bits as a conservative estimate
+// for both Backref and RepRef tokens (RepRef is cheaper, so we overestimate
+// slightly — safe, just slightly less aggressive at bailing on incompressible data).
 
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -> (Vec<Token>, bool) {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
     let backref_bits = backref_total_bits(offset_bits, length_bits);
+    let repref_bits  = repref_total_bits(length_bits); // P6: cost of a ring reference
     let chain_limit  = compute_chain_limit(input.len(), offset_bits);
 
     let n = input.len();
@@ -220,27 +220,22 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -
     let mut tokens    = Vec::with_capacity(n / 2 + 1);
     let mut rep_slots = RepSlots::new();
     let mut i         = 0;
-    let mut lit_count: usize = 0; // tracks literal token count for expansion check
+    let mut lit_count: usize = 0;
 
     while i < n {
         // -- In-scan expansion bail (every 64 KB) ---------------------------------
-        // Skipped entirely when skip_bail=true (structural filter was applied).
+        // Uses backref_bits as a conservative cost for all non-lit tokens
+        // (RepRef is cheaper, so we slightly overestimate — no false positives).
         if i > 0 && (i & SCAN_EXPANSION_INTERVAL_MASK) == 0 && !skip_bail {
             let total_tokens = tokens.len();
             if total_tokens >= EXPANSION_MIN_TOKENS {
                 let backref_count = total_tokens - lit_count;
-                // Integer arithmetic only — no floats in hot path.
-                // token_bits = lit_count*10 + backref_count*(1+ob+lb)
                 let token_bits: u64 = (lit_count * (LIT_TOTAL_BITS as usize)
                     + backref_count * (backref_bits as usize)) as u64;
                 let input_bits: u64 = (i as u64) * 8;
-                // Condition (a): expanding by more than 2%
-                let expanding = token_bits * 100 > input_bits * EXPANSION_BAIL_PCT;
-                // Condition (b): more than 95% of tokens are literals
-                // (lit_count / total_tokens > 0.95 → lit_count * 100 > total_tokens * 95)
+                let expanding  = token_bits * 100 > input_bits * EXPANSION_BAIL_PCT;
                 let mostly_lits = lit_count * 100 > total_tokens * EXPANSION_LIT_PCT;
                 if expanding && mostly_lits {
-                    // Incompressible: return empty vec with bail signal.
                     return (Vec::new(), true);
                 }
             }
@@ -250,9 +245,13 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -
         let (mut best_offset, mut best_len) =
             find_match(input, i, h, &head, &prev, max_off, max_len, window_mask, chain_limit);
 
+        // P6: track which ring slot (if any) gave the best rep match.
+        let mut best_slot: Option<usize> = None;
+
         let ob_beats_lit = offset_bits > LIT_TOTAL_BITS;
 
-        for &slot_off in rep_slots.valid() {
+        // P6: enumerate() so we have the slot index k for RepRef emission.
+        for (k, &slot_off) in rep_slots.valid().iter().enumerate() {
             if slot_off as usize > max_off { continue; }
             let rlen = rep_match_len(input, i, slot_off, max_len);
             if rlen == 0 { continue; }
@@ -268,14 +267,20 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -
             if prefer {
                 best_offset = slot_off as usize;
                 best_len    = rlen;
+                best_slot   = Some(k); // P6: record winning ring slot
                 break;
             }
         }
 
-        let backref_worthwhile = best_len >= 2
-            && backref_bits < (best_len as u32 * LIT_TOTAL_BITS);
+        // P6: use the appropriate bit cost for the winning match type.
+        // RepRef (5+lb bits) is always <= Backref (1+ob+lb bits) for ob >= 5.
+        let ref_worthwhile = best_len >= 2 && if best_slot.is_some() {
+            repref_bits < (best_len as u32 * LIT_TOTAL_BITS)
+        } else {
+            backref_bits < (best_len as u32 * LIT_TOTAL_BITS)
+        };
 
-        if backref_worthwhile {
+        if ref_worthwhile {
             let lazy = if i + 1 < n {
                 let h1 = hash3(input, i + 1);
                 let (_, len1) = find_match(
@@ -310,11 +315,20 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -
                         head[hk] = (i + k) as u32;
                     }
                 }
-                rep_slots.push(best_offset as u32);
-                tokens.push(Token::Backref {
-                    offset: best_offset as u32,
-                    length: best_len as u32,
-                });
+                // P6: emit RepRef on ring hit, Backref on hash-chain hit.
+                if let Some(k) = best_slot {
+                    rep_slots.move_to_front(k); // LRU: move slot k to front
+                    tokens.push(Token::RepRef {
+                        slot:   k as u8,
+                        length: best_len as u32,
+                    });
+                } else {
+                    rep_slots.push(best_offset as u32); // LRU: push front (no-op if same)
+                    tokens.push(Token::Backref {
+                        offset: best_offset as u32,
+                        length: best_len as u32,
+                    });
+                }
                 i += best_len;
             }
         } else {
@@ -414,14 +428,19 @@ fn find_match(
 
 // -- Cost helpers -------------------------------------------------------------
 
+/// Raw bit cost of a token stream.
+/// P6: handles Token::RepRef using repref_total_bits(lb).
 fn stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
     tokens.iter().map(|t| match t {
         Token::Lit { .. }     => LIT_TOTAL_BITS as u64,
         Token::Backref { .. } => backref_total_bits(ob, lb) as u64,
+        Token::RepRef { .. }  => repref_total_bits(lb) as u64,  // P6
         Token::End            => END_TOTAL_BITS as u64,
     }).sum()
 }
 
+/// Estimated entropy cost of a token stream (used for tiebreaking).
+/// P6: RepRef contributes its length symbol + 2 raw bits for the slot index.
 fn stream_entropy_cost(tokens: &[Token]) -> f64 {
     use std::collections::HashMap;
 
@@ -440,6 +459,13 @@ fn stream_entropy_cost(tokens: &[Token]) -> f64 {
                 let (bucket, extra_bits, _) = offset_to_bucket(*offset);
                 *bucket_freq.entry(bucket).or_insert(0) += 1;
                 raw_extra += extra_bits as u64;
+            }
+            // P6: RepRef uses the same length symbol as Backref; the slot is
+            // 2 raw (non-Huffman) bits, counted as raw_extra.  No offset bucket.
+            Token::RepRef { length, .. } => {
+                let length_sym = 255u32 + length;
+                *lit_len_freq.entry(length_sym).or_insert(0) += 1;
+                raw_extra += 2u64; // 2-bit slot index, fixed width
             }
             Token::End => {
                 *lit_len_freq.entry(256u32).or_insert(0) += 1;
@@ -538,13 +564,21 @@ fn fingerprint_predict(data: &[u8]) -> Option<(u32, u32)> {
 
 // -- Ceiling checks -----------------------------------------------------------
 
+/// Returns true when any Backref or RepRef length >= 90% of max_len.
+/// P6: RepRef also has a length field and can saturate lb, so both token types
+/// are checked.
 fn length_peak_saturated(tokens: &[Token], lb: u32) -> bool {
     let max_len = max_length(lb);
     let lb_ceil = ((max_len as f64) * CEILING_SATURATION_THRESHOLD) as u32;
 
     for t in tokens {
-        if let Token::Backref { length, .. } = t {
-            if *length >= lb_ceil {
+        let length_opt = match t {
+            Token::Backref { length, .. } => Some(*length),
+            Token::RepRef  { length, .. } => Some(*length), // P6: check RepRef lengths too
+            _ => None,
+        };
+        if let Some(length) = length_opt {
+            if length >= lb_ceil {
                 println!(
                     "  ceiling check: length peak hit {} >= lb_ceil={} (max_len={} lb={})",
                     length, lb_ceil, max_len, lb
@@ -577,6 +611,7 @@ fn offset_or_upper_half_saturated(tokens: &[Token], ob: u32) -> bool {
             total_br += 1;
             if *offset > half_off { upper_half += 1; }
         }
+        // RepRef has no explicit offset — no offset saturation possible.
     }
 
     if total_br > 0 {
@@ -628,8 +663,6 @@ fn phase_c_from_baseline(
         return (baseline.tokens, baseline.ob, baseline.lb);
     }
 
-    // Constrained re-scan at discovered parameters. Pass skip_bail through so
-    // filtered data is not incorrectly treated as incompressible here either.
     let (constrained_tokens, constrained_bailed) = scan(input, wide_ob, wide_lb, skip_incompressible_bail);
     if constrained_bailed {
         println!("  Phase C constrained scan bailed early — baseline wins (still expanding)");
@@ -699,10 +732,6 @@ fn phase_c_from_baseline(
 // Returns (tokens, offset_bits, length_bits, is_incompressible).
 // When is_incompressible=true: tokens is empty, caller should passthrough
 // original input without folding (fold_count=0 in the file header).
-//
-// skip_incompressible_bail: when true, all expansion bail paths are suppressed.
-// Set by fold() when filter_flag != FILTER_NONE. The structural filter already
-// validated that exploitable structure exists; the scanner must run to completion.
 
 pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token>, u32, u32, bool) {
 
@@ -715,9 +744,6 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
                 // Phase B: full-quality scan at fingerprint-predicted parameters.
                 let (phase_b_tokens, phase_b_bailed) = scan(input, pred_ob, pred_lb, skip_incompressible_bail);
                 if phase_b_bailed {
-                    // phase_b_bailed is false when skip_incompressible_bail=true
-                    // (scan() never bails when skip_bail=true). This branch is dead
-                    // code in that case but kept for logical completeness.
                     println!("  Phase B: in-scan expansion bail — incompressible, skipping Phase C");
                     return (Vec::new(), pred_ob, pred_lb, true);
                 }
@@ -740,15 +766,8 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
                         let (tokens, ob, lb) = phase_c_from_baseline(baseline, discovery, input, skip_incompressible_bail);
                         return (tokens, ob, lb, false);
                     }
-                    // pred_ob != baseline (Rule 2, not reached for >1MB in practice):
-                    // fall through to parallel Phase C below.
                 } else {
                     // ── Step 1.5: Expansion bail (skipped when filter active) ──────
-                    //
-                    // When skip_incompressible_bail=true a structural filter has
-                    // validated exploitable structure. Do NOT bail even if Phase B
-                    // appears to expand — the filter reorganised bytes that LZ will
-                    // exploit once it builds a sufficient history window.
                     if !skip_incompressible_bail {
                         let input_bits = input.len() as u64 * 8;
                         if result.raw_cost * 100 >= input_bits * EXPANSION_BAIL_PCT {
@@ -761,7 +780,7 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
                         }
                     }
 
-                    // ── Step 2: Early exit (safe — lb OK at 1, not expanding at 1.5) ─
+                    // ── Step 2: Early exit ─────────────────────────────────────────
                     let phase_b_ratio = result.raw_cost as f64
                         / (input.len() as f64 * 8.0);
 
@@ -784,7 +803,6 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
                             let (tokens, ob, lb) = phase_c_from_baseline(baseline, discovery, input, skip_incompressible_bail);
                             return (tokens, ob, lb, false);
                         }
-                        // pred_ob != baseline: fall through to parallel Phase C below.
                     } else {
                         println!("  Step 3: ceiling clear -- Phase B wins (1 scan total)");
                         return (result.tokens, result.ob, result.lb, false);
@@ -795,22 +813,12 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
     }
 
     // ── Parallel Phase C path ─────────────────────────────────────────────────
-    // Reached by:
-    //   (a) files <= PARALLEL_SCAN_THRESHOLD — rayon::join baseline + discovery
-    //   (b) files > threshold, fingerprint returned None (Rule 1: repetitive)
-    //   (c) files > threshold, pred_ob != BASELINE (Rule 2, not reached in practice)
-    //
-    // When skip_incompressible_bail=true the post-scan expansion check is
-    // suppressed — filtered data must proceed to Phase C regardless of apparent
-    // expansion in the baseline scan.
-
     let (baseline, wide_discovery) = if input.len() <= PARALLEL_SCAN_THRESHOLD {
         let ((bt_tokens, bt_bailed), disc) = rayon::join(
             || scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, skip_incompressible_bail),
             || scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX),
         );
         if bt_bailed {
-            // bt_bailed is false when skip_incompressible_bail=true.
             println!("  Parallel baseline: in-scan expansion bail — incompressible");
             return (Vec::new(), BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, true);
         }
@@ -819,7 +827,6 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
             disc,
         )
     } else {
-        // Sequential fallback for large files in the parallel path (Rule 1 / Rule 2 cases)
         let (bt_tokens, bt_bailed) = scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, skip_incompressible_bail);
         if bt_bailed {
             println!("  Sequential baseline (parallel path): expansion bail — incompressible");
@@ -832,8 +839,6 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
         )
     };
 
-    // Post-scan expansion check: complete scan may still be expanding.
-    // Suppressed when skip_incompressible_bail=true — filter guarantees structure exists.
     if !skip_incompressible_bail {
         let input_bits = input.len() as u64 * 8;
         if baseline.raw_cost * 100 >= input_bits * EXPANSION_BAIL_PCT {
@@ -855,4 +860,4 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
 
     let (tokens, ob, lb) = phase_c_from_baseline(baseline, wide_discovery, input, skip_incompressible_bail);
     (tokens, ob, lb, false)
-             }
+    }

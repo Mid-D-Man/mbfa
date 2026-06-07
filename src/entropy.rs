@@ -1,44 +1,11 @@
 // src/entropy.rs
 //
 // Entropy coding variants — all operate on the fold-1 token stream.
-// Variant numbering:
 //
-//   v1  entropy_flag=1  joint lit/length Huffman + offset bucket Huffman
-//   v2  entropy_flag=2  2-context lit/length Huffman + offset bucket Huffman
-//   v3  entropy_flag=3  8-context lit/length Huffman + offset bucket Huffman
-//   v4  entropy_flag=4  v1 + recent-offset slot reuse
-//   v5  entropy_flag=5  v2 + recent-offset slot reuse
-//   v6  entropy_flag=6  separate literal stream + sequence stream Huffman
-//
-// v6 architecture (zstd-style literal separation):
-//   Literal bytes are extracted from the token stream, Huffman-coded as a
-//   dedicated byte-only stream, and stored separately from the sequence stream.
-//   The sequence stream encodes SYM_V6_LIT (a single marker symbol) in place
-//   of each literal's inline byte value. The sequence Huffman table covers only
-//   {SYM_V6_LIT, length_syms, SYM_END} — no byte values — so length symbols
-//   get full frequency mass and shorter codes. Literal bytes get a clean
-//   byte-only table with no dilution from length symbols.
-//
-//   v6 payload layout:
-//     [lit_huffman_table]
-//     [seq_huffman_table]
-//     [offset_huffman_table]
-//     [lit_count:           u32 LE]  — number of literal bytes encoded
-//     [lit_bitstream_len:   u32 LE]  — byte length of lit_bitstream
-//     [lit_bitstream]
-//     [seq_bitstream]
-//
-// NOTE: entropy_flag=7 (prose-tuned 8-context split) was trialled in session 6
-// and removed — it lost to v3 on WarAndPeace by 433B and won nowhere.
-// The match arm in unfold.rs is kept to return a clean error for any files
-// compressed with that development build. No v7 code exists in this file.
-//
-// Core algorithm (fold/unfold/LZ/pairing) is untouched by this module.
-//
-// P6: NUM_SLOTS reduced from 8 to 4 to match MAX_RING_SLOTS (opcode.rs).
-// This is a breaking change for existing v4/v5 files — acceptable pre-release.
-// Note: resolve_ring() is called in lib.rs BEFORE entropy functions see tokens,
-// so the LZ ring and the Huffman offset slots are completely independent systems.
+// P6: NUM_SLOTS reduced 8→4 to match MAX_RING_SLOTS.
+// P6: Token::RepRef arms added (unreachable) to every match on Token —
+//     resolve_ring() is always called before entropy functions see tokens,
+//     but Rust requires exhaustive matching.
 
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
@@ -61,13 +28,8 @@ pub type EncodeTable = HashMap<u32, (u32, u32)>;
 pub type DecodeTable = HashMap<(u32, u32), u32>;
 
 // ── Recent-offset slot reuse ──────────────────────────────────────────────────
-//
-// P6: NUM_SLOTS reduced from 8 to 4 to match the LZ ring buffer size.
-// These slots are for Huffman entropy coding of offsets in v4/v5 variants,
-// operating on resolved Backref tokens (never RepRef — resolve_ring() is
-// called before entropy functions see any tokens).
 
-pub const NUM_SLOTS:        usize = 4;  // P6: was 8
+pub const NUM_SLOTS:        usize = 4;  // P6: was 8, now matches MAX_RING_SLOTS
 pub const SLOT_SYMBOL_BASE: u32   = 1000;
 
 pub struct OffsetSlots {
@@ -130,7 +92,7 @@ pub fn bucket_extra_bits(bucket: u32) -> u32 {
     if bucket < 4 { 0 } else { (bucket - 2) >> 1 }
 }
 
-// ── Frequency counting — fixed array implementations ─────────────────────────
+// ── Frequency counting ────────────────────────────────────────────────────────
 
 #[inline]
 fn lit_len_array_to_map(freq: &[u64]) -> HashMap<u32, u64> {
@@ -159,6 +121,9 @@ fn count_joint_freq(tokens: &[Token]) -> HashMap<u32, u64> {
             Token::Lit { byte }           => freq[*byte as usize] += 1,
             Token::Backref { length, .. } => freq[(255 + length) as usize] += 1,
             Token::End                    => freq[SYM_END as usize] += 1,
+            Token::RepRef { .. }          => unreachable!(
+                "RepRef must be resolved via resolve_ring() before entropy encoding"
+            ),
         }
     }
     lit_len_array_to_map(&freq)
@@ -193,9 +158,7 @@ pub fn count_offset_bucket_freq_slotted(tokens: &[Token]) -> HashMap<u32, u64> {
 
     let mut map = bucket_array_to_map(&bucket_freq);
     for (i, &c) in slot_freq.iter().enumerate() {
-        if c > 0 {
-            map.insert(SLOT_SYMBOL_BASE + i as u32, c);
-        }
+        if c > 0 { map.insert(SLOT_SYMBOL_BASE + i as u32, c); }
     }
     map
 }
@@ -219,6 +182,9 @@ fn count_joint_freq_by_context(tokens: &[Token]) -> (HashMap<u32, u64>, HashMap<
             Token::End => {
                 freq[SYM_END as usize] += 1;
             }
+            Token::RepRef { .. } => unreachable!(
+                "RepRef must be resolved via resolve_ring() before entropy encoding"
+            ),
         }
     }
 
@@ -378,6 +344,9 @@ fn count_joint_freq_v3(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32
             Token::End => {
                 lit_freqs[ctx][SYM_END as usize] += 1;
             }
+            Token::RepRef { .. } => unreachable!(
+                "RepRef must be resolved via resolve_ring() before entropy encoding"
+            ),
         }
     }
 
@@ -583,7 +552,7 @@ fn deserialize_fmt2(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
     Ok((canonical_codes_from_lengths(&lengths), needed))
 }
 
-// ── v1: joint lit/length Huffman + offset bucket Huffman ─────────────────────
+// ── v1 ────────────────────────────────────────────────────────────────────────
 
 pub fn write_tokens_v1(
     tokens:       &[Token],
@@ -622,6 +591,9 @@ pub fn write_tokens_v1(
                     })?;
                     w.write(len, code)?;
                 }
+                Token::RepRef { .. } => unreachable!(
+                    "RepRef must be resolved via resolve_ring() before entropy encoding"
+                ),
             }
         }
         w.byte_align()?;
@@ -661,7 +633,7 @@ pub fn read_tokens_v1(
     Ok(tokens)
 }
 
-// ── v2: 2-context lit/length Huffman + offset bucket Huffman ─────────────────
+// ── v2 ────────────────────────────────────────────────────────────────────────
 
 pub fn write_tokens_v2(
     tokens:       &[Token],
@@ -708,6 +680,9 @@ pub fn write_tokens_v2(
                     })?;
                     w.write(len, code)?;
                 }
+                Token::RepRef { .. } => unreachable!(
+                    "RepRef must be resolved via resolve_ring() before entropy encoding"
+                ),
             }
         }
         w.byte_align()?;
@@ -753,7 +728,7 @@ pub fn read_tokens_v2(
     Ok(tokens)
 }
 
-// ── v3: 8-context lit/length Huffman + offset bucket Huffman ─────────────────
+// ── v3 ────────────────────────────────────────────────────────────────────────
 
 pub fn write_tokens_v3(
     tokens:       &[Token],
@@ -788,7 +763,6 @@ pub fn write_tokens_v3(
                             format!("v3 length sym {} missing in ctx {}", sym, ctx))
                     })?;
                     w.write(len, code)?;
-
                     if !offset_table.is_empty() {
                         let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
                         let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
@@ -798,7 +772,6 @@ pub fn write_tokens_v3(
                         w.write(blen, bcode)?;
                         if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
                     }
-
                     after_br = true;
                 }
                 Token::End => {
@@ -808,6 +781,9 @@ pub fn write_tokens_v3(
                     })?;
                     w.write(len, code)?;
                 }
+                Token::RepRef { .. } => unreachable!(
+                    "RepRef must be resolved via resolve_ring() before entropy encoding"
+                ),
             }
         }
         w.byte_align()?;
@@ -864,7 +840,7 @@ pub fn read_tokens_v3(
     Ok(tokens)
 }
 
-// ── v4: joint lit/length Huffman + slotted offset ────────────────────────────
+// ── v4 ────────────────────────────────────────────────────────────────────────
 
 pub fn write_tokens_v4(
     tokens:       &[Token],
@@ -891,7 +867,6 @@ pub fn write_tokens_v4(
                             format!("v4 length sym {} missing", sym))
                     })?;
                     w.write(len, code)?;
-
                     if let Some(slot_idx) = slots.access(*offset) {
                         let slot_sym = SLOT_SYMBOL_BASE + slot_idx as u32;
                         let &(scode, slen) = offset_table.get(&slot_sym).ok_or_else(|| {
@@ -915,6 +890,9 @@ pub fn write_tokens_v4(
                     })?;
                     w.write(len, code)?;
                 }
+                Token::RepRef { .. } => unreachable!(
+                    "RepRef must be resolved via resolve_ring() before entropy encoding"
+                ),
             }
         }
         w.byte_align()?;
@@ -946,7 +924,6 @@ pub fn read_tokens_v4(
         } else {
             let length  = length_from_sym(sym);
             let off_sym = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
-
             let offset = if off_sym >= SLOT_SYMBOL_BASE {
                 let slot_idx = (off_sym - SLOT_SYMBOL_BASE) as usize;
                 slots.access_by_slot(slot_idx).ok_or_else(|| {
@@ -966,7 +943,7 @@ pub fn read_tokens_v4(
     Ok(tokens)
 }
 
-// ── v5: 2-context lit/length Huffman + slotted offset ────────────────────────
+// ── v5 ────────────────────────────────────────────────────────────────────────
 
 pub fn write_tokens_v5(
     tokens:       &[Token],
@@ -998,7 +975,6 @@ pub fn write_tokens_v5(
                             format!("v5 length sym {} missing ctx={}", sym, after_br as u8))
                     })?;
                     w.write(len, code)?;
-
                     if let Some(slot_idx) = slots.access(*offset) {
                         let slot_sym = SLOT_SYMBOL_BASE + slot_idx as u32;
                         let &(scode, slen) = offset_table.get(&slot_sym).ok_or_else(|| {
@@ -1024,6 +1000,9 @@ pub fn write_tokens_v5(
                     })?;
                     w.write(len, code)?;
                 }
+                Token::RepRef { .. } => unreachable!(
+                    "RepRef must be resolved via resolve_ring() before entropy encoding"
+                ),
             }
         }
         w.byte_align()?;
@@ -1058,9 +1037,8 @@ pub fn read_tokens_v5(
             tokens.push(Token::End);
             break;
         } else {
-            let length   = length_from_sym(sym);
-            let off_sym  = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
-
+            let length  = length_from_sym(sym);
+            let off_sym = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
             let offset = if off_sym >= SLOT_SYMBOL_BASE {
                 let slot_idx = (off_sym - SLOT_SYMBOL_BASE) as usize;
                 slots.access_by_slot(slot_idx).ok_or_else(|| {
@@ -1081,7 +1059,7 @@ pub fn read_tokens_v5(
     Ok(tokens)
 }
 
-// ── v6: separate literal stream + sequence stream Huffman ─────────────────────
+// ── v6 ────────────────────────────────────────────────────────────────────────
 
 pub fn build_v6_tables(tokens: &[Token]) -> Option<(EncodeTable, EncodeTable, EncodeTable)> {
     let mut lit_freq    = vec![0u64; 256];
@@ -1105,11 +1083,13 @@ pub fn build_v6_tables(tokens: &[Token]) -> Option<(EncodeTable, EncodeTable, En
             Token::End => {
                 *seq_freq.entry(SYM_END).or_insert(0) += 1;
             }
+            Token::RepRef { .. } => unreachable!(
+                "RepRef must be resolved via resolve_ring() before entropy encoding"
+            ),
         }
     }
 
     if !has_lits { return None; }
-
     seq_freq.entry(SYM_END).or_insert(1);
 
     let lit_freq_map: HashMap<u32, u64> = lit_freq.iter()
@@ -1143,10 +1123,8 @@ pub fn write_tokens_v6(
         for t in tokens {
             if let Token::Lit { byte } = t {
                 let &(code, len) = lit_table.get(&(*byte as u32)).ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("v6: literal byte {} missing from lit_table", byte),
-                    )
+                    std::io::Error::new(std::io::ErrorKind::InvalidData,
+                        format!("v6: literal byte {} missing from lit_table", byte))
                 })?;
                 w.write(len, code)?;
                 lit_count += 1;
@@ -1162,41 +1140,36 @@ pub fn write_tokens_v6(
             match t {
                 Token::Lit { .. } => {
                     let &(code, len) = seq_table.get(&SYM_V6_LIT).ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "v6: SYM_V6_LIT missing from seq_table",
-                        )
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            "v6: SYM_V6_LIT missing from seq_table")
                     })?;
                     w.write(len, code)?;
                 }
                 Token::Backref { offset, length } => {
                     let sym = sym_from_length(*length);
                     let &(code, len) = seq_table.get(&sym).ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("v6: length sym {} missing from seq_table", sym),
-                        )
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v6: length sym {} missing from seq_table", sym))
                     })?;
                     w.write(len, code)?;
                     let (bucket, extra_cnt, extra_val) = offset_to_bucket(*offset);
                     let &(bcode, blen) = offset_table.get(&bucket).ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("v6: offset bucket {} missing", bucket),
-                        )
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("v6: offset bucket {} missing", bucket))
                     })?;
                     w.write(blen, bcode)?;
                     if extra_cnt > 0 { w.write(extra_cnt, extra_val)?; }
                 }
                 Token::End => {
                     let &(code, len) = seq_table.get(&SYM_END).ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "v6: SYM_END missing from seq_table",
-                        )
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            "v6: SYM_END missing from seq_table")
                     })?;
                     w.write(len, code)?;
                 }
+                Token::RepRef { .. } => unreachable!(
+                    "RepRef must be resolved via resolve_ring() before entropy encoding"
+                ),
             }
         }
         w.byte_align()?;
@@ -1231,11 +1204,8 @@ pub fn read_tokens_v6(
     if input.len() < 8 + lit_bitstream_len {
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
-            format!(
-                "v6: lit_bitstream truncated (need {} bytes, have {})",
-                lit_bitstream_len,
-                input.len().saturating_sub(8)
-            ),
+            format!("v6: lit_bitstream truncated (need {} bytes, have {})",
+                lit_bitstream_len, input.len().saturating_sub(8)),
         ));
     }
 
@@ -1251,16 +1221,12 @@ pub fn read_tokens_v6(
         let mut r = BitReader::endian(std::io::Cursor::new(lit_bitstream), BigEndian);
         for idx in 0..lit_count {
             let sym = read_huffman_sym(&mut r, lit_dtable, lit_max).map_err(|e| {
-                std::io::Error::new(
-                    e.kind(),
-                    format!("v6: lit_bitstream error at literal {}/{}: {}", idx, lit_count, e),
-                )
+                std::io::Error::new(e.kind(),
+                    format!("v6: lit_bitstream error at literal {}/{}: {}", idx, lit_count, e))
             })?;
             if sym > 255 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("v6: non-byte symbol {} in lit_bitstream at index {}", sym, idx),
-                ));
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                    format!("v6: non-byte symbol {} in lit_bitstream at index {}", sym, idx)));
             }
             lit_bytes.push(sym as u8);
         }
@@ -1275,16 +1241,11 @@ pub fn read_tokens_v6(
             Ok(s)  => s,
             Err(_) => break,
         };
-
         if sym == SYM_V6_LIT {
             if lit_idx >= lit_bytes.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "v6: lit buffer exhausted at seq position {} (lit_count={})",
-                        lit_idx, lit_count
-                    ),
-                ));
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                    format!("v6: lit buffer exhausted at seq position {} (lit_count={})",
+                        lit_idx, lit_count)));
             }
             tokens.push(Token::Lit { byte: lit_bytes[lit_idx] });
             lit_idx += 1;
@@ -1321,4 +1282,4 @@ fn read_huffman_sym<R: std::io::Read>(
         std::io::ErrorKind::InvalidData,
         format!("invalid huffman symbol after {} bits", max_len),
     ))
-}
+    }

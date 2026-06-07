@@ -49,7 +49,7 @@ use crate::opcode::{
     OFFSET_BITS_MIN, OFFSET_BITS_MAX, LENGTH_BITS_MAX, LENGTH_BITS_MIN,
     compute_optimal_offset_bits, compute_optimal_length_bits,
 };
-use crate::entropy::{offset_to_bucket, bucket_extra_bits};
+use crate::entropy::offset_to_bucket;
 use rayon;
 
 const BASELINE_OFFSET_BITS:       u32   = 17;

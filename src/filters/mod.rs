@@ -153,9 +153,16 @@ mod tests {
 
     #[test]
     fn detect_filter_returns_none_for_random_data() {
-        // High-entropy data with no recognisable header.
-        let data: Vec<u8> = (0u8..=255).cycle().take(1024).collect();
-        // Stride probe should not fire on uniform distribution.
+        // Use an LCG to generate pseudo-random bytes. Unlike a cycling ramp
+        // (0u8..=255).cycle() — which delta-encodes to nearly all-ones and
+        // collapses to ~0 bits/byte entropy — LCG output has no inter-sample
+        // linear structure, so delta encoding provides no benefit and the
+        // stride probe must not fire.
+        let mut state: u32 = 0xdeadbeef;
+        let data: Vec<u8> = (0..1024).map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 24) as u8
+        }).collect();
         assert_eq!(detect_filter(&data), FILTER_NONE);
     }
 
@@ -180,4 +187,4 @@ mod tests {
         data[28..30].copy_from_slice(&24u16.to_le_bytes()); // bpp
         assert_eq!(detect_filter(&data), FILTER_DELTA3);
     }
-}
+                }

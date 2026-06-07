@@ -277,7 +277,8 @@ mod tests {
 
     #[test]
     fn eg_bit_lengths_are_correct() {
-        let expected = [(0, 1), (1, 3), (2, 3), (3, 5), (6, 5), (7, 7), (14, 7), (15, 9)];
+        // Explicitly typed `0u32` to resolve E0689 ambiguity
+        let expected = [(0u32, 1), (1, 3), (2, 3), (3, 5), (6, 5), (7, 7), (14, 7), (15, 9)];
         for (n, expected_bits) in expected {
             let k: u32 = if n == 0 { 0 } else { u32::BITS - (n + 1).leading_zeros() - 1 };
             assert_eq!(2 * k + 1, expected_bits as u32,

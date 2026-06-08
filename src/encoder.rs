@@ -42,6 +42,11 @@
 //   per hit vs Token::Backref.  REP_SLOTS raised from 3 to 4 (MAX_RING_SLOTS).
 //   RepSlots::push() mirrors the decoder's ring update (no-op if offset==ring[0]).
 //   RepSlots::move_to_front(k) mirrors the decoder's LRU move for RepRef hits.
+//
+//   P6 FIX: ref_worthwhile uses backref_bits threshold for BOTH Backref and RepRef.
+//   RepRef REPLACES a Backref token (saving ob-4 bits), it must not CREATE new
+//   short matches. Using backref_bits keeps minimum effective match length identical
+//   to pre-P6, preventing spurious len-2/3 emissions on delta-filtered terrain.
 
 use crate::opcode::{
     Token, LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits, repref_total_bits,
@@ -134,7 +139,7 @@ fn hash3(input: &[u8], pos: usize) -> usize {
 // -- Rep-match slot tracker ---------------------------------------------------
 //
 // P6: REP_SLOTS=4, push() shifts 4 entries, move_to_front() for RepRef hits.
-// The LRU update rules MUST mirror decoder.rs ring[] exactly:
+// The LRU update rules MUST mirror decoder.rs ring[] state exactly:
 //   push(offset)       : no-op if offset==slots[0]; else shift right and set slots[0].
 //   move_to_front(k)   : rotate slots[0..=k] right by 1 (slots[k] → slots[0]).
 
@@ -197,19 +202,15 @@ fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
 //   - repref_bits computed alongside backref_bits.
 //   - rep_slots loop now enumerate()s to capture slot index k.
 //   - best_slot: Option<usize> tracks whether the winning match is a ring hit.
-//   - ref_worthwhile uses repref_bits cost when best_slot.is_some().
+//   - ref_worthwhile uses backref_bits for BOTH Backref and RepRef (P6 FIX).
 //   - Emits Token::RepRef { slot: k, length } on ring hit; calls move_to_front(k).
 //   - Emits Token::Backref as before on hash-chain hit; calls push(offset).
-//
-// The in-scan expansion bail uses backref_bits as a conservative estimate
-// for both Backref and RepRef tokens (RepRef is cheaper, so we overestimate
-// slightly — safe, just slightly less aggressive at bailing on incompressible data).
 
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -> (Vec<Token>, bool) {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
     let backref_bits = backref_total_bits(offset_bits, length_bits);
-    let repref_bits  = repref_total_bits(length_bits); // P6: cost of a ring reference
+    let _repref_bits = repref_total_bits(length_bits); // kept for diagnostics only
     let chain_limit  = compute_chain_limit(input.len(), offset_bits);
 
     let n = input.len();
@@ -224,8 +225,6 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -
 
     while i < n {
         // -- In-scan expansion bail (every 64 KB) ---------------------------------
-        // Uses backref_bits as a conservative cost for all non-lit tokens
-        // (RepRef is cheaper, so we slightly overestimate — no false positives).
         if i > 0 && (i & SCAN_EXPANSION_INTERVAL_MASK) == 0 && !skip_bail {
             let total_tokens = tokens.len();
             if total_tokens >= EXPANSION_MIN_TOKENS {
@@ -267,18 +266,19 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -
             if prefer {
                 best_offset = slot_off as usize;
                 best_len    = rlen;
-                best_slot   = Some(k); // P6: record winning ring slot
+                best_slot   = Some(k);
                 break;
             }
         }
 
-        // P6: use the appropriate bit cost for the winning match type.
-        // RepRef (5+lb bits) is always <= Backref (1+ob+lb bits) for ob >= 5.
-        let ref_worthwhile = best_len >= 2 && if best_slot.is_some() {
-            repref_bits < (best_len as u32 * LIT_TOTAL_BITS)
-        } else {
-            backref_bits < (best_len as u32 * LIT_TOTAL_BITS)
-        };
+        // P6 FIX: use backref_bits as the worthwhile threshold for BOTH Backref
+        // and RepRef. RepRef should REPLACE a Backref (saving ob-4 bits per hit),
+        // never CREATE new short matches that old code emitted as literals.
+        // Using backref_bits ensures minimum effective match length is identical
+        // to pre-P6 (e.g. len>=4 at ob=21), preventing spurious len-2/3 emissions
+        // on delta-filtered terrain, raw heightmaps, and other strided binary data.
+        let ref_worthwhile = best_len >= 2
+            && backref_bits < (best_len as u32 * LIT_TOTAL_BITS);
 
         if ref_worthwhile {
             let lazy = if i + 1 < n {
@@ -317,13 +317,13 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -
                 }
                 // P6: emit RepRef on ring hit, Backref on hash-chain hit.
                 if let Some(k) = best_slot {
-                    rep_slots.move_to_front(k); // LRU: move slot k to front
+                    rep_slots.move_to_front(k);
                     tokens.push(Token::RepRef {
                         slot:   k as u8,
                         length: best_len as u32,
                     });
                 } else {
-                    rep_slots.push(best_offset as u32); // LRU: push front (no-op if same)
+                    rep_slots.push(best_offset as u32);
                     tokens.push(Token::Backref {
                         offset: best_offset as u32,
                         length: best_len as u32,
@@ -341,7 +341,7 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -
     }
 
     tokens.push(Token::End);
-    (tokens, false) // normal completion
+    (tokens, false)
 }
 
 pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<Token> {
@@ -434,7 +434,7 @@ fn stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
     tokens.iter().map(|t| match t {
         Token::Lit { .. }     => LIT_TOTAL_BITS as u64,
         Token::Backref { .. } => backref_total_bits(ob, lb) as u64,
-        Token::RepRef { .. }  => repref_total_bits(lb) as u64,  // P6
+        Token::RepRef { .. }  => repref_total_bits(lb) as u64,
         Token::End            => END_TOTAL_BITS as u64,
     }).sum()
 }
@@ -460,12 +460,10 @@ fn stream_entropy_cost(tokens: &[Token]) -> f64 {
                 *bucket_freq.entry(bucket).or_insert(0) += 1;
                 raw_extra += extra_bits as u64;
             }
-            // P6: RepRef uses the same length symbol as Backref; the slot is
-            // 2 raw (non-Huffman) bits, counted as raw_extra.  No offset bucket.
             Token::RepRef { length, .. } => {
                 let length_sym = 255u32 + length;
                 *lit_len_freq.entry(length_sym).or_insert(0) += 1;
-                raw_extra += 2u64; // 2-bit slot index, fixed width
+                raw_extra += 2u64;
             }
             Token::End => {
                 *lit_len_freq.entry(256u32).or_insert(0) += 1;
@@ -565,8 +563,6 @@ fn fingerprint_predict(data: &[u8]) -> Option<(u32, u32)> {
 // -- Ceiling checks -----------------------------------------------------------
 
 /// Returns true when any Backref or RepRef length >= 90% of max_len.
-/// P6: RepRef also has a length field and can saturate lb, so both token types
-/// are checked.
 fn length_peak_saturated(tokens: &[Token], lb: u32) -> bool {
     let max_len = max_length(lb);
     let lb_ceil = ((max_len as f64) * CEILING_SATURATION_THRESHOLD) as u32;
@@ -574,7 +570,7 @@ fn length_peak_saturated(tokens: &[Token], lb: u32) -> bool {
     for t in tokens {
         let length_opt = match t {
             Token::Backref { length, .. } => Some(*length),
-            Token::RepRef  { length, .. } => Some(*length), // P6: check RepRef lengths too
+            Token::RepRef  { length, .. } => Some(*length),
             _ => None,
         };
         if let Some(length) = length_opt {
@@ -611,7 +607,6 @@ fn offset_or_upper_half_saturated(tokens: &[Token], ob: u32) -> bool {
             total_br += 1;
             if *offset > half_off { upper_half += 1; }
         }
-        // RepRef has no explicit offset — no offset saturation possible.
     }
 
     if total_br > 0 {

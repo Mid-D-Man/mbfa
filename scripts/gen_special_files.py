@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
 # scripts/gen_special_files.py
-# Generates all special benchmark files and writes special_manifest.json
-# Usage: python3 scripts/gen_special_files.py [--output-dir bench_files_special]
+#!/usr/bin/env python3
+"""Generate MBFA special benchmark files."""
 
 import argparse
 import json
@@ -9,586 +8,924 @@ import math
 import os
 import random
 import struct
-import sys
+
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--output-dir", default="bench_files_special")
     return p.parse_args()
 
-def write(path, data, mode="wb"):
-    os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
-    with open(path, mode) as f:
-        if isinstance(data, str):
-            f.write(data.encode())
-        else:
-            f.write(data)
-    return os.path.getsize(path)
 
-# ── STL binary ────────────────────────────────────────────────────────────────
-def gen_stl_binary(path):
-    random.seed(42)
-    n_tris = 5000
-    header = b"MBFA benchmark STL binary mesh" + b"\x00" * (80 - 30)
-    data = header + struct.pack("<I", n_tris)
-    for i in range(n_tris):
-        phi   = math.pi * i / n_tris
-        theta = 2 * math.pi * i / 100
-        nx = math.sin(phi) * math.cos(theta)
-        ny = math.cos(phi)
-        nz = math.sin(phi) * math.sin(theta)
-        data += struct.pack("<fff", nx, ny, nz)
-        for _ in range(3):
-            vx = nx * 10.0 + random.gauss(0, 0.01)
-            vy = ny * 10.0 + random.gauss(0, 0.01)
-            vz = nz * 10.0 + random.gauss(0, 0.01)
-            data += struct.pack("<fff", vx, vy, vz)
-        data += struct.pack("<H", 0)
-    return write(path, data)
+def emit(out_dir, filename, data, description, manifest):
+    path = os.path.join(out_dir, filename)
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    with open(path, "wb") as f:
+        f.write(data)
+    size = len(data)
+    print(f"  {filename:<34} {size:>9,} bytes  — {description}")
+    manifest.append({"file": filename, "size": size, "description": description})
 
-# ── PLY binary ────────────────────────────────────────────────────────────────
-def gen_ply_binary(path):
-    random.seed(7)
-    n_verts = 2000
-    n_faces = 1800
-    hdr  = "ply\n"
-    hdr += "format binary_little_endian 1.0\n"
-    hdr += f"element vertex {n_verts}\n"
-    hdr += "property float x\nproperty float y\nproperty float z\n"
-    hdr += "property float nx\nproperty float ny\nproperty float nz\n"
-    hdr += "property float s\nproperty float t\n"
-    hdr += f"element face {n_faces}\n"
-    hdr += "property list uchar int vertex_indices\n"
-    hdr += "end_header\n"
-    body = hdr.encode()
-    for i in range(n_verts):
-        phi   = math.pi * i / n_verts
-        theta = 2 * math.pi * (i % 100) / 100
-        x = math.sin(phi) * math.cos(theta) * 5.0 + random.gauss(0, 0.005)
-        y = math.cos(phi) * 5.0
-        z = math.sin(phi) * math.sin(theta) * 5.0
-        nx, ny, nz = math.sin(phi)*math.cos(theta), math.cos(phi), math.sin(phi)*math.sin(theta)
-        s, t = theta / (2*math.pi), phi / math.pi
-        body += struct.pack("<ffffffff", x, y, z, nx, ny, nz, s, t)
-    for i in range(n_faces):
-        a = i % n_verts
-        b = (i + 1) % n_verts
-        c = (i + 7) % n_verts
-        body += struct.pack("<Biii", 3, a, b, c)
-    return write(path, body)
 
-# ── GLB stub ──────────────────────────────────────────────────────────────────
-def gen_glb(path):
-    random.seed(13)
-    json_str = json.dumps({
-        "asset": {"version": "2.0"},
+# ── Binary STL ────────────────────────────────────────────────────────────────
+
+def gen_stl_sphere(n_lat=25, n_lon=25):
+    triangles = []
+    for i in range(n_lat):
+        for j in range(n_lon):
+            phi0  = math.pi * i / n_lat
+            phi1  = math.pi * (i + 1) / n_lat
+            th0   = 2 * math.pi * j / n_lon
+            th1   = 2 * math.pi * (j + 1) / n_lon
+
+            def sph(phi, th):
+                return (math.sin(phi) * math.cos(th),
+                        math.cos(phi),
+                        math.sin(phi) * math.sin(th))
+
+            v00, v01 = sph(phi0, th0), sph(phi0, th1)
+            v10, v11 = sph(phi1, th0), sph(phi1, th1)
+            triangles.append((v00, v10, v11))
+            triangles.append((v00, v11, v01))
+
+    n_tris = len(triangles)
+    buf = bytearray(80)                    # 80-byte header
+    buf += struct.pack("<I", n_tris)       # triangle count
+    for v0, v1, v2 in triangles:
+        nx = (v0[0] + v1[0] + v2[0]) / 3
+        ny = (v0[1] + v1[1] + v2[1]) / 3
+        nz = (v0[2] + v1[2] + v2[2]) / 3
+        nl = math.sqrt(nx*nx + ny*ny + nz*nz) or 1.0
+        buf += struct.pack("<fff", nx/nl, ny/nl, nz/nl)
+        buf += struct.pack("<fff", *v0)
+        buf += struct.pack("<fff", *v1)
+        buf += struct.pack("<fff", *v2)
+        buf += struct.pack("<H", 0)        # attribute bytes
+    # Verify exact size equation that detect_stl requires
+    assert len(buf) == 84 + n_tris * 50
+    return bytes(buf)
+
+
+# ── Binary PLY ────────────────────────────────────────────────────────────────
+
+def gen_ply_sphere(n_lat=50, n_lon=50):
+    vertices = []
+    for i in range(n_lat + 1):
+        phi = math.pi * i / n_lat
+        for j in range(n_lon):
+            th = 2 * math.pi * j / n_lon
+            x, y, z = (math.sin(phi)*math.cos(th),
+                       math.cos(phi),
+                       math.sin(phi)*math.sin(th))
+            vertices.append((x, y, z, x, y, z, j/n_lon, i/n_lat))
+
+    n_verts = len(vertices)
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {n_verts}\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property float nx\nproperty float ny\nproperty float nz\n"
+        "property float u\nproperty float v\n"
+        "end_header\n"
+    ).encode()
+    data = bytearray(header)
+    for v in vertices:
+        data += struct.pack("<8f", *v)
+    return bytes(data)
+
+
+# ── GLB (Binary GLTF 2.0) ─────────────────────────────────────────────────────
+
+def gen_glb():
+    rng = random.Random(42)
+    verts = []
+    for _ in range(3000):
+        phi   = rng.uniform(0, math.pi)
+        theta = rng.uniform(0, 2 * math.pi)
+        r     = rng.uniform(0.5, 1.5)
+        verts.extend([r*math.sin(phi)*math.cos(theta),
+                      r*math.cos(phi),
+                      r*math.sin(phi)*math.sin(theta)])
+
+    idx_raw  = struct.pack(f"<{3}H", 0, 1, 2)
+    idx_pad  = (4 - len(idx_raw) % 4) % 4
+    idx_data = idx_raw + b"\x00" * idx_pad
+
+    vert_data = struct.pack(f"<{len(verts)}f", *verts)
+    bin_data  = idx_data + vert_data
+    bin_pad   = (4 - len(bin_data) % 4) % 4
+    bin_data += b"\x00" * bin_pad
+
+    gltf = json.dumps({
+        "asset": {"version": "2.0", "generator": "MBFA-bench"},
         "scene": 0,
         "scenes": [{"nodes": [0]}],
         "nodes": [{"mesh": 0}],
-        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 1}, "indices": 0}]}],
         "accessors": [
-            {"bufferView": 0, "componentType": 5126, "count": 500, "type": "VEC3"},
-            {"bufferView": 1, "componentType": 5123, "count": 1200, "type": "SCALAR"}
+            {"bufferView": 0, "componentType": 5123, "count": 3, "type": "SCALAR"},
+            {"bufferView": 1, "componentType": 5126, "count": len(verts)//3,
+             "type": "VEC3", "min": [-1.5,-1.5,-1.5], "max": [1.5,1.5,1.5]},
         ],
         "bufferViews": [
-            {"buffer": 0, "byteOffset": 0, "byteLength": 6000},
-            {"buffer": 0, "byteOffset": 6000, "byteLength": 2400}
+            {"buffer": 0, "byteOffset": 0, "byteLength": len(idx_data), "target": 34963},
+            {"buffer": 0, "byteOffset": len(idx_data),
+             "byteLength": len(vert_data), "target": 34962},
         ],
-        "buffers": [{"byteLength": 8400}]
-    })
-    json_bytes = json_str.encode()
-    pad = (4 - len(json_bytes) % 4) % 4
-    json_bytes += b" " * pad
-    bin_data = b""
-    for i in range(500):
-        phi   = math.pi * i / 500
-        theta = 2 * math.pi * (i % 50) / 50
-        x = math.sin(phi)*math.cos(theta)*3 + random.gauss(0, 0.005)
-        y = math.cos(phi)*3
-        z = math.sin(phi)*math.sin(theta)*3
-        bin_data += struct.pack("<fff", x, y, z)
-    for i in range(1200):
-        bin_data += struct.pack("<H", i % 500)
-    bin_pad = (4 - len(bin_data) % 4) % 4
-    bin_data += b"\x00" * bin_pad
-    json_chunk = struct.pack("<II", len(json_bytes), 0x4E4F534A) + json_bytes
-    bin_chunk  = struct.pack("<II", len(bin_data),  0x004E4942) + bin_data
-    body       = json_chunk + bin_chunk
-    total_len  = 12 + len(body)
-    glb = struct.pack("<III", 0x46546C67, 2, total_len) + body
-    return write(path, glb)
+        "buffers": [{"byteLength": len(bin_data)}],
+    }, separators=(",", ":")).encode()
+    json_pad  = (4 - len(gltf) % 4) % 4
+    gltf     += b" " * json_pad
 
-# ── Unity C# scripts ──────────────────────────────────────────────────────────
-def gen_unity_csharp(path):
-    lines = []
-    lines.append("using UnityEngine;")
-    lines.append("using UnityEngine.UI;")
-    lines.append("using System.Collections;")
-    lines.append("using System.Collections.Generic;")
-    lines.append("")
-    components = ["PlayerController","EnemyAI","GameManager","UIManager","AudioManager",
-                  "InputHandler","CameraController","InventorySystem","QuestTracker","SaveSystem"]
-    for comp in components * 8:
-        lines.append(f"public class {comp} : MonoBehaviour")
-        lines.append("{")
-        lines.append(f"    [SerializeField] private float speed = 5f;")
-        lines.append(f"    [SerializeField] private int health = 100;")
-        lines.append(f"    private Rigidbody _rb;")
-        lines.append(f"    private bool _isActive = true;")
-        lines.append("")
-        lines.append(f"    void Awake() {{ _rb = GetComponent<Rigidbody>(); }}")
-        lines.append(f"    void Start() {{ Debug.Log(\"{comp} started\"); }}")
-        lines.append(f"    void Update()")
-        lines.append(f"    {{")
-        lines.append(f"        if (!_isActive) return;")
-        lines.append(f"        float h = Input.GetAxis(\"Horizontal\");")
-        lines.append(f"        float v = Input.GetAxis(\"Vertical\");")
-        lines.append(f"        _rb.MovePosition(transform.position + new Vector3(h, 0, v) * speed * Time.deltaTime);")
-        lines.append(f"    }}")
-        lines.append(f"    public void TakeDamage(int amount) {{ health -= amount; if (health <= 0) Die(); }}")
-        lines.append(f"    private void Die() {{ _isActive = false; gameObject.SetActive(false); }}")
-        lines.append("}")
-        lines.append("")
-    return write(path, "\n".join(lines))
+    json_chunk = struct.pack("<II", len(gltf),     0x4E4F534A) + gltf
+    bin_chunk  = struct.pack("<II", len(bin_data), 0x004E4942) + bin_data
+    total_len  = 12 + len(json_chunk) + len(bin_chunk)
+    return struct.pack("<III", 0x46546C67, 2, total_len) + json_chunk + bin_chunk
 
-# ── Unity YAML asset ──────────────────────────────────────────────────────────
-def gen_unity_yaml(path):
-    random.seed(3)
-    lines = ["%YAML 1.1", "%TAG !u! tag:unity3d.com,2011:",""]
-    for i in range(200):
-        lines.append(f"--- !u!1 &{random.randint(100000000,999999999)}")
-        lines.append("GameObject:")
-        lines.append(f"  m_ObjectHideFlags: 0")
-        lines.append(f"  m_CorrespondingSourceObject: {{fileID: 0}}")
-        lines.append(f"  m_PrefabInstance: {{fileID: 0}}")
-        lines.append(f"  m_PrefabAsset: {{fileID: 0}}")
-        lines.append(f"  serializedVersion: 6")
-        lines.append(f"  m_Component:")
-        lines.append(f"  - component: {{fileID: {random.randint(100000000,999999999)}}}")
-        lines.append(f"  m_Layer: 0")
-        lines.append(f"  m_Name: GameObject_{i}")
-        lines.append(f"  m_TagString: Untagged")
-        lines.append(f"  m_IsActive: 1")
-        lines.append(f"--- !u!4 &{random.randint(100000000,999999999)}")
-        lines.append("Transform:")
-        lines.append(f"  m_LocalPosition: {{x: {random.uniform(-100,100):.5f}, y: {random.uniform(-10,100):.5f}, z: {random.uniform(-100,100):.5f}}}")
-        lines.append(f"  m_LocalRotation: {{x: 0, y: 0, z: 0, w: 1}}")
-        lines.append(f"  m_LocalScale: {{x: 1, y: 1, z: 1}}")
-        lines.append(f"  m_Children: []")
-        lines.append(f"  m_Father: {{fileID: 0}}")
-        lines.append("")
-    return write(path, "\n".join(lines))
 
-# ── Unity terrain .raw ────────────────────────────────────────────────────────
-def gen_terrain_raw(path, w=513, h=513, seed_x=0.05, seed_y=0.05):
-    data = b""
-    for y in range(h):
-        for x in range(w):
-            height = int(
-                (math.sin(x * seed_x) * math.cos(y * seed_y) * 0.4 +
-                 math.sin(x * 0.02 + y * 0.03) * 0.3 +
-                 math.sin(x * 0.1) * 0.15 + 0.5) * 65535
-            )
-            height = max(0, min(65535, height))
-            data += struct.pack("<H", height)
-    return write(path, data)
+# ── Terrain heightmap ─────────────────────────────────────────────────────────
 
-# ── Unity shader ──────────────────────────────────────────────────────────────
-def gen_unity_shader(path):
-    lines = []
-    shaders = ["StandardLit","Unlit","Toon","WaterSurface","ParticleAdditive","SkyboxProc"]
-    for name in shaders * 5:
-        lines.append(f'Shader "Custom/{name}"')
-        lines.append("{")
-        lines.append("    Properties")
-        lines.append("    {")
-        lines.append('        _MainTex ("Texture", 2D) = "white" {}')
-        lines.append('        _Color ("Color", Color) = (1,1,1,1)')
-        lines.append('        _Glossiness ("Smoothness", Range(0,1)) = 0.5')
-        lines.append('        _Metallic ("Metallic", Range(0,1)) = 0.0')
-        lines.append("    }")
-        lines.append("    SubShader")
-        lines.append("    {")
-        lines.append('        Tags { "RenderType"="Opaque" }')
-        lines.append("        CGPROGRAM")
-        lines.append('        #pragma surface surf Standard fullforwardshadows')
-        lines.append('        #pragma target 3.0')
-        lines.append("        sampler2D _MainTex;")
-        lines.append("        struct Input { float2 uv_MainTex; };")
-        lines.append("        half _Glossiness; half _Metallic; fixed4 _Color;")
-        lines.append("        void surf (Input IN, inout SurfaceOutputStandard o) {")
-        lines.append("            fixed4 c = tex2D(_MainTex, IN.uv_MainTex) * _Color;")
-        lines.append("            o.Albedo = c.rgb; o.Metallic = _Metallic;")
-        lines.append("            o.Smoothness = _Glossiness; o.Alpha = c.a;")
-        lines.append("        }")
-        lines.append("        ENDCG")
-        lines.append("    }")
-        lines.append("}")
-        lines.append("")
-    return write(path, "\n".join(lines))
+def gen_terrain_raw(width, height, seed=1):
+    rng = random.Random(seed)
+    a1 = rng.uniform(2, 8);  b1 = rng.uniform(2, 8)
+    c1 = rng.random() * 6.28; d1 = rng.random() * 6.28
+    a2 = rng.uniform(8, 20); b2 = rng.uniform(8, 20)
+    c2 = rng.random() * 6.28; d2 = rng.random() * 6.28
 
-# ── Unreal ini config ─────────────────────────────────────────────────────────
-def gen_unreal_ini(path):
-    sections = ["Engine.RendererSettings","Engine.PhysicsSettings","Engine.GameViewportClient",
-                "/Script/Engine.GameModeBase","/Script/Engine.PlayerInput",
-                "/Script/UnrealEd.EditorEngine"]
-    lines = []
-    for sec in sections * 15:
-        lines.append(f"[{sec}]")
-        lines.append("bEnableRayTracing=False")
-        lines.append("r.Shadow.CSM.MaxCascades=4")
-        lines.append("r.DefaultFeature.AmbientOcclusion=True")
-        lines.append("r.DefaultFeature.Bloom=True")
-        lines.append("bSubsteping=False")
-        lines.append("MaxPhysicsDeltaTime=0.033333")
-        lines.append("bSupportUTF8Ini=True")
-        lines.append("DefaultBuildSettings=BuildSettingsVersion_V4")
-        lines.append("+ActiveGameNameRedirects=(OldGameName=\"/Script/Engine\",NewGameName=\"/Script/MyGame\")")
-        lines.append("")
-    return write(path, "\n".join(lines))
+    data = bytearray(width * height * 2)
+    for y in range(height):
+        sy   = y / height
+        s1y  = math.sin(sy * b1 * math.pi * 2 + d1)
+        s2y  = math.cos(sy * b2 * math.pi * 2 + d2)
+        base = y * width * 2
+        for x in range(width):
+            sx = x / width
+            h  = (0.5
+                  + 0.35 * math.sin(sx * a1 * math.pi * 2 + c1) * s1y
+                  + 0.15 * math.sin(sx * a2 * math.pi * 2 + c2) * s2y)
+            v  = max(0, min(65535, int(h * 65535)))
+            pos = base + x * 2
+            data[pos]     = v & 0xFF
+            data[pos + 1] = v >> 8
+    return bytes(data)
 
-# ── Unreal uasset stub ────────────────────────────────────────────────────────
-def gen_uasset_stub(path):
-    random.seed(99)
-    magic   = struct.pack("<I", 0x9E2A83C1)
-    version = struct.pack("<ii", -8, 0)
-    props = b""
-    prop_names = [b"StaticMesh\x00", b"Material\x00\x00\x00", b"Transform\x00\x00",
-                  b"Mobility\x00\x00\x00", b"CastShadow\x00\x00"]
-    for i in range(300):
-        name   = prop_names[i % len(prop_names)]
-        floats = struct.pack("<fff",
-            math.sin(i * 0.1) * 100,
-            math.cos(i * 0.1) * 100,
-            i * 0.5)
-        props += name + floats + struct.pack("<I", i)
-    data = magic + version + props + b"\x00" * 16
-    return write(path, data)
 
-# ── Unreal uplugin JSON ───────────────────────────────────────────────────────
-def gen_uplugin(path):
-    plugins = []
-    categories = ["Rendering", "Physics", "AI", "Network", "UI"]
-    platform_list = ["Win64", "Mac", "Linux", "Android", "IOS"]
-    for i in range(50):
-        plugins.append({
-            "Name": f"Plugin{i:03d}",
-            "Enabled": (i % 3 != 0),
-            "MarketplaceURL": f"https://marketplace.unrealengine.com/product/plugin{i:03d}",
-            "SupportedTargetPlatforms": platform_list,
-            "VersionName": f"1.{i}.0",
-            "FriendlyName": f"Awesome Plugin {i:03d}",
-            "Description": f"This plugin provides functionality number {i} for Unreal Engine projects.",
-            "Category": categories[i % 5],
-            "bIsBetaVersion": (i % 7 == 0),
-            "Modules": [{"Name": f"Plugin{i:03d}Module", "Type": "Runtime", "LoadingPhase": "Default"}]
-        })
-    obj = {"FileVersion": 3, "Version": 1, "VersionName": "1.0.0",
-           "FriendlyName": "MBFA Test Plugin Bundle", "Plugins": plugins}
-    return write(path, json.dumps(obj, indent=2).encode())
+# ── Minimal PE/COFF DLL ───────────────────────────────────────────────────────
 
-# ── Generic YAML config ───────────────────────────────────────────────────────
-def gen_yaml_config(path):
-    random.seed(11)
-    lines = []
-    services = ["api","worker","scheduler","cache","db","proxy","monitor","logger"]
-    envs = ["development","staging","production"]
-    region_list = ["us-east-1", "eu-west-1", "ap-southeast-1"]
-    for env in envs:
-        for svc in services * 4:
-            lines.append(f"# {env} {svc} configuration")
-            lines.append(f"{svc}_{env}:")
-            lines.append(f"  image: myregistry.io/{svc}:latest")
-            lines.append(f"  replicas: {random.randint(1,5)}")
-            lines.append(f"  resources:")
-            lines.append(f"    requests:")
-            lines.append(f'      cpu: "100m"')
-            lines.append(f'      memory: "128Mi"')
-            lines.append(f"    limits:")
-            lines.append(f'      cpu: "500m"')
-            lines.append(f'      memory: "512Mi"')
-            lines.append(f"  env:")
-            lines.append(f"    - name: APP_ENV")
-            lines.append(f"      value: {env}")
-            lines.append(f"    - name: LOG_LEVEL")
-            lines.append(f"      value: info")
-            lines.append(f"  ports:")
-            lines.append(f"    - containerPort: 8080")
-            lines.append(f"  livenessProbe:")
-            lines.append(f"    httpGet:")
-            lines.append(f"      path: /health")
-            lines.append(f"      port: 8080")
-            lines.append(f"    initialDelaySeconds: 30")
-            lines.append(f"    periodSeconds: 10")
-            lines.append("")
-    return write(path, "\n".join(lines).encode())
+def gen_minimal_dll():
+    pe_offset = 0x40
+    data = bytearray(65536)
+    # MZ header
+    data[0] = ord("M"); data[1] = ord("Z")
+    struct.pack_into("<I", data, 0x3C, pe_offset)
+    # PE signature
+    data[pe_offset:pe_offset+4] = b"PE\x00\x00"
+    # COFF header
+    struct.pack_into("<HHIIIHH", data, pe_offset + 4,
+        0x8664, 3, 0x65A00000, 0, 0, 0xF0, 0x2022)
+    # Optional header magic (PE32+)
+    struct.pack_into("<H", data, pe_offset + 24, 0x20B)
+    # Image base (RVA 0x180000000)
+    struct.pack_into("<Q", data, pe_offset + 24 + 24, 0x180000000)
+    # Sprinkle near-call (E8) patterns for BCJ filter to work on
+    rng = random.Random(0xDEAD)
+    pos = pe_offset + 4 + 20 + 240 + 3 * 40  # past section headers
+    while pos + 5 < len(data) - 16:
+        if rng.random() < 0.08:
+            data[pos] = 0xE8
+            rel = rng.randint(0, 0xFFFF)
+            struct.pack_into("<i", data, pos + 1, rel)
+            pos += 5
+        elif rng.random() < 0.04:
+            data[pos] = 0xE9
+            rel = rng.randint(-128, 127)
+            struct.pack_into("<i", data, pos + 1, rel)
+            pos += 5
+        else:
+            data[pos] = rng.randint(0, 255)
+            pos += 1
+    return bytes(data)
 
-# ── TOML config ───────────────────────────────────────────────────────────────
-def gen_toml_config(path):
-    region_list = ["us-east-1", "eu-west-1", "ap-southeast-1"]
-    lines = []
-    for i in range(80):
-        region = region_list[i % 3]
-        lines.append(f"[[services]]")
-        lines.append(f'name = "service_{i:03d}"')
-        lines.append(f'host = "192.168.1.{i % 256}"')
-        lines.append(f"port = {8000 + i}")
-        lines.append(f"timeout = {30 + i % 60}")
-        lines.append(f"retries = {3 + i % 5}")
-        lines.append(f"enabled = {'true' if i % 3 != 0 else 'false'}")
-        lines.append(f'region = "{region}"')
-        lines.append(f"[services.tls]")
-        lines.append(f"enabled = true")
-        lines.append(f'cert = "/etc/ssl/certs/service_{i:03d}.crt"')
-        lines.append(f'key = "/etc/ssl/private/service_{i:03d}.key"')
-        lines.append(f"[services.metrics]")
-        lines.append(f"scrape_interval = 15")
-        lines.append(f'endpoint = "/metrics"')
-        lines.append("")
-    return write(path, "\n".join(lines).encode())
 
-# ── MidMans DixScript .mdix ───────────────────────────────────────────────────
-def gen_mdix(path):
-    content = r"""
-@CONFIG(
-    version -> "1.0.0"
-    encoding -> "utf-8"
-    author -> "MidManStudio"
-    created -> 2026-03-12
-    features -> "advanced"
-    debug_mode -> "off"
-    error_handling -> "recover"
-    compatibility_mode -> "best_effort"
-)
+# ── Text content constants ────────────────────────────────────────────────────
 
-@IMPORTS(
-    MathLib from "stdlib/math.mdix" verify "sha256:abc123"
-    CryptoLib from_cloud "cloud://libs/crypto" verify "sha256:def456"
-    DataUtils from "stdlib/data.mdix"
-)
+UNITY_CS = """\
+using UnityEngine;
+using System.Collections;
+using System.Collections.Generic;
 
-@DLM(
-    DCompressor.gzip
-    DAuditor.enhanced
-    DEncryptor.aes256
-)
+public class GameManager : MonoBehaviour
+{
+    [Header("Player Settings")]
+    public float moveSpeed = 5.0f;
+    public float jumpForce = 8.0f;
+    public int maxHealth = 100;
+    public int currentHealth;
 
-@ENUMS(
-    Status {
-        Pending = 0
-        Active = 1
-        Paused = 2
-        Completed = 3
-        Failed = 4
+    [Header("References")]
+    public Transform playerTransform;
+    public Camera mainCamera;
+    public AudioSource audioSource;
+    public List<GameObject> enemies = new List<GameObject>();
+
+    private Rigidbody rb;
+    private bool isGrounded;
+    private Vector3 velocity;
+    private static GameManager _instance;
+
+    public static GameManager Instance { get { return _instance; } }
+
+    void Awake()
+    {
+        if (_instance != null && _instance != this) Destroy(this.gameObject);
+        else _instance = this;
+        DontDestroyOnLoad(this.gameObject);
+        currentHealth = maxHealth;
+        rb = GetComponent<Rigidbody>();
     }
 
-    Priority {
-        Low = 0
-        Medium = 1
-        High = 2
-        Critical = 3
+    void Start() { InitializeGame(); StartCoroutine(SpawnCoroutine()); }
+    void Update() { HandleInput(); UpdateUI(); CheckWinCondition(); }
+    void FixedUpdate() { MovePlayer(); }
+
+    private void HandleInput()
+    {
+        float h = Input.GetAxisRaw("Horizontal");
+        float v = Input.GetAxisRaw("Vertical");
+        velocity = new Vector3(h, 0, v).normalized * moveSpeed;
+        if (Input.GetButtonDown("Jump") && isGrounded)
+        { rb.AddForce(Vector3.up * jumpForce, ForceMode.Impulse); isGrounded = false; }
+        if (Input.GetKeyDown(KeyCode.Escape)) PauseGame();
     }
 
-    Region {
-        NorthAmerica = 0
-        Europe = 1
-        AsiaPacific = 2
-        SouthAmerica = 3
-    }
-)
+    private void MovePlayer() { rb.MovePosition(rb.position + velocity * Time.fixedDeltaTime); }
+    private void InitializeGame() { enemies.Clear(); currentHealth = maxHealth; Time.timeScale = 1f; }
 
-@QUICKFUNCS(
-    ~formatCurrency<string> => global
-    (amount<float> currency<string> = "USD") {
-        let formatted<string> = $"${amount}";
-        if: currency == "EUR" {
-            formatted = $"{amount}";
-        } elif: currency == "GBP" {
-            formatted = $"{amount}";
-        }
-        return formatted;
+    public void TakeDamage(int amount)
+    {
+        currentHealth = Mathf.Clamp(currentHealth - amount, 0, maxHealth);
+        if (currentHealth <= 0) GameOver();
     }
 
-    ~clampValue<float> => global
-    (value<float> min<float> max<float>) {
-        if: value < min { return min; }
-        if: value > max { return max; }
-        return value;
+    public void Heal(int amount) { currentHealth = Mathf.Clamp(currentHealth + amount, 0, maxHealth); }
+    private void GameOver() { Time.timeScale = 0f; UnityEngine.SceneManagement.SceneManager.LoadScene("GameOver"); }
+    private void PauseGame() { Time.timeScale = Time.timeScale == 0f ? 1f : 0f; }
+    private void UpdateUI() {}
+    private void CheckWinCondition() { if (enemies.Count == 0) Debug.Log("You Win!"); }
+
+    private IEnumerator SpawnCoroutine()
+    { while (true) { yield return new WaitForSeconds(5f); Debug.Log("Spawning enemy"); } }
+
+    void OnCollisionEnter(Collision c)
+    {
+        if (c.gameObject.CompareTag("Ground")) isGrounded = true;
+        if (c.gameObject.CompareTag("Enemy")) TakeDamage(10);
     }
 
-    ~getStatusLabel<string> => global
-    (status<enum>) {
-        chk: status {
-            -> Status.Pending   { return "Pending Review"; }
-            -> Status.Active    { return "Currently Active"; }
-            -> Status.Paused    { return "On Hold"; }
-            -> Status.Completed { return "Done"; }
-            -> miss             { return "Unknown"; }
-        }
+    void OnTriggerEnter(Collider o)
+    {
+        if (o.CompareTag("HealthPickup")) { Heal(25); Destroy(o.gameObject); }
+        if (o.CompareTag("Enemy")) enemies.Remove(o.gameObject);
     }
-)
-
-@DATA(
-    appName<string> = "MidMans Platform"
-    version<string> = "2.1.0"
-    buildNumber<int> = 4217
-    releaseDate<date> = 2026-03-12
-    isProduction<bool> = true
-    maxConnections<int> = 1000
-    timeout<float> = 30.5f
-
-    server.host = "api.midmans.io"
-    server.port = 8443
-    server.protocol = "https"
-    server.keepAlive = true
-    server.maxRetries = 3
-
-    database.host = "db.midmans.io"
-    database.port = 5432
-    database.name = "midmans_prod"
-    database.poolSize = 20
-    database.timeout = 5000
-
-    cache.provider = "redis"
-    cache.host = "cache.midmans.io"
-    cache.port = 6379
-    cache.ttl = 3600
-    cache.maxMemory = "512mb"
-
-    users :: { id = 1, name = "Alice", status = Status.Active, region = Region.NorthAmerica, balance = 1500.00 }
-            { id = 2, name = "Bob", status = Status.Pending, region = Region.Europe, balance = 750.50 }
-            { id = 3, name = "Charlie", status = Status.Active, region = Region.AsiaPacific, balance = 2200.75 }
-            { id = 4, name = "Diana", status = Status.Completed, region = Region.NorthAmerica, balance = 0.00 }
-            { id = 5, name = "Eve", status = Status.Active, region = Region.Europe, balance = 4100.00 }
-
-    features :: "authentication" "authorisation" "billing" "analytics"
-               "notifications" "reporting" "export" "import"
-               "webhooks" "api_keys" "rate_limiting" "audit_log"
-)
-
-@SECURITY(
-    encryption -> {
-        algorithm = "aes256"
-        keySize = 256
-        iv = auto
-        mode = "gcm"
-    }
-    validation -> {
-        strictMode = true
-        maxInputSize = 1048576
-        sanitizeHtml = true
-    }
-    keystore -> {
-        provider = "vault"
-        endpoint = "https://vault.midmans.io"
-        autoRotate = true
-        rotationDays = 90
-    }
-)
+}
 """
-    full = (content.strip() + "\n\n") * 12
-    return write(path, full.encode())
 
-# ── DLL stub ──────────────────────────────────────────────────────────────────
-def gen_dll_stub(path):
-    random.seed(55)
-    dos = b"MZ" + b"\x00" * 58 + struct.pack("<I", 0x80)
-    dos += b"\x00" * (0x80 - len(dos))
-    pe_sig = b"PE\x00\x00"
-    coff   = struct.pack("<HHIIIHH", 0x14c, 3, 0, 0, 0, 0xe0, 0x0102)
-    opt    = struct.pack("<HBBiiiIIIIII", 0x10b, 0, 0, 4096, 512, 512, 0, 0x1000, 0x400000, 8, 8, 4)
-    opt   += b"\x00" * (0xe0 - 28)
-    pe     = pe_sig + coff + opt
-    header = dos + pe + b"\x00" * (0x400 - len(dos + pe))
-    opcodes = bytes([0x02, 0x03, 0x04, 0x17, 0x1a, 0x20, 0x28, 0x2a, 0x6f, 0x7b, 0x7c, 0x7d, 0x00])
-    body = b""
-    for i in range(3000):
-        token = struct.pack("<I", 0x0A000001 + (i % 500))
-        body += bytes([opcodes[i % len(opcodes)]]) + token
-        if i % 20 == 0:
-            s = f"MethodName_{i % 100}\x00".encode()
-            body += s
-    return write(path, header + body)
+UNITY_SCENE = """\
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!104 &2
+RenderSettings:
+  m_ObjectHideFlags: 0
+  serializedVersion: 9
+  m_Fog: 0
+  m_FogColor: {r: 0.5, g: 0.5, b: 0.5, a: 1}
+  m_FogMode: 3
+  m_FogDensity: 0.01
+  m_AmbientSkyColor: {r: 0.212, g: 0.227, b: 0.259, a: 1}
+  m_AmbientIntensity: 1
+--- !u!1 &100000000
+GameObject:
+  m_ObjectHideFlags: 0
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 100000001}
+  - component: {fileID: 100000002}
+  m_Layer: 0
+  m_Name: Main Camera
+  m_TagString: MainCamera
+  m_IsActive: 1
+--- !u!4 &100000001
+Transform:
+  m_ObjectHideFlags: 0
+  m_LocalPosition: {x: 0, y: 1, z: -10}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+--- !u!20 &100000002
+Camera:
+  m_ObjectHideFlags: 0
+  serializedVersion: 2
+  m_ClearFlags: 1
+  m_BackGroundColor: {r: 0.19, g: 0.3, b: 0.47, a: 0}
+  m_NearClipPlane: 0.3
+  m_FarClipPlane: 1000
+  m_FieldOfView: 60
+  m_Orthographic: 0
+  m_OrthographicSize: 5
+"""
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+UNITY_SHADER = """\
+Shader "Custom/PBR_Terrain"
+{
+    Properties
+    {
+        _BaseColor ("Base Color", Color) = (1,1,1,1)
+        _BaseMap ("Base Map", 2D) = "white" {}
+        _NormalMap ("Normal Map", 2D) = "bump" {}
+        _Metallic ("Metallic", Range(0,1)) = 0.0
+        _Smoothness ("Smoothness", Range(0,1)) = 0.5
+        _OcclusionStrength ("Occlusion Strength", Range(0,1)) = 1.0
+    }
+    SubShader
+    {
+        Tags { "RenderType"="Opaque" "RenderPipeline"="UniversalPipeline" }
+        LOD 300
+        Pass
+        {
+            Name "ForwardLit"
+            Tags { "LightMode"="UniversalForward" }
+            HLSLPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS
+            #pragma multi_compile _ _ADDITIONAL_LIGHTS
+            #pragma multi_compile_fog
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+            struct Attributes { float4 posOS:POSITION; float3 normOS:NORMAL; float2 uv:TEXCOORD0; };
+            struct Varyings  { float4 posCS:SV_POSITION; float2 uv:TEXCOORD0; float3 posWS:TEXCOORD1; float3 normWS:TEXCOORD2; float fogFactor:TEXCOORD3; };
+            TEXTURE2D(_BaseMap); SAMPLER(sampler_BaseMap);
+            TEXTURE2D(_NormalMap); SAMPLER(sampler_NormalMap);
+            CBUFFER_START(UnityPerMaterial)
+                float4 _BaseColor; float4 _BaseMap_ST;
+                float _Metallic; float _Smoothness; float _OcclusionStrength;
+            CBUFFER_END
+            Varyings vert(Attributes IN)
+            {
+                Varyings OUT = (Varyings)0;
+                VertexPositionInputs pos = GetVertexPositionInputs(IN.posOS.xyz);
+                VertexNormalInputs   nm  = GetVertexNormalInputs(IN.normOS);
+                OUT.posCS  = pos.positionCS; OUT.posWS = pos.positionWS;
+                OUT.normWS = nm.normalWS;
+                OUT.uv     = TRANSFORM_TEX(IN.uv, _BaseMap);
+                OUT.fogFactor = ComputeFogFactor(pos.positionCS.z);
+                return OUT;
+            }
+            half4 frag(Varyings IN) : SV_Target
+            {
+                SurfaceData s = (SurfaceData)0;
+                s.albedo     = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, IN.uv).rgb * _BaseColor.rgb;
+                s.metallic   = _Metallic; s.smoothness = _Smoothness;
+                InputData id = (InputData)0;
+                id.positionWS     = IN.posWS;
+                id.normalWS       = normalize(IN.normWS);
+                id.viewDirectionWS = GetWorldSpaceNormalizeViewDir(IN.posWS);
+                id.fogCoord = IN.fogFactor;
+                half4 col = UniversalFragmentPBR(id, s);
+                col.rgb = MixFog(col.rgb, IN.fogFactor);
+                return col;
+            }
+            ENDHLSL
+        }
+    }
+    FallBack "Hidden/InternalErrorShader"
+}
+"""
+
+UNREAL_UPLUGIN = json.dumps({
+    "FileVersion": 3, "Version": 1, "VersionName": "1.0",
+    "FriendlyName": "MBFA Test Plugin",
+    "Description": "Test plugin generated for MBFA special benchmark",
+    "Category": "Other", "CreatedBy": "MidManStudio",
+    "CreatedByURL": "https://github.com/Mid-D-Man/mbfa",
+    "CanContainContent": True, "IsBetaVersion": False, "Installed": False,
+    "Modules": [{"Name": "MBFAPlugin", "Type": "Runtime",
+                 "LoadingPhase": "Default",
+                 "AdditionalDependencies": ["Engine", "CoreUObject"]}],
+    "Plugins": [],
+}, indent=2)
+
+UNREAL_INI = """\
+[/Script/Engine.RendererSettings]
+r.DefaultFeature.Bloom=True
+r.DefaultFeature.AmbientOcclusion=True
+r.DefaultFeature.AutoExposure=True
+r.DefaultFeature.AutoExposure.Method=0
+r.DefaultFeature.MotionBlur=True
+r.DefaultFeature.AntiAliasing=2
+r.Shadow.CSM.MaxCascades=4
+r.Shadow.MaxResolution=2048
+r.Shadow.DistanceScale=1.000000
+r.TranslucencyLightingVolumeDim=64
+r.RefractionQuality=2
+r.SSR.Quality=3
+r.SceneColorFormat=4
+r.GBuffer=1
+r.HZBOcclusion=1
+r.EarlyZPass=3
+r.AllowStaticLighting=True
+r.GenerateMeshDistanceFields=False
+r.SeparateTranslucency=True
+r.CustomDepth=3
+r.bEnableRayTracing=False
+
+[/Script/Engine.AudioSettings]
+MaximumConcurrentStreams=32
+GlobalMinPitchScale=0.400000
+GlobalMaxPitchScale=2.000000
+
+[/Script/Engine.PhysicsSettings]
+DefaultGravityZ=-980.000000
+DefaultTerminalVelocity=4000.000000
+bEnableShapeSharing=False
+bEnablePCM=True
+bWarnMissingLocks=True
+MaxPhysicsDeltaTime=0.033333
+bSubstepping=False
+MaxSubstepDeltaTime=0.016667
+MaxSubsteps=6
+InitialAverageFrameRate=0.016667
+PhysXTreeRebuildRate=10
+
+[/Script/Engine.GameMapsSettings]
+GlobalDefaultGameMode=/Script/Engine.GameModeBase
+bUseSplitscreen=False
+TwoPlayerSplitscreenLayout=Horizontal
+ThreePlayerSplitscreenLayout=FavorTop
+
+[/Script/Engine.GarbageCollectionSettings]
+gc.MaxObjectsNotConsideredByGC=1
+gc.SizeOfPermanentObjectPool=0
+gc.FlushStreamingOnGC=0
+gc.NumRetriesBeforeForcingGC=10
+gc.AllowParallelGC=1
+gc.TimeBetweenPurgingPendingKillObjects=60.0
+gc.MaxObjectsInEditor=12582912
+
+[/Script/Engine.NetworkSettings]
+n.VerifyPeer=1
+NetworkEmulationProfiles=()
+"""
+
+K8S_YAML = """\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mbfa-backend
+  namespace: production
+  labels:
+    app: mbfa-backend
+    version: v2.1.0
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mbfa-backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: mbfa-backend
+    spec:
+      containers:
+        - name: mbfa-backend
+          image: ghcr.io/mid-d-man/mbfa:2.1.0
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: APP_ENV
+              value: production
+            - name: LOG_LEVEL
+              value: info
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: mbfa-db-secret
+                  key: host
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mbfa-db-secret
+                  key: password
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mbfa-backend-svc
+  namespace: production
+spec:
+  selector:
+    app: mbfa-backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mbfa-backend-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mbfa-backend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mbfa-ingress
+  namespace: production
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts:
+        - api.mbfa.example.com
+      secretName: mbfa-tls
+  rules:
+    - host: api.mbfa.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mbfa-backend-svc
+                port:
+                  number: 80
+"""
+
+SERVICES_TOML = """\
+[package]
+name    = "mbfa-services"
+version = "2.1.0"
+edition = "2021"
+
+[services.api]
+host            = "0.0.0.0"
+port            = 8080
+workers         = 4
+timeout_sec     = 30
+max_connections = 1000
+keepalive_sec   = 75
+
+[services.metrics]
+host    = "0.0.0.0"
+port    = 9090
+enabled = true
+path    = "/metrics"
+
+[services.grpc]
+host        = "0.0.0.0"
+port        = 50051
+max_recv_mb = 64
+max_send_mb = 64
+
+[database]
+host             = "postgres.internal"
+port             = 5432
+name             = "mbfa_prod"
+pool_min         = 5
+pool_max         = 50
+idle_timeout_sec = 600
+max_lifetime_sec = 1800
+connect_timeout  = 5
+
+[database.replica]
+host     = "postgres-replica.internal"
+port     = 5432
+pool_min = 2
+pool_max = 20
+
+[cache]
+backend    = "redis"
+url        = "redis://redis-cluster.internal:6379"
+pool       = 20
+ttl_sec    = 3600
+key_prefix = "mbfa:"
+
+[cache.cluster]
+nodes = [
+  "redis-0.internal:6379",
+  "redis-1.internal:6379",
+  "redis-2.internal:6379",
+]
+
+[auth]
+jwt_algorithm   = "RS256"
+token_ttl_sec   = 3600
+refresh_ttl_sec = 86400
+issuer          = "https://auth.mbfa.example.com"
+audience        = "mbfa-api"
+
+[logging]
+level  = "info"
+format = "json"
+output = "stdout"
+
+[telemetry]
+enabled       = true
+endpoint      = "https://otel.internal:4317"
+sampling_rate = 0.1
+service_name  = "mbfa-backend"
+
+[feature_flags]
+compression_v2    = true
+new_encoder       = false
+experimental_fold = false
+enable_bcj        = true
+enable_repref     = true
+parallel_folds    = true
+entropy_v6        = false
+
+[limits]
+max_file_size_mb = 100
+max_archive_mb   = 1000
+max_folds        = 8
+max_concurrent   = 256
+rate_limit_rps   = 1000
+
+[[workers]]
+name     = "compress"
+threads  = 8
+queue    = 1000
+priority = "high"
+
+[[workers]]
+name     = "archive"
+threads  = 4
+queue    = 500
+priority = "normal"
+
+[[workers]]
+name     = "cleanup"
+threads  = 1
+queue    = 100
+priority = "low"
+cron     = "0 * * * *"
+"""
+
+PLATFORM_MDIX = """\
+@(platform v2.1)
+
+// DixScript platform configuration — MBFA benchmark
+
+module Platform {
+    const VERSION: str = "2.1.0"
+    const MAX_FOLDS: int = 8
+    const MIN_IMPROVEMENT: float = 0.985
+
+    config Encoder {
+        offset_bits_min:     int = 7
+        offset_bits_max:     int = 24
+        offset_bits_default: int = 15
+        length_bits_min:     int = 8
+        length_bits_max:     int = 24
+        hash_size:           int = 65536
+        chain_limit:         int = 256
+        lazy_short_len:      int = 6
+        rep_slots:           int = 4
+    }
+
+    config Decoder {
+        ring_slots:       int  = 4
+        verify_roundtrip: bool = true
+        strict_end_token: bool = false
+    }
+
+    config Entropy {
+        min_bytes:    int  = 400
+        v2_min_bytes: int  = 1000
+        num_variants: int  = 6
+        parallel:     bool = true
+    }
+
+    config Archive {
+        chunk_min_mb:       int   = 1
+        chunk_max_mb:       int   = 8
+        entropy_threshold:  float = 7.5
+        similarity_groups:  int   = 5
+    }
+
+    filters {
+        delta1:     bool = true
+        delta2:     bool = true
+        delta3:     bool = true
+        delta4:     bool = true
+        stl_shuffle: bool = true
+        ply_shuffle: bool = true
+        bcj_x86:    bool = true
+    }
+
+    opcodes {
+        BACKREF: bits = 1
+        LIT:     bits = 2
+        END:     bits = 2
+        REPREF:  bits = 3
+    }
+
+    stopping {
+        min_improvement_ratio: float = 0.985
+        min_fold_bits:         int   = 64
+        max_folds:             int   = 8
+    }
+}
+
+const FILTER_NONE:   int = 0
+const FILTER_DELTA1: int = 1
+const FILTER_DELTA2: int = 2
+const FILTER_DELTA3: int = 3
+const FILTER_DELTA4: int = 4
+const FILTER_STL:    int = 7
+const FILTER_PLY:    int = 8
+const FILTER_BCJ:    int = 9
+
+enum SimilarityGroup {
+    Source     = 0
+    Markup     = 1
+    Binary     = 2
+    Compressed = 3
+    Other      = 4
+}
+
+fn detect_platform() -> str {
+    @(os) match {
+        "linux"   => "Linux"
+        "windows" => "Windows"
+        "macos"   => "macOS"
+        _         => "Unknown"
+    }
+}
+
+fn auto_chunk_size(available_mb: int) -> int {
+    clamp(available_mb / 256, 1, 8) * 1024 * 1024
+}
+
+@(main)
+fn run() {
+    let platform = detect_platform()
+    print(f"MBFA Platform Config v{Platform::VERSION} on {platform}")
+    print(f"Max folds:       {Platform::MAX_FOLDS}")
+    print(f"Min improvement: {Platform::MIN_IMPROVEMENT}")
+}
+"""
+
+
+# ── Fake Unreal uasset (binary with UE4 magic header + mesh data) ─────────────
+
+def gen_uasset():
+    UE4_MAGIC = 0x9E2A83C1
+    hdr = struct.pack("<I", UE4_MAGIC)
+    hdr += struct.pack("<i", -7)        # LegacyFileVersion
+    hdr += struct.pack("<i", 0)         # LegacyUE3Version
+    hdr += struct.pack("<i", 522)       # FileVersionUE4
+    hdr += struct.pack("<i", 0)         # FileVersionLicenseeUE4
+    hdr += struct.pack("<i", 0)         # CustomVersionsCount
+    pkg = b"StaticMesh\x00"
+    hdr += struct.pack("<i", len(pkg)) + pkg
+    hdr += struct.pack("<I", 0x8)       # PackageFlags
+    hdr += struct.pack("<iiii", 0, 0, 5, 0)  # NameCount/Offset, ExportCount, ExportOffset
+    hdr += struct.pack("<iiii", 3, 0, 0, 0)  # ImportCount/Offset, DependsOffset, misc
+    hdr += bytes(16)                    # GUID
+    hdr += struct.pack("<iii", 1, 5, 3) # GenerationCount, ExportCount, NameCount
+
+    rng = random.Random(7)
+    mesh = bytearray()
+    for _ in range(2000):
+        phi = rng.uniform(0, math.pi)
+        th  = rng.uniform(0, 2 * math.pi)
+        x   = math.sin(phi) * math.cos(th) * 100
+        y   = math.cos(phi) * 100
+        z   = math.sin(phi) * math.sin(th) * 100
+        mesh += struct.pack("<fff", x, y, z)
+        mesh += struct.pack("<fff", x/100, y/100, z/100)
+        mesh += struct.pack("<ff", phi / math.pi, th / (2*math.pi))
+
+    for i in range(0, 1998, 3):
+        mesh += struct.pack("<HHH", i, i+1, i+2)
+
+    result = hdr + bytes(mesh)
+    target = 65536
+    if len(result) < target:
+        result += bytes(target - len(result))
+    return result
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
 def main():
     args = parse_args()
-    out  = args.output_dir
-    os.makedirs(out, exist_ok=True)
-
+    os.makedirs(args.output_dir, exist_ok=True)
     manifest = []
 
-    def add(name, category, ext, size):
-        manifest.append({"name": name, "category": category, "ext": ext,
-                         "file": f"{name}{ext}", "bytes": size})
+    def out(filename, data, description):
+        emit(args.output_dir, filename, data, description, manifest)
 
-    print(f"Generating special benchmark files -> {out}/")
+    print(f"Generating special benchmark files → {args.output_dir}/\n")
 
-    size = gen_stl_binary(f"{out}/mesh_sphere.stl")
-    add("mesh_sphere", "3D_filter_target", ".stl", size)
-    print(f"  mesh_sphere.stl          {size:>10,} bytes")
+    print("── 3D filter targets ────────────────────────────────────────────")
+    out("mesh_sphere.stl",   gen_stl_sphere(25, 25),
+        "Binary STL sphere — 1250 tris (STL shuffle+delta filter)")
+    out("mesh_sphere.ply",   gen_ply_sphere(50, 50),
+        "Binary PLY sphere — 2601 verts float32 (PLY shuffle+delta filter)")
+    out("scene.glb",         gen_glb(),
+        "GLB binary 3D scene — JSON+BIN chunks, 3000 verts")
 
-    size = gen_ply_binary(f"{out}/mesh_sphere.ply")
-    add("mesh_sphere_ply", "3D_filter_target", ".ply", size)
-    print(f"  mesh_sphere.ply          {size:>10,} bytes")
+    print("\n── Unity project files ──────────────────────────────────────────")
+    out("Scripts.cs",        UNITY_CS * 10,
+        "Unity C# MonoBehaviour script (×10 repetitions)")
+    out("SampleScene.unity", UNITY_SCENE * 6,
+        "Unity YAML scene file (×6 repetitions)")
+    print("  Generating terrain heightmaps…")
+    out("Terrain.raw",       gen_terrain_raw(513, 513, seed=1),
+        "Unity terrain RAW 513×513 16-bit LE heightmap (~514 KB)")
+    out("Terrain_large.raw", gen_terrain_raw(1025, 1025, seed=2),
+        "Unity terrain RAW 1025×1025 16-bit LE heightmap (~2 MB)")
+    out("Shaders.shader",    UNITY_SHADER * 5,
+        "Unity URP PBR HLSL shader (×5 repetitions)")
 
-    size = gen_glb(f"{out}/scene.glb")
-    add("scene", "3D_filter_target", ".glb", size)
-    print(f"  scene.glb                {size:>10,} bytes")
+    print("\n── Unreal Engine files ──────────────────────────────────────────")
+    out("StaticMesh.uasset", gen_uasset(),
+        "Unreal Engine 4 static mesh asset (UE4 magic + mesh binary)")
+    out("plugins.json",      UNREAL_UPLUGIN,
+        "Unreal .uplugin JSON descriptor")
+    out("DefaultEngine.ini", UNREAL_INI * 5,
+        "Unreal DefaultEngine.ini config (×5 repetitions)")
 
-    size = gen_uasset_stub(f"{out}/StaticMesh.uasset")
-    add("StaticMesh", "Unreal", ".uasset", size)
-    print(f"  StaticMesh.uasset        {size:>10,} bytes")
+    print("\n── Config / script formats ──────────────────────────────────────")
+    out("k8s_config.yaml",   K8S_YAML * 5,
+        "Kubernetes deployment YAML (×5 repetitions)")
+    out("services.toml",     SERVICES_TOML * 4,
+        "TOML services configuration (×4 repetitions)")
+    out("platform.mdix",     PLATFORM_MDIX * 5,
+        "DixScript platform config (×5 repetitions)")
 
-    size = gen_uplugin(f"{out}/plugins.json")
-    add("plugins", "Unreal", ".json", size)
-    print(f"  plugins.json             {size:>10,} bytes")
+    print("\n── Binary / assembly ────────────────────────────────────────────")
+    out("Assembly.dll",      gen_minimal_dll(),
+        "Minimal PE/COFF DLL with E8/E9 patterns (BCJ filter target)")
 
-    size = gen_unreal_ini(f"{out}/DefaultEngine.ini")
-    add("DefaultEngine", "Unreal", ".ini", size)
-    print(f"  DefaultEngine.ini        {size:>10,} bytes")
-
-    size = gen_unity_csharp(f"{out}/Scripts.cs")
-    add("Scripts", "Unity", ".cs", size)
-    print(f"  Scripts.cs               {size:>10,} bytes")
-
-    size = gen_unity_yaml(f"{out}/SampleScene.unity")
-    add("SampleScene", "Unity", ".unity", size)
-    print(f"  SampleScene.unity        {size:>10,} bytes")
-
-    size = gen_terrain_raw(f"{out}/Terrain.raw", w=513, h=513, seed_x=0.05, seed_y=0.05)
-    add("Terrain", "Unity", ".raw", size)
-    print(f"  Terrain.raw              {size:>10,} bytes")
-
-    size = gen_terrain_raw(f"{out}/Terrain_large.raw", w=1025, h=1025, seed_x=0.03, seed_y=0.03)
-    add("Terrain_large", "Unity", ".raw", size)
-    print(f"  Terrain_large.raw        {size:>10,} bytes")
-
-    size = gen_unity_shader(f"{out}/Shaders.shader")
-    add("Shaders", "Unity", ".shader", size)
-    print(f"  Shaders.shader           {size:>10,} bytes")
-
-    size = gen_yaml_config(f"{out}/k8s_config.yaml")
-    add("k8s_config", "Config", ".yaml", size)
-    print(f"  k8s_config.yaml          {size:>10,} bytes")
-
-    size = gen_toml_config(f"{out}/services.toml")
-    add("services", "Config", ".toml", size)
-    print(f"  services.toml            {size:>10,} bytes")
-
-    size = gen_mdix(f"{out}/platform.mdix")
-    add("platform", "DixScript", ".mdix", size)
-    print(f"  platform.mdix            {size:>10,} bytes")
-
-    size = gen_dll_stub(f"{out}/Assembly.dll")
-    add("Assembly", "Binary", ".dll", size)
-    print(f"  Assembly.dll             {size:>10,} bytes")
-
-    manifest_path = f"{out}/special_manifest.json"
+    manifest_path = os.path.join(args.output_dir, "special_manifest.json")
     with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
-    print(f"\nManifest written -> {manifest_path}")
-    print(f"Total files: {len(manifest)}")
+        json.dump({
+            "generated_by": "gen_special_files.py",
+            "files": manifest,
+            "total_files": len(manifest),
+            "total_bytes": sum(m["size"] for m in manifest),
+        }, f, indent=2)
+
+    print(f"\n{'─'*60}")
+    print(f"Generated {len(manifest)} files, "
+          f"{sum(m['size'] for m in manifest):,} bytes total")
+    print(f"Manifest → {manifest_path}")
+
 
 if __name__ == "__main__":
     main()

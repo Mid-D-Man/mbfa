@@ -48,9 +48,11 @@ jobs:
 
       - name: Generate special benchmark files
         run: |
+          mkdir -p bench_files_special
           python3 scripts/gen_special_files.py --output-dir bench_files_special
           echo "Generated files:"
           ls -lh bench_files_special/
+          echo "Manifest:"
           cat bench_files_special/special_manifest.json
 
       - name: Upload generated files
@@ -101,20 +103,43 @@ jobs:
         run: |
           echo "Running roundtrip on all special files..."
           FAILED=0
+
           for f in bench_files_special/*; do
             [ -f "$f" ] || continue
-            [ "$(basename $f)" = "special_manifest.json" ] && continue
-            ./target/release/mbfa compress "$f" "${f}.mbfa" > /dev/null 2>&1
-            ./target/release/mbfa decompress "${f}.mbfa" "${f}.recovered" > /dev/null 2>&1
+            name="$(basename "$f")"
+
+            # Skip the manifest and any generated intermediate files
+            case "$name" in
+              special_manifest.json) continue ;;
+              *.mbfa|*.recovered|*.gz|*.zst|*.xz|*.br|*.zpaq) continue ;;
+            esac
+
+            # Compress — use if ! so bash -e does not exit early on MBFA errors
+            if ! ./target/release/mbfa compress "$f" "${f}.mbfa" > /dev/null 2>&1; then
+              echo "  FAIL: $name (compress error — exit $(echo $?))"
+              FAILED=$((FAILED + 1))
+              continue
+            fi
+
+            # Decompress
+            if ! ./target/release/mbfa decompress "${f}.mbfa" "${f}.recovered" > /dev/null 2>&1; then
+              echo "  FAIL: $name (decompress error)"
+              FAILED=$((FAILED + 1))
+              continue
+            fi
+
+            # Byte-exact check
             if ! diff "$f" "${f}.recovered" > /dev/null 2>&1; then
-              echo "  FAIL: $(basename $f)"
-              FAILED=$((FAILED+1))
+              echo "  FAIL: $name (content mismatch)"
+              FAILED=$((FAILED + 1))
             else
-              echo "  OK:   $(basename $f)"
+              echo "  OK:   $name"
             fi
           done
+
+          echo ""
           if [ "$FAILED" != "0" ]; then
-            echo "Roundtrip failures detected: $FAILED"
+            echo "Roundtrip failures: $FAILED"
             exit 1
           fi
           echo "All roundtrips passed"
@@ -130,14 +155,21 @@ jobs:
             local file="$1"
             local name="$2"
             local category="$3"
+
+            if [ ! -f "bench_files_special/$file" ]; then
+              echo "  SKIP: $name (file not found)"
+              return
+            fi
+
             local orig_size
             orig_size=$(wc -c < "bench_files_special/$file")
 
+            # ── MBFA ──────────────────────────────────────────────────────────
             local mbfa_start mbfa_end mbfa_ms mbfa_size
             mbfa_start=$(date +%s%N)
             ./target/release/mbfa compress "bench_files_special/$file" \
               "bench_files_special/${file}.mbfa" \
-              > "/tmp/mbfa_log_${name}.txt" 2>&1
+              > "/tmp/mbfa_log_${name}.txt" 2>&1 || true
             mbfa_end=$(date +%s%N)
             mbfa_ms=$(( (mbfa_end - mbfa_start) / 1000000 ))
             mbfa_size=$(wc -c < "bench_files_special/${file}.mbfa" 2>/dev/null || echo 0)
@@ -145,12 +177,13 @@ jobs:
             local decomp_start decomp_end mbfa_decomp_ms
             decomp_start=$(date +%s%N)
             ./target/release/mbfa decompress "bench_files_special/${file}.mbfa" \
-              "bench_files_special/${file}.recovered" > /dev/null 2>&1
+              "bench_files_special/${file}.recovered" > /dev/null 2>&1 || true
             decomp_end=$(date +%s%N)
             mbfa_decomp_ms=$(( (decomp_end - decomp_start) / 1000000 ))
 
             local roundtrip="PASS"
-            if ! diff "bench_files_special/$file" "bench_files_special/${file}.recovered" > /dev/null 2>&1; then
+            if ! diff "bench_files_special/$file" \
+                      "bench_files_special/${file}.recovered" > /dev/null 2>&1; then
               roundtrip="FAIL"
             fi
 
@@ -158,75 +191,74 @@ jobs:
             fold_detail=$(grep -E "^(Original|Fold|Done|Joint|Entropy|Window|Filter)" \
               "/tmp/mbfa_log_${name}.txt" 2>/dev/null | tr '\n' '|' | sed 's/"/\\"/g')
 
-            local gz_start gz_end gz_ms gz_size gz_decomp_start gz_decomp_end gz_decomp_ms
-            gz_start=$(date +%s%N)
-            gzip -k -f "bench_files_special/$file" 2>/dev/null
-            gz_end=$(date +%s%N)
-            gz_ms=$(( (gz_end - gz_start) / 1000000 ))
-            gz_size=$(wc -c < "bench_files_special/${file}.gz" 2>/dev/null || echo 0)
-            gz_decomp_start=$(date +%s%N)
-            gzip -d -k -f -c "bench_files_special/${file}.gz" > /dev/null 2>/dev/null
-            gz_decomp_end=$(date +%s%N)
-            gz_decomp_ms=$(( (gz_decomp_end - gz_decomp_start) / 1000000 ))
+            # ── gzip ──────────────────────────────────────────────────────────
+            local gz_s gz_e gz_ms gz_sz gz_ds gz_de gz_dms
+            gz_s=$(date +%s%N)
+            gzip -k -f "bench_files_special/$file" 2>/dev/null || true
+            gz_e=$(date +%s%N); gz_ms=$(( (gz_e - gz_s) / 1000000 ))
+            gz_sz=$(wc -c < "bench_files_special/${file}.gz" 2>/dev/null || echo 0)
+            gz_ds=$(date +%s%N)
+            gzip -d -k -f -c "bench_files_special/${file}.gz" > /dev/null 2>/dev/null || true
+            gz_de=$(date +%s%N); gz_dms=$(( (gz_de - gz_ds) / 1000000 ))
 
-            local zst_start zst_end zst_ms zst_size zst_decomp_start zst_decomp_end zst_decomp_ms
-            zst_start=$(date +%s%N)
-            zstd -q -f "bench_files_special/$file" -o "bench_files_special/${file}.zst" 2>/dev/null
-            zst_end=$(date +%s%N)
-            zst_ms=$(( (zst_end - zst_start) / 1000000 ))
-            zst_size=$(wc -c < "bench_files_special/${file}.zst" 2>/dev/null || echo 0)
-            zst_decomp_start=$(date +%s%N)
-            zstd -d -q -f -c "bench_files_special/${file}.zst" > /dev/null 2>/dev/null
-            zst_decomp_end=$(date +%s%N)
-            zst_decomp_ms=$(( (zst_decomp_end - zst_decomp_start) / 1000000 ))
+            # ── zstd ──────────────────────────────────────────────────────────
+            local zst_s zst_e zst_ms zst_sz zst_ds zst_de zst_dms
+            zst_s=$(date +%s%N)
+            zstd -q -f "bench_files_special/$file" \
+              -o "bench_files_special/${file}.zst" 2>/dev/null || true
+            zst_e=$(date +%s%N); zst_ms=$(( (zst_e - zst_s) / 1000000 ))
+            zst_sz=$(wc -c < "bench_files_special/${file}.zst" 2>/dev/null || echo 0)
+            zst_ds=$(date +%s%N)
+            zstd -d -q -f -c "bench_files_special/${file}.zst" > /dev/null 2>/dev/null || true
+            zst_de=$(date +%s%N); zst_dms=$(( (zst_de - zst_ds) / 1000000 ))
 
-            local xz_start xz_end xz_ms xz_size xz_decomp_start xz_decomp_end xz_decomp_ms
-            xz_start=$(date +%s%N)
-            xz -k -f "bench_files_special/$file" 2>/dev/null
-            xz_end=$(date +%s%N)
-            xz_ms=$(( (xz_end - xz_start) / 1000000 ))
-            xz_size=$(wc -c < "bench_files_special/${file}.xz" 2>/dev/null || echo 0)
-            xz_decomp_start=$(date +%s%N)
-            xz -d -k -f -c "bench_files_special/${file}.xz" > /dev/null 2>/dev/null
-            xz_decomp_end=$(date +%s%N)
-            xz_decomp_ms=$(( (xz_decomp_end - xz_decomp_start) / 1000000 ))
+            # ── xz ────────────────────────────────────────────────────────────
+            local xz_s xz_e xz_ms xz_sz xz_ds xz_de xz_dms
+            xz_s=$(date +%s%N)
+            xz -k -f "bench_files_special/$file" 2>/dev/null || true
+            xz_e=$(date +%s%N); xz_ms=$(( (xz_e - xz_s) / 1000000 ))
+            xz_sz=$(wc -c < "bench_files_special/${file}.xz" 2>/dev/null || echo 0)
+            xz_ds=$(date +%s%N)
+            xz -d -k -f -c "bench_files_special/${file}.xz" > /dev/null 2>/dev/null || true
+            xz_de=$(date +%s%N); xz_dms=$(( (xz_de - xz_ds) / 1000000 ))
 
-            local br_start br_end br_ms br_size br_decomp_start br_decomp_end br_decomp_ms
-            br_start=$(date +%s%N)
-            brotli -k -f "bench_files_special/$file" -o "bench_files_special/${file}.br" 2>/dev/null
-            br_end=$(date +%s%N)
-            br_ms=$(( (br_end - br_start) / 1000000 ))
-            br_size=$(wc -c < "bench_files_special/${file}.br" 2>/dev/null || echo 0)
-            br_decomp_start=$(date +%s%N)
-            brotli -d -k -f -c "bench_files_special/${file}.br" > /dev/null 2>/dev/null
-            br_decomp_end=$(date +%s%N)
-            br_decomp_ms=$(( (br_decomp_end - br_decomp_start) / 1000000 ))
+            # ── brotli ────────────────────────────────────────────────────────
+            local br_s br_e br_ms br_sz br_ds br_de br_dms
+            br_s=$(date +%s%N)
+            brotli -k -f "bench_files_special/$file" \
+              -o "bench_files_special/${file}.br" 2>/dev/null || true
+            br_e=$(date +%s%N); br_ms=$(( (br_e - br_s) / 1000000 ))
+            br_sz=$(wc -c < "bench_files_special/${file}.br" 2>/dev/null || echo 0)
+            br_ds=$(date +%s%N)
+            brotli -d -k -f -c "bench_files_special/${file}.br" > /dev/null 2>/dev/null || true
+            br_de=$(date +%s%N); br_dms=$(( (br_de - br_ds) / 1000000 ))
 
-            local zpaq_start zpaq_end zpaq_ms zpaq_size zpaq_decomp_ms
-            zpaq_start=$(date +%s%N)
+            # ── zpaq ──────────────────────────────────────────────────────────
+            local zpaq_s zpaq_e zpaq_ms zpaq_sz zpaq_dms
+            zpaq_s=$(date +%s%N)
             zpaq a "bench_files_special/${file}.zpaq" "bench_files_special/$file" \
               -method 2 > /dev/null 2>&1 || true
-            zpaq_end=$(date +%s%N)
-            zpaq_ms=$(( (zpaq_end - zpaq_start) / 1000000 ))
-            zpaq_size=$(wc -c < "bench_files_special/${file}.zpaq" 2>/dev/null || echo 0)
-            zpaq_decomp_ms=0
-            if [ "$zpaq_size" -gt 0 ]; then
-              local zpaq_d_start zpaq_d_end
-              zpaq_d_start=$(date +%s%N)
+            zpaq_e=$(date +%s%N); zpaq_ms=$(( (zpaq_e - zpaq_s) / 1000000 ))
+            zpaq_sz=$(wc -c < "bench_files_special/${file}.zpaq" 2>/dev/null || echo 0)
+            zpaq_dms=0
+            if [ "$zpaq_sz" -gt 0 ]; then
+              local zd_s zd_e
+              zd_s=$(date +%s%N)
               zpaq e "bench_files_special/${file}.zpaq" \
                 -to "/tmp/zpaq_decomp_$$" > /dev/null 2>&1 || true
-              zpaq_d_end=$(date +%s%N)
-              zpaq_decomp_ms=$(( (zpaq_d_end - zpaq_d_start) / 1000000 ))
+              zd_e=$(date +%s%N)
+              zpaq_dms=$(( (zd_e - zd_s) / 1000000 ))
               rm -rf "/tmp/zpaq_decomp_$$"
             fi
 
+            # ── percentages ───────────────────────────────────────────────────
             local mbfa_pct gz_pct zst_pct xz_pct br_pct zpaq_pct
             mbfa_pct=$(fix_pct "$(echo "scale=2; $mbfa_size * 100 / $orig_size" | bc)")
-            gz_pct=$(fix_pct   "$(echo "scale=2; $gz_size   * 100 / $orig_size" | bc)")
-            zst_pct=$(fix_pct  "$(echo "scale=2; $zst_size  * 100 / $orig_size" | bc)")
-            xz_pct=$(fix_pct   "$(echo "scale=2; $xz_size   * 100 / $orig_size" | bc)")
-            br_pct=$(fix_pct   "$(echo "scale=2; $br_size   * 100 / $orig_size" | bc)")
-            zpaq_pct=$(fix_pct "$(echo "scale=2; $zpaq_size * 100 / $orig_size" | bc)")
+            gz_pct=$(fix_pct   "$(echo "scale=2; $gz_sz   * 100 / $orig_size" | bc)")
+            zst_pct=$(fix_pct  "$(echo "scale=2; $zst_sz  * 100 / $orig_size" | bc)")
+            xz_pct=$(fix_pct   "$(echo "scale=2; $xz_sz   * 100 / $orig_size" | bc)")
+            br_pct=$(fix_pct   "$(echo "scale=2; $br_sz   * 100 / $orig_size" | bc)")
+            zpaq_pct=$(fix_pct "$(echo "scale=2; $zpaq_sz * 100 / $orig_size" | bc)")
 
             local all_pcts rank
             all_pcts="$mbfa_pct $gz_pct $zst_pct $xz_pct $br_pct $zpaq_pct"
@@ -240,11 +272,11 @@ jobs:
               "$name" "$category" "$orig_size" \
               "$mbfa_size" "$mbfa_pct" "$mbfa_ms" "$mbfa_decomp_ms" \
               "$roundtrip" "$rank" \
-              "$gz_size" "$gz_pct" "$gz_ms" "$gz_decomp_ms" \
-              "$zst_size" "$zst_pct" "$zst_ms" "$zst_decomp_ms" \
-              "$xz_size" "$xz_pct" "$xz_ms" "$xz_decomp_ms" \
-              "$br_size" "$br_pct" "$br_ms" "$br_decomp_ms" \
-              "$zpaq_size" "$zpaq_pct" "$zpaq_ms" "$zpaq_decomp_ms" \
+              "$gz_sz"   "$gz_pct"   "$gz_ms"   "$gz_dms" \
+              "$zst_sz"  "$zst_pct"  "$zst_ms"  "$zst_dms" \
+              "$xz_sz"   "$xz_pct"   "$xz_ms"   "$xz_dms" \
+              "$br_sz"   "$br_pct"   "$br_ms"   "$br_dms" \
+              "$zpaq_sz" "$zpaq_pct" "$zpaq_ms" "$zpaq_dms" \
               "$fold_detail" >> bench_files_special/special_results.json
 
             printf "%-28s [%-16s] %8s B | MBFA:%6s%%(#%-1s) C:%-4sms D:%-4sms | rt:%s\n" \
@@ -343,14 +375,16 @@ jobs:
           fi
 
           mkdir -p "$WORK/special"
-          cp special_results/index.html            "$WORK/special/index.html"
-          cp special_results/special_results.json  "$WORK/special/results.json"
+          cp special_results/index.html           "$WORK/special/index.html"
+          cp special_results/special_results.json "$WORK/special/results.json"
 
           cd "$WORK"
           git add special/
           git diff --staged --quiet && echo "No changes to special/" && exit 0
           git commit -m "MBFA special benchmark — Build #${{ github.run_number }} [skip ci]"
-          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
+          git push \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+            gh-pages
 
           echo "Deployed to https://mid-d-man.github.io/mbfa/special/"
 

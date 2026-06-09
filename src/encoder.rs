@@ -5,47 +5,26 @@
 //
 // scan_adaptive: Phase A/B/C fingerprint pipeline.
 //
-//   Phase A/B -- fingerprint + single scan (LARGE FILES ONLY, > 1 MB):
-//     Phase A fingerprint_predict classifies the input and predicts (ob, lb).
-//     Phase B runs one full-quality LZ scan at the predicted parameters, then
-//     applies three checks IN STRICT ORDER before deciding whether to run Phase C:
-//
-//       1. Length peak saturation (HARD, runs before early exit):
-//          Any Backref/RepRef length >= 90% of max_len. Means lb is too small.
-//
-//       1.5. Expansion bail:
-//          If Phase B raw_cost > input_bits * 1.02, incompressible.
-//          SKIPPED when skip_incompressible_bail=true (structural filter active).
-//
-//       2. Early exit:
-//          If Phase B ratio < PHASE_B_EARLY_EXIT_RATIO (15%), Phase C gain is
-//          negligible.
-//
-//       3. Offset peak + upper-half (softer):
-//          Any Backref offset >= 90% of max_off, OR >= 20% of Backrefs in
-//          upper half of window.
-//
-//   In-scan expansion bail (inside scan() itself):
-//     Checked every SCAN_EXPANSION_CHECK_INTERVAL (64KB) of input consumed.
-//     SKIPPED when skip_bail=true.
-//
 //   P6: scan() emits Token::RepRef for ring-buffer hits, saving (ob-4) bits
-//   per hit vs Token::Backref. REP_SLOTS=4. RepSlots::push() mirrors decoder.
-//   RepSlots::move_to_front(k) mirrors decoder LRU for RepRef hits.
+//   per hit vs Token::Backref.  REP_SLOTS=4. RepSlots mirrors decoder LRU.
 //
-//   P6 FIX 1 (ref_worthwhile): use backref_bits threshold for BOTH Backref and
-//   RepRef. RepRef REPLACES a Backref (saving ob-4 bits), must not CREATE new
-//   short matches. Using backref_bits keeps minimum effective match length
-//   identical to pre-P6 (e.g. len>=4 at ob=21), preventing spurious len-2/3
-//   emissions on delta-filtered terrain and other strided binary data.
+//   P6 FIX 1 (ref_worthwhile): use backref_bits for BOTH Backref and RepRef.
+//   RepRef must REPLACE a Backref, never CREATE new short matches.
 //
-//   P6 FIX 2 (stream_bit_cost): RepRef tokens are counted at backref_total_bits
-//   (not repref_total_bits) in stream_bit_cost. This makes Phase C ob/lb
-//   selection identical to pre-P6: Phase C compares match STRUCTURE, not the
-//   encoding trick. Using repref_bits in stream_bit_cost made ob=17 appear
-//   cheaper than ob=19 for terrain, preventing Phase C from upgrading to ob=19.
-//   The actual write_tokens call still encodes RepRef at 13 bits, so all P6
+//   P6 FIX 2 (stream_bit_cost): RepRef counted at backref_total_bits (not
+//   repref_total_bits) so Phase C ob/lb selection is identical to pre-P6.
+//   The actual write_tokens call still encodes RepRef at 13 bits — all P6
 //   savings are preserved in the real output.
+//
+//   P6 FIX 3 (prefer logic): RepRef only fires when rlen >= best_len.
+//   The old ob_beats_lit preference (RepRef wins with rlen == best_len-1)
+//   caused the Phase C constrained scan to produce more tokens than pre-P6
+//   (same cost per token via fix 2 but 1 fewer byte covered per RepRef).
+//   This inflated constrained raw_cost, making ob=19 appear worse than ob=17
+//   for terrain, and choosing wrong ob/lb for 3D formats. Removing ob_beats_lit
+//   makes Phase C comparison identical to pre-P6 (token structure preserved,
+//   only some Backref→RepRef substitutions at equal length which fix 2 treats
+//   identically). Same-length ring hits still save ob-4 bits in write_tokens.
 
 use crate::opcode::{
     Token, LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits, repref_total_bits,
@@ -158,6 +137,14 @@ fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
     len
 }
 
+// Core scanner.
+//
+// P6 FIX 1: ref_worthwhile uses backref_bits for both Backref and RepRef.
+// P6 FIX 3: prefer = rlen >= best_len  (no ob_beats_lit -1 advantage).
+//   RepRef only fires when ring finds equal-or-longer match than hash-chain.
+//   This keeps Phase C token structure identical to pre-P6 (fix 3 + fix 2
+//   together make stream_bit_cost comparison equivalent to pre-P6).
+
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -> (Vec<Token>, bool) {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
@@ -182,7 +169,7 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -
                 let token_bits: u64 = (lit_count * (LIT_TOTAL_BITS as usize)
                     + backref_count * (backref_bits as usize)) as u64;
                 let input_bits: u64 = (i as u64) * 8;
-                let expanding  = token_bits * 100 > input_bits * EXPANSION_BAIL_PCT;
+                let expanding   = token_bits * 100 > input_bits * EXPANSION_BAIL_PCT;
                 let mostly_lits = lit_count * 100 > total_tokens * EXPANSION_LIT_PCT;
                 if expanding && mostly_lits {
                     return (Vec::new(), true);
@@ -195,22 +182,17 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -
             find_match(input, i, h, &head, &prev, max_off, max_len, window_mask, chain_limit);
 
         let mut best_slot: Option<usize> = None;
-        let ob_beats_lit = offset_bits > LIT_TOTAL_BITS;
 
         for (k, &slot_off) in rep_slots.valid().iter().enumerate() {
             if slot_off as usize > max_off { continue; }
             let rlen = rep_match_len(input, i, slot_off, max_len);
             if rlen == 0 { continue; }
 
-            let prefer = if rlen >= best_len {
-                true
-            } else if ob_beats_lit && best_len > 0 && rlen == best_len.saturating_sub(1) {
-                true
-            } else {
-                false
-            };
-
-            if prefer {
+            // P6 FIX 3: only prefer RepRef when it finds an equal-or-longer match.
+            // Removing the ob_beats_lit (-1 length) preference prevents Phase C
+            // ob/lb selection from being biased by artificially shorter RepRef
+            // matches that inflate the constrained scan's token count.
+            if rlen >= best_len {
                 best_offset = slot_off as usize;
                 best_len    = rlen;
                 best_slot   = Some(k);
@@ -218,10 +200,7 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool) -
             }
         }
 
-        // P6 FIX 1: use backref_bits for BOTH Backref and RepRef in the
-        // worthwhile check. RepRef replaces a Backref — it must not create new
-        // short matches that pre-P6 would have emitted as literals.
-        // This keeps minimum effective match length identical to pre-P6.
+        // P6 FIX 1: use backref_bits for BOTH Backref and RepRef.
         let ref_worthwhile = best_len >= 2
             && backref_bits < (best_len as u32 * LIT_TOTAL_BITS);
 
@@ -372,30 +351,22 @@ fn find_match(
 
 // -- Cost helpers -------------------------------------------------------------
 
-/// Raw bit cost of a token stream used for Phase C ob/lb selection.
+/// Raw bit cost for Phase C ob/lb selection.
 ///
-/// P6 FIX 2: RepRef tokens are counted at backref_total_bits(ob, lb), NOT at
-/// repref_total_bits(lb). This makes Phase C selection identical to pre-P6:
-/// it compares match STRUCTURE (which ob/lb window finds more/longer matches),
-/// not the encoding trick (RepRef saves ob-4 bits per ring hit in write_tokens).
-///
-/// Using repref_bits here caused ob=17 to appear cheaper than ob=19 for
-/// delta-filtered terrain (many ring hits at 13 bits each), so Phase C never
-/// upgraded to ob=19. The actual write_tokens call STILL encodes RepRef at
-/// 13 bits — all P6 savings are fully preserved in the real output.
+/// P6 FIX 2: RepRef counted at backref_total_bits(ob, lb) so Phase C sees the
+/// same cost structure as pre-P6. Real write_tokens still encodes RepRef at
+/// repref_total_bits (5+lb) — all P6 savings are preserved in actual output.
 fn stream_bit_cost(tokens: &[Token], ob: u32, lb: u32) -> u64 {
     let br_bits = backref_total_bits(ob, lb) as u64;
     tokens.iter().map(|t| match t {
         Token::Lit { .. }     => LIT_TOTAL_BITS as u64,
         Token::Backref { .. } => br_bits,
-        Token::RepRef { .. }  => br_bits,   // P6 FIX 2: same as Backref for Phase C
+        Token::RepRef { .. }  => br_bits,   // P6 FIX 2
         Token::End            => END_TOTAL_BITS as u64,
     }).sum()
 }
 
-/// Estimated entropy cost of a token stream (used for tiebreaking only).
-/// RepRef still uses its true encoding cost here — tiebreaker is fine with
-/// accurate costs since both candidates are at the same ob/lb.
+/// Estimated entropy cost (tiebreaker only — uses accurate RepRef cost here).
 fn stream_entropy_cost(tokens: &[Token]) -> f64 {
     use std::collections::HashMap;
 
@@ -440,8 +411,6 @@ fn shannon_bits(freq: &std::collections::HashMap<u32, u64>) -> f64 {
         .sum()
 }
 
-// -- Scan result wrapper ------------------------------------------------------
-
 struct ScanResult {
     tokens:   Vec<Token>,
     ob:       u32,
@@ -465,8 +434,7 @@ impl ScanResult {
             let other_e = stream_entropy_cost(&other.tokens);
             println!(
                 "  entropy tiebreaker: {} est={:.0}b vs {} est={:.0}b -> {} wins",
-                self.label, self_e,
-                other.label, other_e,
+                self.label, self_e, other.label, other_e,
                 if self_e < other_e { self.label } else { other.label },
             );
             self_e < other_e
@@ -475,8 +443,6 @@ impl ScanResult {
         }
     }
 }
-
-// -- Fingerprint helpers ------------------------------------------------------
 
 fn sample_entropy_fingerprint(data: &[u8]) -> f64 {
     const SAMPLE: usize = 8192;
@@ -514,8 +480,6 @@ fn fingerprint_predict(data: &[u8]) -> Option<(u32, u32)> {
     println!("  fingerprint Rule 3: default -> ob={} lb={}", BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS);
     Some((BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS))
 }
-
-// -- Ceiling checks -----------------------------------------------------------
 
 fn length_peak_saturated(tokens: &[Token], lb: u32) -> bool {
     let max_len = max_length(lb);
@@ -568,21 +532,17 @@ fn offset_or_upper_half_saturated(tokens: &[Token], ob: u32) -> bool {
         if upper_frac >= CEILING_UPPER_HALF_THRESHOLD {
             println!(
                 "  ceiling check: upper-half {:.1}% >= {:.0}% threshold -- Phase C needed",
-                upper_frac * 100.0,
-                CEILING_UPPER_HALF_THRESHOLD * 100.0,
+                upper_frac * 100.0, CEILING_UPPER_HALF_THRESHOLD * 100.0,
             );
             return true;
         }
         println!(
             "  ceiling check: ok -- upper-half {:.1}% < {:.0}% threshold",
-            upper_frac * 100.0,
-            CEILING_UPPER_HALF_THRESHOLD * 100.0,
+            upper_frac * 100.0, CEILING_UPPER_HALF_THRESHOLD * 100.0,
         );
     }
     false
 }
-
-// -- Phase C inner logic ------------------------------------------------------
 
 fn phase_c_from_baseline(
     baseline:                 ScanResult,
@@ -677,8 +637,6 @@ fn phase_c_from_baseline(
     }
 }
 
-// -- Public API ---------------------------------------------------------------
-
 pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token>, u32, u32, bool) {
 
     if input.len() > PARALLEL_SCAN_THRESHOLD {
@@ -703,7 +661,6 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
                     result.raw_cost,
                 );
 
-                // Step 1: Length peak saturation (HARD, before early exit)
                 if length_peak_saturated(&result.tokens, pred_lb) {
                     println!("  Step 1: length peak -- Phase C required");
                     if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
@@ -714,7 +671,6 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
                         return (tokens, ob, lb, false);
                     }
                 } else {
-                    // Step 1.5: Expansion bail
                     if !skip_incompressible_bail {
                         let input_bits = input.len() as u64 * 8;
                         if result.raw_cost * 100 >= input_bits * EXPANSION_BAIL_PCT {
@@ -727,9 +683,7 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
                         }
                     }
 
-                    // Step 2: Early exit
-                    let phase_b_ratio = result.raw_cost as f64
-                        / (input.len() as f64 * 8.0);
+                    let phase_b_ratio = result.raw_cost as f64 / (input.len() as f64 * 8.0);
 
                     if phase_b_ratio < PHASE_B_EARLY_EXIT_RATIO {
                         println!(
@@ -741,7 +695,6 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
                         return (result.tokens, result.ob, result.lb, false);
                     }
 
-                    // Step 3: Offset peak + upper-half
                     if offset_or_upper_half_saturated(&result.tokens, pred_ob) {
                         println!("  Step 3: offset/upper-half -- Phase C needed");
                         if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {
@@ -760,7 +713,7 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
         }
     }
 
-    // Parallel Phase C path
+    // Parallel Phase C path (files <= 1MB)
     let (baseline, wide_discovery) = if input.len() <= PARALLEL_SCAN_THRESHOLD {
         let ((bt_tokens, bt_bailed), disc) = rayon::join(
             || scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, skip_incompressible_bail),
@@ -810,4 +763,4 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
     let (tokens, ob, lb) =
         phase_c_from_baseline(baseline, wide_discovery, input, skip_incompressible_bail);
     (tokens, ob, lb, false)
-                          }
+}

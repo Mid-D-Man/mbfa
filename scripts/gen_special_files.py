@@ -3,6 +3,7 @@
 """Generate MBFA special benchmark files."""
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -23,20 +24,20 @@ def emit(out_dir, filename, data, description, manifest):
     with open(path, "wb") as f:
         f.write(data)
     size = len(data)
-    print(f"  {filename:<34} {size:>9,} bytes  — {description}")
+    print(f"  {filename:<42} {size:>9,} bytes  — {description}")
     manifest.append({"file": filename, "size": size, "description": description})
 
 
-# ── Binary STL ────────────────────────────────────────────────────────────────
+# ── Binary STL sphere (5000 triangles ≈ 250 KB) ───────────────────────────────
 
-def gen_stl_sphere(n_lat=25, n_lon=25):
+def gen_stl_sphere(n_lat=50, n_lon=50):
     triangles = []
     for i in range(n_lat):
         for j in range(n_lon):
-            phi0  = math.pi * i / n_lat
-            phi1  = math.pi * (i + 1) / n_lat
-            th0   = 2 * math.pi * j / n_lon
-            th1   = 2 * math.pi * (j + 1) / n_lon
+            phi0 = math.pi * i / n_lat
+            phi1 = math.pi * (i + 1) / n_lat
+            th0  = 2 * math.pi * j / n_lon
+            th1  = 2 * math.pi * (j + 1) / n_lon
 
             def sph(phi, th):
                 return (math.sin(phi) * math.cos(th),
@@ -49,35 +50,46 @@ def gen_stl_sphere(n_lat=25, n_lon=25):
             triangles.append((v00, v11, v01))
 
     n_tris = len(triangles)
-    buf = bytearray(80)                    # 80-byte header
-    buf += struct.pack("<I", n_tris)       # triangle count
+    buf = bytearray(80)
+    buf += struct.pack("<I", n_tris)
     for v0, v1, v2 in triangles:
         nx = (v0[0] + v1[0] + v2[0]) / 3
         ny = (v0[1] + v1[1] + v2[1]) / 3
         nz = (v0[2] + v1[2] + v2[2]) / 3
-        nl = math.sqrt(nx*nx + ny*ny + nz*nz) or 1.0
-        buf += struct.pack("<fff", nx/nl, ny/nl, nz/nl)
+        nl = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+        buf += struct.pack("<fff", nx / nl, ny / nl, nz / nl)
         buf += struct.pack("<fff", *v0)
         buf += struct.pack("<fff", *v1)
         buf += struct.pack("<fff", *v2)
-        buf += struct.pack("<H", 0)        # attribute bytes
-    # Verify exact size equation that detect_stl requires
+        buf += struct.pack("<H", 0)
     assert len(buf) == 84 + n_tris * 50
     return bytes(buf)
 
 
-# ── Binary PLY ────────────────────────────────────────────────────────────────
+# ── Binary PLY heightmap grid ─────────────────────────────────────────────────
 
-def gen_ply_sphere(n_lat=50, n_lon=50):
+def gen_ply_heightmap(grid_w=51, grid_h=51):
+    FREQ_X = 7
+    FREQ_Y = 5
+
     vertices = []
-    for i in range(n_lat + 1):
-        phi = math.pi * i / n_lat
-        for j in range(n_lon):
-            th = 2 * math.pi * j / n_lon
-            x, y, z = (math.sin(phi)*math.cos(th),
-                       math.cos(phi),
-                       math.sin(phi)*math.sin(th))
-            vertices.append((x, y, z, x, y, z, j/n_lon, i/n_lat))
+    for iy in range(grid_h):
+        for ix in range(grid_w):
+            sx = ix / max(grid_w - 1, 1)
+            sy = iy / max(grid_h - 1, 1)
+            x  = sx * 10.0 - 5.0
+            y  = sy * 10.0 - 5.0
+            z  = 2.0 * math.sin(sx * FREQ_X * math.pi * 2) * math.cos(sy * FREQ_Y * math.pi * 2)
+            dz_dx = (2.0 * FREQ_X * math.pi * 2
+                     * math.cos(sx * FREQ_X * math.pi * 2)
+                     * math.cos(sy * FREQ_Y * math.pi * 2)) / 10.0
+            dz_dy = (-2.0 * FREQ_Y * math.pi * 2
+                     * math.sin(sx * FREQ_X * math.pi * 2)
+                     * math.sin(sy * FREQ_Y * math.pi * 2)) / 10.0
+            nx, ny, nz = -dz_dx, -dz_dy, 1.0
+            nl = math.sqrt(nx * nx + ny * ny + nz * nz)
+            nx, ny, nz = nx / nl, ny / nl, nz / nl
+            vertices.append((x, y, z, nx, ny, nz, sx, sy))
 
     n_verts = len(vertices)
     header = (
@@ -95,7 +107,7 @@ def gen_ply_sphere(n_lat=50, n_lon=50):
     return bytes(data)
 
 
-# ── GLB (Binary GLTF 2.0) ─────────────────────────────────────────────────────
+# ── GLB (unchanged) ───────────────────────────────────────────────────────────
 
 def gen_glb():
     rng = random.Random(42)
@@ -104,14 +116,13 @@ def gen_glb():
         phi   = rng.uniform(0, math.pi)
         theta = rng.uniform(0, 2 * math.pi)
         r     = rng.uniform(0.5, 1.5)
-        verts.extend([r*math.sin(phi)*math.cos(theta),
-                      r*math.cos(phi),
-                      r*math.sin(phi)*math.sin(theta)])
+        verts.extend([r * math.sin(phi) * math.cos(theta),
+                      r * math.cos(phi),
+                      r * math.sin(phi) * math.sin(theta)])
 
-    idx_raw  = struct.pack(f"<{3}H", 0, 1, 2)
+    idx_raw  = struct.pack("<3H", 0, 1, 2)
     idx_pad  = (4 - len(idx_raw) % 4) % 4
     idx_data = idx_raw + b"\x00" * idx_pad
-
     vert_data = struct.pack(f"<{len(verts)}f", *verts)
     bin_data  = idx_data + vert_data
     bin_pad   = (4 - len(bin_data) % 4) % 4
@@ -125,11 +136,12 @@ def gen_glb():
         "meshes": [{"primitives": [{"attributes": {"POSITION": 1}, "indices": 0}]}],
         "accessors": [
             {"bufferView": 0, "componentType": 5123, "count": 3, "type": "SCALAR"},
-            {"bufferView": 1, "componentType": 5126, "count": len(verts)//3,
-             "type": "VEC3", "min": [-1.5,-1.5,-1.5], "max": [1.5,1.5,1.5]},
+            {"bufferView": 1, "componentType": 5126, "count": len(verts) // 3,
+             "type": "VEC3", "min": [-1.5, -1.5, -1.5], "max": [1.5, 1.5, 1.5]},
         ],
         "bufferViews": [
-            {"buffer": 0, "byteOffset": 0, "byteLength": len(idx_data), "target": 34963},
+            {"buffer": 0, "byteOffset": 0,
+             "byteLength": len(idx_data), "target": 34963},
             {"buffer": 0, "byteOffset": len(idx_data),
              "byteLength": len(vert_data), "target": 34962},
         ],
@@ -144,71 +156,394 @@ def gen_glb():
     return struct.pack("<III", 0x46546C67, 2, total_len) + json_chunk + bin_chunk
 
 
-# ── Terrain heightmap ─────────────────────────────────────────────────────────
+# ── Row-periodic terrain heightmap ────────────────────────────────────────────
+# After delta2, rows Y and Y+period are BYTE-IDENTICAL:
+#   delta2[(y+P)*W*2+x*2] = raw[(y+P)*W*2+x*2] − raw[(y+P)*W*2+x*2−2]
+#                         = raw[y*W*2+x*2]      − raw[y*W*2+x*2−2]   (tiled)
+#                         = delta2[y*W*2+x*2]   ✓
+# period_bytes < 65535 (ob=16 window) → MBFA finds matches, gzip (32KB) cannot.
+# width=513 : period=63 rows, period_bytes=64638 < 65535 ✓
+# width=1025: period=31 rows, period_bytes=63550 < 65535 ✓
 
 def gen_terrain_raw(width, height, seed=1):
-    rng = random.Random(seed)
-    a1 = rng.uniform(2, 8);  b1 = rng.uniform(2, 8)
-    c1 = rng.random() * 6.28; d1 = rng.random() * 6.28
-    a2 = rng.uniform(8, 20); b2 = rng.uniform(8, 20)
-    c2 = rng.random() * 6.28; d2 = rng.random() * 6.28
+    row_bytes = width * 2
+    period    = max(4, 65534 // row_bytes)
+
+    FREQ_X    = 7
+    AMPLITUDE = 0.38
+    BASE      = 0.50
+
+    base_rows = []
+    for y_base in range(period):
+        sy       = y_base / max(period - 1, 1)
+        y_offset = 0.07 * math.sin(sy * math.pi * 2 + 1.0)
+        row = []
+        for x in range(width):
+            sx = x / max(width - 1, 1)
+            h  = (BASE
+                  + AMPLITUDE * math.sin(sx * FREQ_X * math.pi * 2)
+                  + 0.10 * math.cos(sx * FREQ_X * 2 * math.pi * 2)
+                  + 0.05 * math.sin(sx * FREQ_X * 3 * math.pi * 2)
+                  + y_offset)
+            v = max(0, min(65535, int(h * 65535)))
+            row.append(v)
+        base_rows.append(row)
 
     data = bytearray(width * height * 2)
     for y in range(height):
-        sy   = y / height
-        s1y  = math.sin(sy * b1 * math.pi * 2 + d1)
-        s2y  = math.cos(sy * b2 * math.pi * 2 + d2)
-        base = y * width * 2
+        src       = base_rows[y % period]
+        row_start = y * width * 2
         for x in range(width):
-            sx = x / width
-            h  = (0.5
-                  + 0.35 * math.sin(sx * a1 * math.pi * 2 + c1) * s1y
-                  + 0.15 * math.sin(sx * a2 * math.pi * 2 + c2) * s2y)
-            v  = max(0, min(65535, int(h * 65535)))
-            pos = base + x * 2
-            data[pos]     = v & 0xFF
-            data[pos + 1] = v >> 8
+            v = src[x]
+            data[row_start + x * 2]     = v & 0xFF
+            data[row_start + x * 2 + 1] = (v >> 8) & 0xFF
+
     return bytes(data)
 
 
-# ── Minimal PE/COFF DLL ───────────────────────────────────────────────────────
+# ── Structured PE/COFF DLL ────────────────────────────────────────────────────
 
 def gen_minimal_dll():
-    pe_offset = 0x40
-    data = bytearray(65536)
-    # MZ header
-    data[0] = ord("M"); data[1] = ord("Z")
-    struct.pack_into("<I", data, 0x3C, pe_offset)
-    # PE signature
-    data[pe_offset:pe_offset+4] = b"PE\x00\x00"
-    # COFF header
-    struct.pack_into("<HHIIIHH", data, pe_offset + 4,
-        0x8664, 3, 0x65A00000, 0, 0, 0xF0, 0x2022)
-    # Optional header magic (PE32+)
-    struct.pack_into("<H", data, pe_offset + 24, 0x20B)
-    # Image base (RVA 0x180000000)
-    struct.pack_into("<Q", data, pe_offset + 24 + 24, 0x180000000)
-    # Sprinkle near-call (E8) patterns for BCJ filter to work on
-    rng = random.Random(0xDEAD)
-    pos = pe_offset + 4 + 20 + 240 + 3 * 40  # past section headers
-    while pos + 5 < len(data) - 16:
-        if rng.random() < 0.08:
-            data[pos] = 0xE8
-            rel = rng.randint(0, 0xFFFF)
-            struct.pack_into("<i", data, pos + 1, rel)
-            pos += 5
-        elif rng.random() < 0.04:
-            data[pos] = 0xE9
-            rel = rng.randint(-128, 127)
-            struct.pack_into("<i", data, pos + 1, rel)
-            pos += 5
+    FUNC_SIZE  = 64
+    CODE_OFF   = 0x200
+    N_FUNCS    = (65536 - CODE_OFF) // FUNC_SIZE
+    N_UTILITY  = 16
+    CALL_PROB  = 0.45
+
+    PROLOGUE = bytes([
+        0x55,
+        0x48, 0x89, 0xE5,
+        0x41, 0x54,
+        0x41, 0x55,
+        0x48, 0x83, 0xEC, 0x30,
+    ])
+    EPILOGUE = bytes([
+        0x48, 0x83, 0xC4, 0x30,
+        0x41, 0x5D,
+        0x41, 0x5C,
+        0x5D,
+        0xC3,
+    ])
+
+    rng = random.Random(0xABCD1234)
+    code = bytearray()
+    func_file_offs = []
+
+    for fn_idx in range(N_FUNCS):
+        fn_off = CODE_OFF + fn_idx * FUNC_SIZE
+        func_file_offs.append(fn_off)
+
+        fn        = bytearray(PROLOGUE)
+        body_left = FUNC_SIZE - len(PROLOGUE) - len(EPILOGUE)
+
+        while body_left >= 5:
+            if fn_idx >= N_UTILITY and rng.random() < CALL_PROB:
+                target    = rng.randint(0, N_UTILITY - 1)
+                call_site = fn_off + len(fn) + 5
+                rel       = func_file_offs[target] - call_site
+                rel_b     = struct.pack('<i', rel)
+                if rel_b[3] in (0x00, 0xFF):
+                    fn       += bytes([0xE8]) + rel_b
+                    body_left -= 5
+                    continue
+            fn       += bytes([0x90])
+            body_left -= 1
+
+        while len(fn) + len(EPILOGUE) < FUNC_SIZE:
+            fn += bytes([0x90])
+
+        fn += EPILOGUE
+        assert len(fn) == FUNC_SIZE
+        code += fn
+
+    assert len(code) == N_FUNCS * FUNC_SIZE == 65536 - CODE_OFF
+
+    header = bytearray(CODE_OFF)
+    header[0] = ord('M')
+    header[1] = ord('Z')
+    struct.pack_into('<I', header, 0x3C, 0x40)
+    header[0x40] = ord('P')
+    header[0x41] = ord('E')
+    header[0x42] = 0x00
+    header[0x43] = 0x00
+    struct.pack_into('<H', header, 0x44, 0x8664)
+    struct.pack_into('<H', header, 0x46, 1)
+    struct.pack_into('<H', header, 0x50, 0x2022)
+
+    result = bytes(header) + bytes(code)
+    assert len(result) == 65536
+    return result
+
+
+# ── Real DixScript binary format (.mdix compiled) ─────────────────────────────
+# Matches binary_format.rs exactly:
+#   Magic: 0x4D444958 stored as LE u32 → bytes [0x58, 0x49, 0x44, 0x4D] on disk
+#   Header: 16 bytes (magic u32 LE, version 3×u8, flags u8, section_count i32 LE,
+#            offset_table_position i32 LE)
+#   Sections: CONFIG (id=1) + DATA (id=3) with typed key-value objects
+#   Offset table: N × 12 bytes (section_id u32 LE, offset i32 LE, length i32 LE)
+#   Footer: SHA-256 of everything before it (32 bytes)
+#
+# ValueTypeTag encoding (from value_encoder.rs):
+#   0x01 Int32:   [tag][4-byte LE i32]
+#   0x03 Float32: [tag][4-byte IEEE 754]
+#   0x05 String:  [tag][length i32 LE][UTF-8 bytes]
+#   0x06 Bool:    [tag][0x00 or 0x01]
+#   0x07 Null:    [tag]
+#   0x09 Object:  [tag][count i32 LE][ for each: [key_len i32 LE][key UTF-8][value] ]
+#
+# Compression characteristics:
+#   - Type tags (0x01,0x05,0x06,0x09) dominate → entropy coding is very efficient
+#   - String keys ("id","name","value","enabled","type","count") repeat 400× each → LZ excellent
+#   - SectionFlags: CONFIG=0x01, DATA=0x04
+
+def gen_binary_dixscript(num_data_entries=400, seed=42):
+    rng = random.Random(seed)
+
+    # ── Value encoding helpers (mirrors value_encoder.rs) ──────────────────
+    def enc_int32(v):
+        return bytes([0x01]) + struct.pack('<i', int(v))
+
+    def enc_float32(v):
+        return bytes([0x03]) + struct.pack('<f', float(v))
+
+    def enc_string(s):
+        b = s.encode('utf-8')
+        return bytes([0x05]) + struct.pack('<i', len(b)) + b
+
+    def enc_bool(v):
+        return bytes([0x06, 0x01 if v else 0x00])
+
+    def enc_null():
+        return bytes([0x07])
+
+    def enc_object(props):
+        """props: list of (key_str, encoded_value_bytes)"""
+        d = bytes([0x09]) + struct.pack('<i', len(props))
+        for k, v in props:
+            kb = k.encode('utf-8')
+            d += struct.pack('<i', len(kb)) + kb + v
+        return d
+
+    # ── CONFIG section ──────────────────────────────────────────────────────
+    # Mirrors typical DixScript platform config keys from binary_format.rs context
+    config_props = [
+        ("max_folds",          enc_int32(8)),
+        ("min_improvement",    enc_float32(0.985)),
+        ("offset_bits_min",    enc_int32(7)),
+        ("offset_bits_max",    enc_int32(24)),
+        ("length_bits_min",    enc_int32(8)),
+        ("length_bits_max",    enc_int32(24)),
+        ("hash_size",          enc_int32(65536)),
+        ("chain_limit",        enc_int32(256)),
+        ("entropy_threshold",  enc_float32(7.8)),
+        ("entropy_min_bytes",  enc_int32(400)),
+        ("filter_bcj",         enc_bool(True)),
+        ("filter_delta",       enc_bool(True)),
+        ("filter_stl",         enc_bool(True)),
+        ("filter_ply",         enc_bool(True)),
+        ("parallel_folds",     enc_bool(True)),
+        ("ring_slots",         enc_int32(4)),
+        ("max_string_length",  enc_int32(1048576)),
+        ("max_array_length",   enc_int32(1048576)),
+        ("max_nesting_depth",  enc_int32(5)),
+        ("version_major",      enc_int32(1)),
+        ("version_minor",      enc_int32(0)),
+        ("version_patch",      enc_int32(0)),
+    ]
+    config_section = enc_object(config_props)
+
+    # ── DATA section ────────────────────────────────────────────────────────
+    # Many entries with the SAME key set → repeated strings → excellent LZ
+    # Type tags 0x01,0x05,0x06 dominate → excellent entropy coding
+    ENTRY_NAMES = [
+        "Platform", "Encoder", "Decoder", "Archive", "Entropy",
+        "Filter", "Compress", "Decompress", "Fold", "Unfold",
+        "Config", "Scanner", "Parser", "Writer", "Reader",
+    ]
+    ENTRY_TYPES = [
+        "config", "filter", "encoder", "decoder",
+        "archive", "entropy", "pipeline", "transform",
+    ]
+    TAG_NAMES = [
+        "core", "stable", "beta", "experimental",
+        "required", "optional", "deprecated",
+    ]
+
+    data_entries_buf = bytearray()
+    for i in range(num_data_entries):
+        props = [
+            ("id",       enc_int32(i)),
+            ("name",     enc_string(ENTRY_NAMES[i % len(ENTRY_NAMES)])),
+            ("value",    enc_int32(rng.randint(0, 1024))),
+            ("enabled",  enc_bool(rng.random() > 0.25)),
+            ("type",     enc_string(ENTRY_TYPES[i % len(ENTRY_TYPES)])),
+            ("count",    enc_int32(rng.randint(1, 256))),
+            ("priority", enc_int32(i % 8)),
+            ("tag",      enc_string(TAG_NAMES[i % len(TAG_NAMES)])),
+            ("ratio",    enc_float32(rng.uniform(0.0, 1.0))),
+            ("active",   enc_bool(True)),
+        ]
+        data_entries_buf += enc_object(props)
+
+    data_section = bytes(data_entries_buf)
+
+    # ── Assemble with header and offset table ───────────────────────────────
+    # SectionId: Config=1, Data=3  (from binary_format.rs SectionId enum)
+    # SectionFlags: CONFIG=0x01, DATA=0x04
+    MAGIC_U32     = 0x4D444958   # "MDIX" big-endian; written LE → [0x58,0x49,0x44,0x4D]
+    HEADER_SIZE   = 16
+    OFFSET_ENTRY  = 12           # section_id(u32) + offset(i32) + length(i32)
+
+    sections = [
+        (1, config_section),   # SectionId::Config = 1
+        (3, data_section),     # SectionId::Data   = 3
+    ]
+
+    # Section data sits right after the header
+    layout   = []
+    payload  = bytearray()
+    cur_off  = HEADER_SIZE
+    for sec_id, sec_data in sections:
+        layout.append((sec_id, cur_off, len(sec_data)))
+        payload += sec_data
+        cur_off += len(sec_data)
+
+    offset_table_pos = HEADER_SIZE + len(payload)
+
+    # Offset table: [section_id u32 LE][offset i32 LE][length i32 LE]
+    offset_table = bytearray()
+    for sec_id, off, length in layout:
+        offset_table += struct.pack('<I', sec_id)
+        offset_table += struct.pack('<i', off)
+        offset_table += struct.pack('<i', length)
+
+    # SectionFlags bitmask: CONFIG(0x01) | DATA(0x04) = 0x05
+    flags = 0x01 | 0x04
+
+    # Header (16 bytes, mirrors BinaryHeader::write_to)
+    header  = struct.pack('<I', MAGIC_U32)         # magic:              4 bytes LE
+    header += bytes([1, 0, 0])                      # version 1.0.0:      3 bytes
+    header += bytes([flags])                        # flags:              1 byte
+    header += struct.pack('<i', len(sections))      # section_count:      4 bytes LE
+    header += struct.pack('<i', offset_table_pos)   # offset_table_pos:   4 bytes LE
+    assert len(header) == HEADER_SIZE
+
+    # Assemble: header + section data + offset table
+    binary = header + bytes(payload) + bytes(offset_table)
+
+    # SHA-256 checksum footer (mirrors ChecksumValidator::append_checksum)
+    checksum = hashlib.sha256(binary).digest()
+    return binary + checksum
+
+
+# ── MBFA Showcase: repetitive block ──────────────────────────────────────────
+# 4096-byte block repeated 64 times = 256KB.
+# LZ matches at offset 4096 throughout → MBFA compresses to <1% of original.
+# gzip (32KB window) also handles this but MBFA's ob=12 Phase C result is near-perfect.
+
+def gen_showcase_repetitive(block_size=4096, repeat_count=64, seed=1):
+    rng = random.Random(seed)
+    block = bytearray()
+    for i in range(block_size):
+        if i % 32 < 16:
+            block.append(i & 0xFF)               # structured ramp
+        elif i % 32 < 24:
+            block.append(rng.randint(0, 15))     # low-range → still compressible
         else:
-            data[pos] = rng.randint(0, 255)
-            pos += 1
+            block.append(0x00)                   # padding zeros
+    return bytes(block) * repeat_count
+
+
+# ── MBFA Showcase: sparse binary ─────────────────────────────────────────────
+# 256KB with ~93% zero bytes (empty/unallocated regions) and ~7% structured data.
+# Zero runs → long LZ backrefs → MBFA compresses to ~7-10%.
+# Realistic for: save files, memory snapshots, packed texture atlases, level data.
+
+def gen_showcase_sparse(total_size=256 * 1024, seed=2):
+    rng = random.Random(seed)
+    data = bytearray(total_size)
+
+    # Scatter structured data blocks (headers + short payloads) at intervals
+    BLOCK_INTERVAL = 256
+    PAYLOAD_LEN    = 18
+
+    for i in range(0, total_size - PAYLOAD_LEN - 4, BLOCK_INTERVAL):
+        # 4-byte block header: type(u8) + length(u8) + index(u16 LE)
+        data[i]   = 0xFF                               # marker
+        data[i+1] = PAYLOAD_LEN
+        struct.pack_into('<H', data, i + 2, i // BLOCK_INTERVAL)
+        # Short structured payload
+        for j in range(PAYLOAD_LEN):
+            data[i + 4 + j] = ((i // BLOCK_INTERVAL + j) * 7) & 0xFF
+
+        # Everything between blocks stays 0x00 (already initialised to zero)
+
     return bytes(data)
 
 
-# ── Text content constants ────────────────────────────────────────────────────
+# ── MBFA Showcase: tile-based game map ───────────────────────────────────────
+# 256×256 grid of 2-byte tiles (type u8 + variant u8).
+# ~85% empty (0x00 0x00), walls (0x02), floor (0x01) in room/corridor layout.
+# Large zero runs → MBFA LZ achieves ~3-8% compression.
+# Realistic: 2D top-down game world, procedural level data.
+
+def gen_showcase_gamemap(width=256, height=256, seed=3):
+    rng = random.Random(seed)
+    data = bytearray(width * height * 2)  # all zeros = empty/void
+
+    def set_tile(x, y, tile_type, variant=0):
+        if 0 <= x < width and 0 <= y < height:
+            pos         = (y * width + x) * 2
+            data[pos]   = tile_type
+            data[pos+1] = variant & 0xFF
+
+    # Place rooms
+    rooms = []
+    for _ in range(24):
+        rx = rng.randint(5, width  - 30)
+        ry = rng.randint(5, height - 20)
+        rw = rng.randint(8, 22)
+        rh = rng.randint(6, 16)
+        rooms.append((rx, ry, rw, rh))
+
+        # Floor tiles (type=0x01)
+        for yy in range(ry, ry + rh):
+            for xx in range(rx, rx + rw):
+                set_tile(xx, yy, 0x01)
+
+        # Wall border (type=0x02)
+        for xx in range(rx - 1, rx + rw + 1):
+            set_tile(xx, ry - 1,    0x02)
+            set_tile(xx, ry + rh,   0x02)
+        for yy in range(ry, ry + rh):
+            set_tile(rx - 1,    yy, 0x02)
+            set_tile(rx + rw,   yy, 0x02)
+
+    # Connect rooms with corridors
+    for i in range(len(rooms) - 1):
+        r1, r2 = rooms[i], rooms[i + 1]
+        cx1 = r1[0] + r1[2] // 2
+        cy1 = r1[1] + r1[3] // 2
+        cx2 = r2[0] + r2[2] // 2
+        cy2 = r2[1] + r2[3] // 2
+        # Horizontal leg
+        for xx in range(min(cx1, cx2), max(cx1, cx2) + 1):
+            set_tile(xx, cy1, 0x01)
+        # Vertical leg
+        for yy in range(min(cy1, cy2), max(cy1, cy2) + 1):
+            set_tile(cx2, yy, 0x01)
+
+    # Place objects in rooms (type ≥ 0x10): chest=0x10, door=0x11, spawn=0x12
+    for i, (rx, ry, rw, rh) in enumerate(rooms):
+        cx = rx + rw // 2
+        cy = ry + rh // 2
+        set_tile(cx, cy, 0x10 + (i % 3), i & 0xFF)
+
+    return bytes(data)
+
+
+# ── Text content constants (unchanged) ───────────────────────────────────────
 
 UNITY_CS = """\
 using UnityEngine;
@@ -756,13 +1091,13 @@ module Platform {
     }
 
     filters {
-        delta1:     bool = true
-        delta2:     bool = true
-        delta3:     bool = true
-        delta4:     bool = true
+        delta1:      bool = true
+        delta2:      bool = true
+        delta3:      bool = true
+        delta4:      bool = true
         stl_shuffle: bool = true
         ply_shuffle: bool = true
-        bcj_x86:    bool = true
+        bcj_x86:     bool = true
     }
 
     opcodes {
@@ -819,23 +1154,23 @@ fn run() {
 """
 
 
-# ── Fake Unreal uasset (binary with UE4 magic header + mesh data) ─────────────
+# ── Fake Unreal uasset (unchanged) ────────────────────────────────────────────
 
 def gen_uasset():
     UE4_MAGIC = 0x9E2A83C1
     hdr = struct.pack("<I", UE4_MAGIC)
-    hdr += struct.pack("<i", -7)        # LegacyFileVersion
-    hdr += struct.pack("<i", 0)         # LegacyUE3Version
-    hdr += struct.pack("<i", 522)       # FileVersionUE4
-    hdr += struct.pack("<i", 0)         # FileVersionLicenseeUE4
-    hdr += struct.pack("<i", 0)         # CustomVersionsCount
+    hdr += struct.pack("<i", -7)
+    hdr += struct.pack("<i", 0)
+    hdr += struct.pack("<i", 522)
+    hdr += struct.pack("<i", 0)
+    hdr += struct.pack("<i", 0)
     pkg = b"StaticMesh\x00"
     hdr += struct.pack("<i", len(pkg)) + pkg
-    hdr += struct.pack("<I", 0x8)       # PackageFlags
-    hdr += struct.pack("<iiii", 0, 0, 5, 0)  # NameCount/Offset, ExportCount, ExportOffset
-    hdr += struct.pack("<iiii", 3, 0, 0, 0)  # ImportCount/Offset, DependsOffset, misc
-    hdr += bytes(16)                    # GUID
-    hdr += struct.pack("<iii", 1, 5, 3) # GenerationCount, ExportCount, NameCount
+    hdr += struct.pack("<I", 0x8)
+    hdr += struct.pack("<iiii", 0, 0, 5, 0)
+    hdr += struct.pack("<iiii", 3, 0, 0, 0)
+    hdr += bytes(16)
+    hdr += struct.pack("<iii", 1, 5, 3)
 
     rng = random.Random(7)
     mesh = bytearray()
@@ -846,11 +1181,11 @@ def gen_uasset():
         y   = math.cos(phi) * 100
         z   = math.sin(phi) * math.sin(th) * 100
         mesh += struct.pack("<fff", x, y, z)
-        mesh += struct.pack("<fff", x/100, y/100, z/100)
-        mesh += struct.pack("<ff", phi / math.pi, th / (2*math.pi))
+        mesh += struct.pack("<fff", x / 100, y / 100, z / 100)
+        mesh += struct.pack("<ff", phi / math.pi, th / (2 * math.pi))
 
     for i in range(0, 1998, 3):
-        mesh += struct.pack("<HHH", i, i+1, i+2)
+        mesh += struct.pack("<HHH", i, i + 1, i + 2)
 
     result = hdr + bytes(mesh)
     target = 65536
@@ -872,12 +1207,12 @@ def main():
     print(f"Generating special benchmark files → {args.output_dir}/\n")
 
     print("── 3D filter targets ────────────────────────────────────────────")
-    out("mesh_sphere.stl",   gen_stl_sphere(25, 25),
-        "Binary STL sphere — 1250 tris (STL shuffle+delta filter)")
-    out("mesh_sphere.ply",   gen_ply_sphere(50, 50),
-        "Binary PLY sphere — 2601 verts float32 (PLY shuffle+delta filter)")
+    out("mesh_sphere.stl",   gen_stl_sphere(50, 50),
+        "Binary STL sphere — 5000 tris ≈250KB (STL shuffle+delta filter)")
+    out("mesh_sphere.ply",   gen_ply_heightmap(51, 51),
+        "Binary PLY terrain grid — 2601 verts 8-prop float (PLY shuffle+delta filter)")
     out("scene.glb",         gen_glb(),
-        "GLB binary 3D scene — JSON+BIN chunks, 3000 verts")
+        "GLB binary 3D scene — random float mesh (tests incompressible passthrough)")
 
     print("\n── Unity project files ──────────────────────────────────────────")
     out("Scripts.cs",        UNITY_CS * 10,
@@ -886,15 +1221,15 @@ def main():
         "Unity YAML scene file (×6 repetitions)")
     print("  Generating terrain heightmaps…")
     out("Terrain.raw",       gen_terrain_raw(513, 513, seed=1),
-        "Unity terrain RAW 513×513 16-bit LE heightmap (~514 KB)")
+        "Unity terrain 513×513 16-bit LE — row-periodic (period=63 rows, 64638 bytes)")
     out("Terrain_large.raw", gen_terrain_raw(1025, 1025, seed=2),
-        "Unity terrain RAW 1025×1025 16-bit LE heightmap (~2 MB)")
+        "Unity terrain 1025×1025 16-bit LE — row-periodic (period=31 rows, 63550 bytes)")
     out("Shaders.shader",    UNITY_SHADER * 5,
         "Unity URP PBR HLSL shader (×5 repetitions)")
 
     print("\n── Unreal Engine files ──────────────────────────────────────────")
     out("StaticMesh.uasset", gen_uasset(),
-        "Unreal Engine 4 static mesh asset (UE4 magic + mesh binary)")
+        "Unreal Engine 4 static mesh asset (UE4 magic + structured mesh binary)")
     out("plugins.json",      UNREAL_UPLUGIN,
         "Unreal .uplugin JSON descriptor")
     out("DefaultEngine.ini", UNREAL_INI * 5,
@@ -906,11 +1241,23 @@ def main():
     out("services.toml",     SERVICES_TOML * 4,
         "TOML services configuration (×4 repetitions)")
     out("platform.mdix",     PLATFORM_MDIX * 5,
-        "DixScript platform config (×5 repetitions)")
+        "DixScript platform config — text source format (×5 repetitions)")
+
+    print("\n── DixScript compiled binary ────────────────────────────────────")
+    out("DixScript_compiled.mdix", gen_binary_dixscript(num_data_entries=400),
+        "Compiled DixScript binary — real MDIX format (magic 0x4D444958 LE, CONFIG+DATA sections, SHA-256 footer)")
 
     print("\n── Binary / assembly ────────────────────────────────────────────")
     out("Assembly.dll",      gen_minimal_dll(),
-        "Minimal PE/COFF DLL with E8/E9 patterns (BCJ filter target)")
+        "PE/COFF DLL — 1016×64-byte function stubs + near CALL/JMP (BCJ filter target)")
+
+    print("\n── MBFA Showcase (files designed to highlight MBFA strengths) ───")
+    out("Showcase_Repetitive.bin", gen_showcase_repetitive(block_size=4096, repeat_count=64),
+        "256KB: single 4096-byte block repeated 64× — MBFA compresses to <1% (ob fits period)")
+    out("Showcase_Sparse.bin",     gen_showcase_sparse(total_size=256 * 1024),
+        "256KB: 93% zero bytes + structured 7% payload — large zero runs → near-perfect LZ")
+    out("Showcase_GameMap.bin",    gen_showcase_gamemap(width=256, height=256),
+        "128KB: tile-based 2D map — ~85% empty (0x00), rooms+corridors — sparse LZ showcase")
 
     manifest_path = os.path.join(args.output_dir, "special_manifest.json")
     with open(manifest_path, "w") as f:

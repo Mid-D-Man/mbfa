@@ -8,23 +8,24 @@
 //!   bcj    — x86 BCJ normalisation for PE/COFF executables (flag 9)
 //!   probe  — multi-stride entropy probe + WAV/BMP stride detection helpers
 //!
-//! Filter flags stored in header byte 3:
+//! Filter flags (header byte 3):
 //!   0 = none
-//!   1 = delta stride 1    (generic 8-bit binary)
-//!   2 = delta stride 2    (16-bit mono PCM / 16-bit pixels)
-//!   3 = delta stride 3    (24-bit RGB)
-//!   4 = delta stride 4    (32-bit RGBA / stereo 16-bit PCM)
+//!   1 = delta stride 1
+//!   2 = delta stride 2
+//!   3 = delta stride 3
+//!   4 = delta stride 4
 //!   7 = STL: byte-plane shuffle × 4 + per-plane delta1
 //!   8 = PLY: byte-plane shuffle × 4 + per-plane delta1
-//!   9 = x86 BCJ (xz-style): E8/E9 rel→abs, MSByte gate, 25-bit normalisation
+//!   9 = x86 BCJ for PE/COFF executables
 //!
 //! Detection order:
 //!   1. Binary STL  — exact size equation               → flag 7
 //!   2. WAV/RIFF    — "RIFF....WAVE" magic              → flag 1–4
 //!   3. BMP         — "BM" magic                        → flag 1–4
 //!   4. Binary PLY  — "ply\n" + binary_little_endian    → flag 8
-//!   5. PE/COFF     — "MZ" + PE offset + "PE\0\0"       → flag 9
-//!   6. Stride probe — 8 KB entropy sample, threshold 0.45 bits/byte → best of 1–4
+//!   5. DixScript binary — magic 0x4D444958 LE          → flag 0 (FILTER_NONE, skip probe)
+//!   6. PE/COFF     — "MZ" + PE offset + "PE\0\0"       → flag 9
+//!   7. Stride probe — 8 KB entropy, threshold 0.45     → best of 1–4
 
 pub mod delta;
 pub mod stl;
@@ -49,21 +50,30 @@ pub const FILTER_DELTA1:         u8 = 1;
 pub const FILTER_DELTA2:         u8 = 2;
 pub const FILTER_DELTA3:         u8 = 3;
 pub const FILTER_DELTA4:         u8 = 4;
-// flags 5 and 6 were the old simple (non-compound) STL/PLY shuffles — removed.
-/// STL: byte-plane shuffle + per-plane delta1.
 pub const FILTER_SHUFFLE4_DELTA: u8 = 7;
-/// PLY: byte-plane shuffle + per-plane delta1.
 pub const FILTER_PLY_DELTA:      u8 = 8;
-/// x86 BCJ normalisation for PE/COFF binaries (xz-style).
 pub const FILTER_BCJ:            u8 = 9;
+
+/// DixScript binary format magic number: `0x4D444958` ("MDIX" big-endian)
+/// stored on disk as little-endian u32 → bytes [0x58, 0x49, 0x44, 0x4D].
+///
+/// This is a typed key-value data format (CONFIG / ENUMS / DATA / SECURITY sections
+/// with value tags 0x01–0x0F).  No transform is applied — FILTER_NONE is returned
+/// so the stride probe is skipped and MBFA's LZ+entropy path handles it directly.
+///
+/// Why no transform:
+///   • The format contains typed values (not numeric streams) → delta unhelpful.
+///   • No x86 CALL/JMP opcodes → BCJ inappropriate.
+///   • Type tags (0x01–0x0F) are low-range → entropy coding extremely efficient.
+///   • Repeated string keys ("id","name","value"…) → LZ excellent without pre-filter.
+const DIXSCRIPT_MAGIC_BYTES: [u8; 4] = [0x58, 0x49, 0x44, 0x4D]; // 0x4D444958 as LE u32
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Inspect magic bytes and file structure to determine the best pre-filter.
 pub fn detect_filter(input: &[u8]) -> u8 {
     if input.len() < 12 { return FILTER_NONE; }
 
-    // 1. Binary STL — exact size equation (no magic bytes).
+    // 1. Binary STL
     if input.len() >= 84 && detect_stl(input).is_some() {
         println!("Binary STL detected → FILTER_SHUFFLE4_DELTA (compound)");
         return FILTER_SHUFFLE4_DELTA;
@@ -85,13 +95,23 @@ pub fn detect_filter(input: &[u8]) -> u8 {
         return FILTER_PLY_DELTA;
     }
 
-    // 5. PE/COFF (must precede stride probe — stride probe may fire on .text section).
+    // 5. DixScript binary (.mdix compiled, magic 0x4D444958 written as LE u32).
+    //    On-disk bytes: [0x58, 0x49, 0x44, 0x4D].
+    //    No transform — LZ+entropy handles the typed key-value structure directly.
+    //    Returning FILTER_NONE here (before the stride probe) prevents the probe
+    //    from incorrectly firing on the value-tag byte patterns.
+    if input.len() >= 16 && input[0..4] == DIXSCRIPT_MAGIC_BYTES {
+        println!("DixScript binary (.mdix compiled) detected — MDIX magic 0x4D444958 → FILTER_NONE");
+        return FILTER_NONE;
+    }
+
+    // 6. PE/COFF
     if detect_pe_coff(input) {
         println!("PE/COFF binary detected → FILTER_BCJ");
         return FILTER_BCJ;
     }
 
-    // 6. Multi-stride entropy probe (headerless strided binary: terrain, raw PCM, etc.).
+    // 7. Multi-stride entropy probe
     if input.len() >= PROBE_MIN_BYTES {
         let (best_filter, improvement) = probe_best_stride(input);
         if improvement >= PROBE_DELTA_THRESHOLD {
@@ -114,7 +134,6 @@ pub fn detect_filter(input: &[u8]) -> u8 {
     FILTER_NONE
 }
 
-/// Transform input bytes with the chosen filter before compression.
 pub fn apply_filter(input: &[u8], filter: u8) -> Vec<u8> {
     match filter {
         FILTER_DELTA1 | FILTER_DELTA2 | FILTER_DELTA3 | FILTER_DELTA4 => {
@@ -127,7 +146,6 @@ pub fn apply_filter(input: &[u8], filter: u8) -> Vec<u8> {
     }
 }
 
-/// Reverse the filter applied during compression.
 pub fn undo_filter(input: &[u8], filter: u8) -> Vec<u8> {
     match filter {
         FILTER_DELTA1 | FILTER_DELTA2 | FILTER_DELTA3 | FILTER_DELTA4 => {
@@ -140,7 +158,7 @@ pub fn undo_filter(input: &[u8], filter: u8) -> Vec<u8> {
     }
 }
 
-// ── Tests for detect_filter dispatch ─────────────────────────────────────────
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -153,11 +171,6 @@ mod tests {
 
     #[test]
     fn detect_filter_returns_none_for_random_data() {
-        // Use an LCG to generate pseudo-random bytes. Unlike a cycling ramp
-        // (0u8..=255).cycle() — which delta-encodes to nearly all-ones and
-        // collapses to ~0 bits/byte entropy — LCG output has no inter-sample
-        // linear structure, so delta encoding provides no benefit and the
-        // stride probe must not fire.
         let mut state: u32 = 0xdeadbeef;
         let data: Vec<u8> = (0..1024).map(|_| {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -168,15 +181,13 @@ mod tests {
 
     #[test]
     fn detect_filter_returns_wav_stride_for_riff_wave() {
-        // Minimal RIFF/WAVE header: mono 16-bit PCM → stride 2.
         let mut data = vec![0u8; 44];
         data[0..4].copy_from_slice(b"RIFF");
         data[8..12].copy_from_slice(b"WAVE");
         data[12..16].copy_from_slice(b"fmt ");
-        data[16..20].copy_from_slice(&16u32.to_le_bytes()); // chunk len
-        // channels=1, bits_per_sample=16 → stride = 1*(16/8) = 2
-        data[22..24].copy_from_slice(&1u16.to_le_bytes());  // channels
-        data[34..36].copy_from_slice(&16u16.to_le_bytes()); // bits
+        data[16..20].copy_from_slice(&16u32.to_le_bytes());
+        data[22..24].copy_from_slice(&1u16.to_le_bytes());
+        data[34..36].copy_from_slice(&16u16.to_le_bytes());
         assert_eq!(detect_filter(&data), FILTER_DELTA2);
     }
 
@@ -184,7 +195,49 @@ mod tests {
     fn detect_filter_returns_bmp_delta3_for_24bpp() {
         let mut data = vec![0u8; 32];
         data[0..2].copy_from_slice(b"BM");
-        data[28..30].copy_from_slice(&24u16.to_le_bytes()); // bpp
+        data[28..30].copy_from_slice(&24u16.to_le_bytes());
         assert_eq!(detect_filter(&data), FILTER_DELTA3);
     }
-                }
+
+    #[test]
+    fn detect_dixscript_binary_returns_filter_none() {
+        // Minimal MDIX header: magic 0x4D444958 stored as LE u32 = [0x58,0x49,0x44,0x4D]
+        let mut data = vec![0u8; 64];
+        data[0..4].copy_from_slice(&0x4D444958u32.to_le_bytes()); // = [0x58,0x49,0x44,0x4D]
+        data[4] = 1; // version_major
+        data[5] = 0; // version_minor
+        data[6] = 0; // version_patch
+        data[7] = 0x05; // flags: CONFIG | DATA
+        assert_eq!(
+            detect_filter(&data), FILTER_NONE,
+            "MDIX magic should return FILTER_NONE (data format, no transform)"
+        );
+    }
+
+    #[test]
+    fn mdix_magic_bytes_are_correct_le_encoding() {
+        // Verify our constant matches what binary_format.rs writes
+        let expected = 0x4D444958u32.to_le_bytes();
+        assert_eq!(DIXSCRIPT_MAGIC_BYTES, expected,
+            "DIXSCRIPT_MAGIC_BYTES must equal 0x4D444958.to_le_bytes()");
+        // Sanity: bytes spell "XIDM" in ASCII (LE of "MDIX")
+        assert_eq!(&DIXSCRIPT_MAGIC_BYTES, b"XIDM");
+    }
+
+    #[test]
+    fn detect_pe_coff_still_returns_bcj() {
+        let mut data = vec![0u8; 256];
+        data[0] = b'M'; data[1] = b'Z';
+        data[0x3C] = 0x40;
+        data[0x40] = b'P'; data[0x41] = b'E';
+        data[0x42] = 0x00; data[0x43] = 0x00;
+        assert_eq!(detect_filter(&data), FILTER_BCJ);
+    }
+
+    #[test]
+    fn dixscript_magic_does_not_match_pe_coff() {
+        // PE/COFF starts with 'M','Z' = [0x4D, 0x5A]; MDIX starts with [0x58, 0x49, 0x44, 0x4D]
+        // These are different and must not collide.
+        assert_ne!(&DIXSCRIPT_MAGIC_BYTES[0..2], b"MZ");
+    }
+        }

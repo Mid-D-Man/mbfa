@@ -108,27 +108,23 @@ jobs:
             [ -f "$f" ] || continue
             name="$(basename "$f")"
 
-            # Skip the manifest and any generated intermediate files
             case "$name" in
               special_manifest.json) continue ;;
               *.mbfa|*.recovered|*.gz|*.zst|*.xz|*.br|*.zpaq) continue ;;
             esac
 
-            # Compress — use if ! so bash -e does not exit early on MBFA errors
             if ! ./target/release/mbfa compress "$f" "${f}.mbfa" > /dev/null 2>&1; then
-              echo "  FAIL: $name (compress error — exit $(echo $?))"
+              echo "  FAIL: $name (compress error — exit $?)"
               FAILED=$((FAILED + 1))
               continue
             fi
 
-            # Decompress
             if ! ./target/release/mbfa decompress "${f}.mbfa" "${f}.recovered" > /dev/null 2>&1; then
               echo "  FAIL: $name (decompress error)"
               FAILED=$((FAILED + 1))
               continue
             fi
 
-            # Byte-exact check
             if ! diff "$f" "${f}.recovered" > /dev/null 2>&1; then
               echo "  FAIL: $name (content mismatch)"
               FAILED=$((FAILED + 1))
@@ -188,7 +184,7 @@ jobs:
             fi
 
             local fold_detail
-            fold_detail=$(grep -E "^(Original|Fold|Done|Joint|Entropy|Window|Filter)" \
+            fold_detail=$(grep -E "^(Original|Fold|Done|Joint|Entropy|Window|Filter|Stride|Binary|DixScript|STL|PLY|PE)" \
               "/tmp/mbfa_log_${name}.txt" 2>/dev/null | tr '\n' '|' | sed 's/"/\\"/g')
 
             # ── gzip ──────────────────────────────────────────────────────────
@@ -279,7 +275,7 @@ jobs:
               "$zpaq_sz" "$zpaq_pct" "$zpaq_ms" "$zpaq_dms" \
               "$fold_detail" >> bench_files_special/special_results.json
 
-            printf "%-28s [%-16s] %8s B | MBFA:%6s%%(#%-1s) C:%-4sms D:%-4sms | rt:%s\n" \
+            printf "%-34s [%-16s] %8s B | MBFA:%6s%%(#%-1s) C:%-4sms D:%-4sms | rt:%s\n" \
               "$name" "$category" "$orig_size" \
               "$mbfa_pct" "$rank" "$mbfa_ms" "$mbfa_decomp_ms" "$roundtrip"
           }
@@ -313,11 +309,21 @@ jobs:
           echo "── Config and Script Formats ────────────────────────────────────"
           run_bench "k8s_config.yaml"   "YAML_Config"      "Config"
           run_bench "services.toml"     "TOML_Config"      "Config"
-          run_bench "platform.mdix"     "DixScript_mdix"   "DixScript"
+
+          echo ""
+          echo "── DixScript Formats ────────────────────────────────────────────"
+          run_bench "platform.mdix"           "DixScript_Source"   "DixScript"
+          run_bench "DixScript_compiled.mdix" "DixScript_Compiled" "DixScript"
 
           echo ""
           echo "── Binary / Assembly ────────────────────────────────────────────"
           run_bench "Assembly.dll"      "DLL_Assembly"     "Binary"
+
+          echo ""
+          echo "── MBFA Showcase ────────────────────────────────────────────────"
+          run_bench "Showcase_Repetitive.bin" "Showcase_Repetitive" "Showcase"
+          run_bench "Showcase_Sparse.bin"     "Showcase_Sparse"     "Showcase"
+          run_bench "Showcase_GameMap.bin"    "Showcase_GameMap"    "Showcase"
 
           echo "]" >> bench_files_special/special_results.json
 

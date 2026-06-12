@@ -22,7 +22,6 @@
       padding: 5px 12px; font-size: 0.82rem; }
     .meta-item strong { color: #a371f7; }
 
-    /* Summary cards */
     .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
       gap: 12px; margin-bottom: 28px; }
     .summary-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; }
@@ -77,12 +76,13 @@
     .badge { display: inline-block; font-size: 0.63rem; font-weight: 700;
       padding: 2px 6px; border-radius: 10px; text-transform: uppercase;
       letter-spacing: 0.4px; margin-left: 5px; vertical-align: middle; }
-    .badge-3d     { background: #1a1a0f; color: #e3b341; border: 1px solid #5a5a1a; }
-    .badge-unity  { background: #0f1e3a; color: #79c0ff; border: 1px solid #1f4080; }
-    .badge-unreal { background: #2a0f0f; color: #f85149; border: 1px solid #5a1a1a; }
-    .badge-config { background: #0f2a1a; color: #3fb950; border: 1px solid #1a5a2a; }
-    .badge-dix    { background: #1a0f2a; color: #a371f7; border: 1px solid #3a1a5a; }
-    .badge-bin    { background: #1c2128; color: #8b949e; border: 1px solid #30363d; }
+    .badge-3d      { background: #1a1a0f; color: #e3b341; border: 1px solid #5a5a1a; }
+    .badge-unity   { background: #0f1e3a; color: #79c0ff; border: 1px solid #1f4080; }
+    .badge-unreal  { background: #2a0f0f; color: #f85149; border: 1px solid #5a1a1a; }
+    .badge-config  { background: #0f2a1a; color: #3fb950; border: 1px solid #1a5a2a; }
+    .badge-dix     { background: #1a0f2a; color: #a371f7; border: 1px solid #3a1a5a; }
+    .badge-bin     { background: #1c2128; color: #8b949e; border: 1px solid #30363d; }
+    .badge-showcase{ background: #0a2010; color: #39d353; border: 1px solid #196127; }
 
     .bar-row { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; }
     .bar { height: 6px; border-radius: 3px; min-width: 1px; }
@@ -128,7 +128,7 @@
     .timing-legend { display: flex; gap: 14px; font-size: 0.70rem; margin-bottom: 6px; }
     .timing-legend span { display: flex; align-items: center; gap: 4px; }
 
-    /* Upload card */
+    /* Upload / Direct file test */
     .upload-card { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
       padding: 24px; margin-top: 28px; }
     .upload-card h2 { font-size: 1rem; font-weight: 700; margin-bottom: 6px;
@@ -152,16 +152,14 @@
     .result-val.good { color: #3fb950; }
     .result-val.bad  { color: #f85149; }
     .result-val.info { color: #79c0ff; }
-    .upload-compare-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr));
-      gap: 8px; margin-top: 12px; }
-    .upload-algo-card { background: #161b22; border: 1px solid #30363d; border-radius: 6px;
-      padding: 10px; text-align: center; }
-    .upload-algo-name { font-size: 0.72rem; color: #8b949e; margin-bottom: 4px; }
-    .upload-algo-pct  { font-size: 1.1rem; font-weight: 700; }
-    .upload-algo-time { font-size: 0.68rem; color: #484f58; margin-top: 2px; }
-    .upload-wasm-note { font-size: 0.72rem; color: #484f58; font-style: italic;
-      background: #0d1117; border: 1px solid #21262d; border-radius: 6px;
-      padding: 10px 14px; margin-top: 10px; line-height: 1.6; }
+    .wasm-note { font-size: 0.75rem; color: #484f58; background: #0d1117;
+      border: 1px solid #21262d; border-radius: 6px; padding: 12px 14px;
+      margin-top: 12px; line-height: 1.7; }
+    .wasm-note code { color: #a371f7; font-family: monospace; font-size: 0.82rem; }
+    .wasm-status { display: inline-block; font-size: 0.72rem; padding: 2px 8px;
+      border-radius: 10px; margin-left: 8px; }
+    .wasm-status.loaded   { background: #0f2a1a; color: #3fb950; border: 1px solid #1a5a2a; }
+    .wasm-status.missing  { background: #2a0f0f; color: #f85149; border: 1px solid #5a1a1a; }
 
     footer { margin-top: 32px; padding-top: 14px; border-top: 1px solid #30363d;
       color: #8b949e; font-size: 0.76rem; text-align: center; }
@@ -173,7 +171,7 @@
 
   <header>
     <h1>&#x1F3AE; MBFA <span>&#x2014; Special Benchmark</span></h1>
-    <p style="color:#8b949e;margin-top:5px">MidManStudio | Game engine assets &middot; 3D formats &middot; Config formats &middot; DixScript &middot; Direct file test</p>
+    <p style="color:#8b949e;margin-top:5px">MidManStudio &middot; Game engine assets &middot; 3D formats &middot; Config &middot; DixScript &middot; Binary &middot; MBFA Showcase</p>
     <div class="meta">
       <div class="meta-item"><strong>Build:</strong> #BUILD_NUM_PLACEHOLDER</div>
       <div class="meta-item"><strong>Branch:</strong> BRANCH_PLACEHOLDER</div>
@@ -183,10 +181,14 @@
   </header>
 
   <div class="about">
-    <strong>Special benchmark</strong> tests MBFA against game engine project files, 3D mesh formats targeted for new delta/shuffle filters, config formats, DixScript (.mdix), and binary assemblies.
+    <strong>Special benchmark</strong> tests MBFA against game engine project files, 3D mesh formats,
+    config and script formats, DixScript (source + compiled binary), PE/COFF assemblies,
+    and dedicated <strong>Showcase</strong> files designed to exercise MBFA's strongest compression paths
+    (repetitive blocks, sparse binary, tile-based game maps).
     All formats are compressed by MBFA, gzip, zstd, xz, brotli, and zpaq — then ranked.
     <br><br>
-    The <strong>Direct File Test</strong> section at the bottom lets you upload any file and compress it in-browser using MBFA WASM (when available). Results show ratio and timing vs all algorithms run server-side at benchmark time.
+    The <strong>Direct File Test</strong> below lets you drop any file and get browser gzip stats instantly.
+    MBFA in-browser compression requires the WASM build — see instructions in that section.
   </div>
 
   <div class="summary-grid">
@@ -249,13 +251,16 @@
 
   <div id="results-container"></div>
 
-  <!-- Direct File Upload Test -->
+  <!-- Direct File Test -->
   <div class="upload-card">
-    <h2>&#x1F4C1; Direct File Test</h2>
+    <h2>&#x1F4C1; Direct File Test
+      <span class="wasm-status missing" id="wasm-badge">MBFA WASM not loaded</span>
+    </h2>
     <p class="upload-desc">
-      Upload any file to compress it in-browser using MBFA WASM (when available).
-      Ratio and timing results are shown instantly. Nothing is uploaded to any server — all processing is local.
-      <span style="color:#484f58">Requires mbfa_bg.wasm + mbfa.js deployed to gh-pages root via wasm-pack.</span>
+      Drop any file to compress it locally. Browser gzip runs immediately via
+      <code style="color:#a371f7;font-family:monospace">CompressionStream</code>.
+      MBFA in-browser compression requires the WASM build — see note below.
+      <strong style="color:#e6edf3">Nothing is uploaded to any server.</strong>
     </p>
     <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
       <div class="drop-icon">&#x1F4E5;</div>
@@ -265,6 +270,20 @@
     <input type="file" id="file-input" style="display:none">
     <div class="progress-bar" id="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
     <div class="upload-result" id="upload-result"></div>
+
+    <div class="wasm-note" id="wasm-instructions">
+      <strong style="color:#e3b341">&#x26A0; MBFA WASM not built</strong> — in-browser MBFA compression is unavailable.
+      Browser gzip results above are still shown for comparison.<br><br>
+      <strong>To enable MBFA in-browser compression:</strong><br>
+      1. Add <code>[lib]</code> with <code>crate-type = ["cdylib"]</code> to <code>Cargo.toml</code><br>
+      2. Add <code>wasm-bindgen</code> exports to <code>src/lib.rs</code>:<br>
+      &nbsp;&nbsp;&nbsp;<code>#[wasm_bindgen] pub fn compress_wasm(data: &amp;[u8]) -&gt; Vec&lt;u8&gt;</code><br>
+      3. Run <code>wasm-pack build --target web --out-dir pkg</code><br>
+      4. Deploy <code>pkg/mbfa.js</code> and <code>pkg/mbfa_bg.wasm</code> to the gh-pages root<br>
+      5. The import path <code>../mbfa.js</code> on this page will find them automatically<br><br>
+      <span style="color:#484f58">Alternatively add a wasm-pack build step to the CI deploy job and copy
+      <code>pkg/</code> into the gh-pages worktree before committing.</span>
+    </div>
   </div>
 
   <footer>MBFA Special Benchmark &mdash; MidManStudio &mdash; Build #BUILD_NUM_PLACEHOLDER</footer>
@@ -309,14 +328,18 @@
     xz:'xz', brotli:'brotli', zpaq:'zpaq'
   };
   const CAT_INFO = {
-    '3D_filter_target': { label:'3D Filter Targets', badgeCls:'badge-3d',   badgeText:'3D'     },
-    'Unity':            { label:'Unity Assets',      badgeCls:'badge-unity', badgeText:'Unity'  },
-    'Unreal':           { label:'Unreal Assets',     badgeCls:'badge-unreal',badgeText:'Unreal' },
-    'Config':           { label:'Config Formats',    badgeCls:'badge-config',badgeText:'Config' },
-    'DixScript':        { label:'DixScript (.mdix)', badgeCls:'badge-dix',   badgeText:'DixScript' },
-    'Binary':           { label:'Binary / Assembly', badgeCls:'badge-bin',   badgeText:'Binary' },
+    '3D_filter_target': { label:'3D Filter Targets',          badgeCls:'badge-3d',       badgeText:'3D'        },
+    'Unity':            { label:'Unity Assets',               badgeCls:'badge-unity',    badgeText:'Unity'     },
+    'Unreal':           { label:'Unreal Assets',              badgeCls:'badge-unreal',   badgeText:'Unreal'    },
+    'Config':           { label:'Config Formats',             badgeCls:'badge-config',   badgeText:'Config'    },
+    'DixScript':        { label:'DixScript (.mdix / compiled)',badgeCls:'badge-dix',      badgeText:'DixScript' },
+    'Binary':           { label:'Binary / Assembly',          badgeCls:'badge-bin',      badgeText:'Binary'    },
+    'Showcase':         { label:'MBFA Showcase',              badgeCls:'badge-showcase', badgeText:'Showcase'  },
   };
-  const CAT_ORDER = ['3D_filter_target','Unity','Unreal','Config','DixScript','Binary'];
+  const CAT_ORDER = [
+    '3D_filter_target','Unity','Unreal',
+    'Config','DixScript','Binary','Showcase'
+  ];
 
   function fmtBytes(n) {
     if (!n) return '—';
@@ -345,18 +368,17 @@
     .then(data => {
       allData = data;
 
-      // Summary stats
       let wins=0, rtPass=0, sumRatio=0, sumC=0, sumD=0, dCount=0;
       data.forEach(row => {
-        const m = parseFloat(row.mbfa_pct);
+        const m    = parseFloat(row.mbfa_pct);
         const best = Math.min(m,
           parseFloat(row.gzip_pct||999), parseFloat(row.zstd_pct||999),
-          parseFloat(row.xz_pct||999), parseFloat(row.brotli_pct||999),
+          parseFloat(row.xz_pct||999),   parseFloat(row.brotli_pct||999),
           parseFloat(row.zpaq_pct||999));
         if (m <= best) wins++;
         if (row.mbfa_roundtrip === 'PASS') rtPass++;
         sumRatio += m;
-        sumC += (row.mbfa_ms || 0);
+        sumC     += (row.mbfa_ms || 0);
         if (row.mbfa_decomp_ms !== undefined) { sumD += row.mbfa_decomp_ms; dCount++; }
       });
       const n = data.length;
@@ -368,9 +390,7 @@
       document.getElementById('stat-dtime').textContent = dCount > 0 ? Math.round(sumD/dCount)+'ms' : '—';
 
       const container = document.getElementById('results-container');
-
-      // Group by category in order
-      const grouped = {};
+      const grouped   = {};
       data.forEach((row, idx) => {
         const cat = row.category || 'Binary';
         if (!grouped[cat]) grouped[cat] = [];
@@ -381,18 +401,26 @@
         const items = grouped[cat];
         if (!items || items.length === 0) return;
 
-        const info = catInfo(cat);
+        const info     = catInfo(cat);
         const secTitle = document.createElement('div');
-        secTitle.className = 'section-title';
+        secTitle.className   = 'section-title';
         secTitle.textContent = info.label;
         container.appendChild(secTitle);
 
+        // Showcase gets an explanatory note
+        if (cat === 'Showcase') {
+          const note = document.createElement('p');
+          note.style.cssText = 'font-size:0.78rem;color:#484f58;margin-bottom:8px';
+          note.textContent   = '💡 These files are designed to exercise MBFA\'s strongest paths: exact repetition, sparse zero-heavy binary, and tile-based game data. Expect rank #1 margins.';
+          container.appendChild(note);
+        }
+
         const hint = document.createElement('p');
-        hint.className = 'click-hint';
+        hint.className   = 'click-hint';
         hint.textContent = '💡 Click any row for a full breakdown';
         container.appendChild(hint);
 
-        const table = document.createElement('table');
+        const table  = document.createElement('table');
         table.innerHTML = `<thead><tr>
           <th>Dataset</th><th>Original</th>
           <th>MBFA</th><th>gzip</th><th>zstd</th>
@@ -405,19 +433,19 @@
           const m    = parseFloat(row.mbfa_pct);
           const vals = [m,
             parseFloat(row.gzip_pct||999), parseFloat(row.zstd_pct||999),
-            parseFloat(row.xz_pct||999), parseFloat(row.brotli_pct||999),
+            parseFloat(row.xz_pct||999),   parseFloat(row.brotli_pct||999),
             parseFloat(row.zpaq_pct||999)];
-          const best = Math.min(...vals);
+          const best  = Math.min(...vals);
           const scale = v => Math.min(130, Math.round(parseFloat(v) * 1.3));
           const rtcls = row.mbfa_roundtrip === 'PASS' ? 'pass' : 'fail-rt';
 
           function algCell(pct, key) {
             const isBest = parseFloat(pct) <= best;
-            const ms = row[key+'_ms'];
-            const dm = row[key+'_decomp_ms'];
+            const ms  = row[key+'_ms'];
+            const dm  = row[key+'_decomp_ms'];
             return `<td style="color:${isBest ? COLORS[key] : ''}" class="${isBest?'win':''}">
               ${pct}%<br>
-              <span class="sub-c">C:${ms !== undefined ? ms+'ms' : '—'}</span>
+              <span class="sub-c">C:${ms  !== undefined ? ms+'ms'  : '—'}</span>
               <span class="sub-d"> D:${dm !== undefined ? dm+'ms' : '—'}</span>
             </td>`;
           }
@@ -471,7 +499,7 @@
   });
 
   function openModal(idx) {
-    const row = allData[idx];
+    const row  = allData[idx];
     const name = (row.dataset || row.name || '').replace(/_/g,' ');
     document.getElementById('modal-title').textContent = name;
     document.getElementById('modal-subtitle').textContent =
@@ -537,11 +565,11 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 
   // ── File upload / direct test ────────────────────────────────────────────────
-  const dropZone    = document.getElementById('drop-zone');
-  const fileInput   = document.getElementById('file-input');
-  const resultBox   = document.getElementById('upload-result');
-  const progBar     = document.getElementById('progress-bar');
-  const progFill    = document.getElementById('progress-fill');
+  const dropZone  = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+  const resultBox = document.getElementById('upload-result');
+  const progBar   = document.getElementById('progress-bar');
+  const progFill  = document.getElementById('progress-fill');
 
   function setProgress(pct) {
     progBar.style.display = 'block';
@@ -566,125 +594,122 @@
     const bytes    = new Uint8Array(arrBuf);
     setProgress(30);
 
-    if (typeof window.mbfa_compress !== 'function') {
-      setProgress(100);
-      resultBox.style.display = 'block';
-      resultBox.innerHTML = `
-        <div class="result-row">
-          <span class="result-label">File</span>
-          <span class="result-val info">${file.name} (${fmtBytes(origSize)})</span>
-        </div>
-        <div class="result-row">
-          <span class="result-label">MBFA WASM</span>
-          <span class="result-val bad">Not loaded</span>
-        </div>
-        <div class="upload-wasm-note">
-          To enable in-browser MBFA compression, build the crate with
-          <code>wasm-pack build --target web</code> and deploy
-          <code>mbfa_bg.wasm</code> + <code>mbfa.js</code> to the gh-pages root.
-          The page will then load them automatically and this section will activate.
-        </div>`;
+    // ── Always run browser gzip (CompressionStream) ───────────────────────────
+    let gzipPct = null, gzipMs = null, gzipSize = null;
+    if (typeof CompressionStream !== 'undefined') {
+      try {
+        const t  = performance.now();
+        const cs = new CompressionStream('gzip');
+        const writer = cs.writable.getWriter();
+        const reader = cs.readable.getReader();
+        writer.write(bytes);
+        writer.close();
+        const chunks = [];
+        let done = false;
+        while (!done) {
+          const { value, done: d } = await reader.read();
+          if (value) chunks.push(value);
+          done = d;
+        }
+        gzipMs   = (performance.now() - t).toFixed(1);
+        gzipSize = chunks.reduce((a, c) => a + c.length, 0);
+        gzipPct  = (gzipSize / origSize * 100).toFixed(2);
+      } catch(_) {}
+    }
+    setProgress(60);
+
+    // ── Try MBFA WASM if available ────────────────────────────────────────────
+    if (typeof window.mbfa_compress === 'function') {
+      try {
+        const t0         = performance.now();
+        const compressed = window.mbfa_compress(bytes);
+        const compMs     = (performance.now() - t0).toFixed(1);
+        setProgress(80);
+        const t1           = performance.now();
+        const decompressed = window.mbfa_decompress(compressed);
+        const decompMs     = (performance.now() - t1).toFixed(1);
+        setProgress(100);
+
+        const ratio = (compressed.length / origSize * 100).toFixed(2);
+        const saved = origSize - compressed.length;
+        const rtOk  = decompressed.length === origSize;
+
+        resultBox.style.display = 'block';
+        resultBox.innerHTML = `
+          <div class="result-row"><span class="result-label">File</span>
+            <span class="result-val info">${file.name}</span></div>
+          <div class="result-row"><span class="result-label">Original size</span>
+            <span class="result-val">${fmtBytes(origSize)}</span></div>
+          <div class="result-row"><span class="result-label">MBFA compressed</span>
+            <span class="result-val ${parseFloat(ratio) < 100 ? 'good' : 'bad'}">${fmtBytes(compressed.length)} (${ratio}%)</span></div>
+          <div class="result-row"><span class="result-label">Space saved</span>
+            <span class="result-val">${fmtBytes(Math.max(0, saved))}</span></div>
+          <div class="result-row"><span class="result-label">MBFA compress time</span>
+            <span class="result-val info">${compMs} ms</span></div>
+          <div class="result-row"><span class="result-label">MBFA decompress time</span>
+            <span class="result-val" style="color:#a371f7">${decompMs} ms</span></div>
+          <div class="result-row"><span class="result-label">Roundtrip</span>
+            <span class="result-val ${rtOk ? 'good' : 'bad'}">${rtOk ? 'PASS ✓' : 'FAIL — size mismatch'}</span></div>
+          ${gzipPct !== null ? `
+          <div class="result-row"><span class="result-label">Browser gzip (reference)</span>
+            <span class="result-val" style="color:#79c0ff">${gzipPct}% in ${gzipMs}ms (${fmtBytes(gzipSize)})</span></div>` : ''}
+          <div style="margin-top:10px;font-size:0.72rem;color:#484f58">
+            Browser WASM timings may differ from server-side CI numbers due to JIT warmup.
+          </div>`;
+      } catch(e) {
+        setProgress(100);
+        resultBox.style.display = 'block';
+        resultBox.innerHTML = `<div class="result-row">
+          <span class="result-label">MBFA error</span>
+          <span class="result-val bad">${e.message || String(e)}</span></div>
+          ${gzipPct !== null ? `<div class="result-row">
+          <span class="result-label">Browser gzip (reference)</span>
+          <span class="result-val" style="color:#79c0ff">${gzipPct}% in ${gzipMs}ms</span></div>` : ''}`;
+      }
       return;
     }
 
-    try {
-      setProgress(40);
-      const t0         = performance.now();
-      const compressed = window.mbfa_compress(bytes);
-      const compMs     = (performance.now() - t0).toFixed(1);
-      setProgress(70);
-      const t1           = performance.now();
-      const decompressed = window.mbfa_decompress(compressed);
-      const decompMs     = (performance.now() - t1).toFixed(1);
-      setProgress(95);
-
-      const ratio   = (compressed.length / origSize * 100).toFixed(2);
-      const saved   = origSize - compressed.length;
-      const rtOk    = decompressed.length === origSize;
-      setProgress(100);
-
-      // Try to do a rough native comparison using the Compression Streams API
-      let gzipPct = null, gzipMs = null;
-      if (typeof CompressionStream !== 'undefined') {
-        try {
-          const t = performance.now();
-          const cs = new CompressionStream('gzip');
-          const writer = cs.writable.getWriter();
-          const reader = cs.readable.getReader();
-          writer.write(bytes);
-          writer.close();
-          const chunks = [];
-          let done = false;
-          while (!done) {
-            const { value, done: d } = await reader.read();
-            if (value) chunks.push(value);
-            done = d;
-          }
-          gzipMs = (performance.now() - t).toFixed(1);
-          const gzipSize = chunks.reduce((a,c) => a + c.length, 0);
-          gzipPct = (gzipSize / origSize * 100).toFixed(2);
-        } catch(_) {}
-      }
-
-      resultBox.style.display = 'block';
+    // ── WASM not available: show browser gzip only ────────────────────────────
+    setProgress(100);
+    resultBox.style.display = 'block';
+    if (gzipPct !== null) {
       resultBox.innerHTML = `
-        <div class="result-row">
-          <span class="result-label">File</span>
-          <span class="result-val info">${file.name}</span>
-        </div>
-        <div class="result-row">
-          <span class="result-label">Original size</span>
-          <span class="result-val">${fmtBytes(origSize)}</span>
-        </div>
-        <div class="result-row">
-          <span class="result-label">MBFA compressed</span>
-          <span class="result-val ${parseFloat(ratio) < 100 ? 'good' : 'bad'}">${fmtBytes(compressed.length)} (${ratio}%)</span>
-        </div>
-        <div class="result-row">
-          <span class="result-label">Space saved</span>
-          <span class="result-val">${fmtBytes(Math.max(0,saved))}</span>
-        </div>
-        <div class="result-row">
-          <span class="result-label">Compress time</span>
-          <span class="result-val info">${compMs} ms</span>
-        </div>
-        <div class="result-row">
-          <span class="result-label">Decompress time</span>
-          <span class="result-val" style="color:#a371f7">${decompMs} ms</span>
-        </div>
-        <div class="result-row">
-          <span class="result-label">Roundtrip</span>
-          <span class="result-val ${rtOk ? 'good' : 'bad'}">${rtOk ? 'PASS ✓' : 'FAIL — size mismatch'}</span>
-        </div>
-        ${gzipPct !== null ? `
-        <div class="result-row">
-          <span class="result-label">Browser gzip (for reference)</span>
-          <span class="result-val" style="color:#79c0ff">${gzipPct}% in ${gzipMs}ms</span>
-        </div>` : ''}
-        <div style="margin-top:10px;font-size:0.72rem;color:#484f58">
-          Note: server-side benchmarks for this file type are shown in the tables above. Browser WASM timings may differ from the server-side benchmark numbers due to JIT warmup and single-threaded execution.
-        </div>`;
-    } catch(e) {
-      setProgress(100);
-      resultBox.style.display = 'block';
-      resultBox.innerHTML = `<div class="result-row">
-        <span class="result-label">Error</span>
-        <span class="result-val bad">${e.message || String(e)}</span>
-      </div>`;
+        <div class="result-row"><span class="result-label">File</span>
+          <span class="result-val info">${file.name}</span></div>
+        <div class="result-row"><span class="result-label">Original size</span>
+          <span class="result-val">${fmtBytes(origSize)}</span></div>
+        <div class="result-row"><span class="result-label">Browser gzip result</span>
+          <span class="result-val ${parseFloat(gzipPct) < 100 ? 'good' : 'bad'}">${fmtBytes(gzipSize)} (${gzipPct}%)</span></div>
+        <div class="result-row"><span class="result-label">Browser gzip time</span>
+          <span class="result-val info">${gzipMs} ms</span></div>
+        <div class="result-row"><span class="result-label">MBFA WASM</span>
+          <span class="result-val bad">Not loaded — see instructions above</span></div>`;
+    } else {
+      resultBox.innerHTML = `
+        <div class="result-row"><span class="result-label">File</span>
+          <span class="result-val info">${file.name} (${fmtBytes(origSize)})</span></div>
+        <div class="result-row"><span class="result-label">Status</span>
+          <span class="result-val bad">MBFA WASM not loaded, CompressionStream unavailable</span></div>`;
     }
   }
 
-  // Load MBFA WASM if available
+  // ── Load MBFA WASM (optional) ─────────────────────────────────────────────
   (async () => {
     try {
       const mod = await import('../mbfa.js');
       await mod.default('../mbfa_bg.wasm');
       window.mbfa_compress   = mod.compress;
       window.mbfa_decompress = mod.decompress;
+      // Update badge
+      const badge = document.getElementById('wasm-badge');
+      badge.textContent = 'MBFA WASM loaded ✓';
+      badge.className   = 'wasm-status loaded';
+      // Hide the instructions note
+      document.getElementById('wasm-instructions').style.display = 'none';
       document.querySelector('.upload-desc').innerHTML +=
-        ' <span style="color:#3fb950;font-weight:700">&#x2713; MBFA WASM loaded</span>';
+        ' <strong style="color:#3fb950">MBFA WASM active.</strong>';
     } catch(_) {
-      // WASM not available — graceful fallback already handled in handleFile
+      // WASM not available — graceful fallback shown in handleFile
     }
   })();
 </script>

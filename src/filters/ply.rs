@@ -1,11 +1,39 @@
 // src/filters/ply.rs
-//! PLY binary compound filter: byte-plane shuffle + per-plane delta1 (flag 8).
+//! PLY binary compound filter: byte-plane shuffle + per-vertex-stride delta (flag 8).
 //!
 //! Binary PLY vertex floats are reorganised into four byte-planes (one per
-//! IEEE 754 byte position: LSB → MSB) and then delta1-encoded within each
-//! plane.  The exponent plane (byte 3) is near-constant for smooth geometry,
-//! and mantissa planes compress significantly better after delta1 removes
-//! inter-float correlation.
+//! IEEE 754 byte position: LSB → MSB) and then delta-encoded within each
+//! plane using **stride = floats_per_vertex**.
+//!
+//! ## Why stride = floats_per_vertex rather than stride-1?
+//!
+//! After the byte-plane shuffle, plane b contains all byte_b values in
+//! vertex-major, float-minor order:
+//!   plane_b[k * fpv + j] = byte_b(float j of vertex k)
+//!
+//! **stride-1 (old behaviour):**
+//!   plane_b[i] -= plane_b[i - 1]
+//!   = byte_b(float j of vertex k) - byte_b(float j-1 of vertex k)
+//! This crosses float-field boundaries — subtracting, say, byte-0 of the
+//! u-texture-coordinate from byte-0 of the nz-normal component.  For
+//! unrelated IEEE-754 fields the difference is essentially random. ✗
+//!
+//! **stride-fpv (new behaviour):**
+//!   plane_b[k*fpv + j] -= plane_b[(k-1)*fpv + j]
+//!   = byte_b(float j of vertex k) - byte_b(float j of vertex k-1)
+//! Only the SAME semantic field is differenced across consecutive vertices.
+//! For smooth geometry, neighbouring vertices have very similar values in
+//! each float field → small deltas → much higher LZ match rate. ✓
+//!
+//! ## Grid PLY periodicity
+//!
+//! For a heightmap grid (grid_w × grid_h vertices in row-major order), float
+//! fields that depend only on the column index (x-coordinate, u-texture) have
+//! *identical* delta sequences in every row.  This creates a strong LZ period
+//! of exactly `grid_w × fpv` bytes inside each plane — well within MBFA's
+//! Phase C window selection.  Fields that vary with the row (y, z, v, normals)
+//! still produce bounded, slowly-varying deltas that compress significantly
+//! better than the cross-boundary values produced by stride-1.
 //!
 //! Detection requires:
 //!   - "ply\n" magic
@@ -143,9 +171,20 @@ fn shuffle4_ply_decode(data: &[u8]) -> Vec<u8> {
     out
 }
 
-// ── Compound filter: shuffle + per-plane delta (flag 8) ───────────────────────
+// ── Compound filter: shuffle + per-vertex-stride delta (flag 8) ───────────────
 
-/// Apply PLY compound filter: byte-plane shuffle then per-plane delta1 encoding.
+/// Apply PLY compound filter: byte-plane shuffle then per-vertex-stride
+/// delta encoding.
+///
+/// The stride equals `floats_per_vertex` (fpv) so that position
+/// `k*fpv + j` in each plane is differenced only against position
+/// `(k-1)*fpv + j` — the same float field in the preceding vertex.
+///
+/// The first `fpv` bytes in each plane section are unchanged (seed values
+/// for the first vertex).
+///
+/// Encoding traverses HIGH → LOW so we always subtract the original
+/// (not-yet-modified) value at `[i - stride]`.
 pub fn shuffle4_ply_delta_encode(data: &[u8]) -> Vec<u8> {
     let layout = match parse_ply_layout(data) {
         Some(l) => l,
@@ -156,13 +195,17 @@ pub fn shuffle4_ply_delta_encode(data: &[u8]) -> Vec<u8> {
     let ve          = layout.header_end + 4 * plane_size;
     if ve > data.len() { return data.to_vec(); }
 
-    let mut out = shuffle4_ply_encode(data);
+    let mut out    = shuffle4_ply_encode(data);
+    let stride     = layout.floats_per_vertex; // same float field across vertices
+    let vs         = layout.header_end;
+
     for plane_idx in 0..4usize {
-        let ps = layout.header_end + plane_idx * plane_size;
+        let ps = vs + plane_idx * plane_size;
         let pe = ps + plane_size;
         if pe > out.len() { break; }
-        for i in (ps + 1..pe).rev() {
-            let prev = out[i - 1];
+        // HIGH → LOW: out[i - stride] is still the original shuffled byte.
+        for i in (ps + stride..pe).rev() {
+            let prev = out[i - stride];
             out[i] = out[i].wrapping_sub(prev);
         }
     }
@@ -170,6 +213,9 @@ pub fn shuffle4_ply_delta_encode(data: &[u8]) -> Vec<u8> {
 }
 
 /// Reverse the PLY compound filter.
+///
+/// Decoding traverses LOW → HIGH: at position i, `undelta[i - stride]`
+/// has already been restored to its original value and can be added back.
 pub fn shuffle4_ply_delta_decode(data: &[u8]) -> Vec<u8> {
     let layout = match parse_ply_layout(data) {
         Some(l) => l,
@@ -177,7 +223,8 @@ pub fn shuffle4_ply_delta_decode(data: &[u8]) -> Vec<u8> {
     };
     let float_count = layout.vertex_count * layout.floats_per_vertex;
     let plane_size  = float_count;
-    let planes_end  = layout.header_end + 4 * plane_size;
+    let vs          = layout.header_end;
+    let planes_end  = vs + 4 * plane_size;
 
     if planes_end > data.len() {
         eprintln!(
@@ -187,12 +234,15 @@ pub fn shuffle4_ply_delta_decode(data: &[u8]) -> Vec<u8> {
         return data.to_vec();
     }
 
-    let mut undelta = data.to_vec();
+    let stride       = layout.floats_per_vertex;
+    let mut undelta  = data.to_vec();
+
     for plane_idx in 0..4usize {
-        let ps = layout.header_end + plane_idx * plane_size;
+        let ps = vs + plane_idx * plane_size;
         let pe = ps + plane_size;
-        for i in ps + 1..pe {
-            let prev = undelta[i - 1];
+        // LOW → HIGH: undelta[i - stride] is already the decoded original.
+        for i in ps + stride..pe {
+            let prev = undelta[i - stride];
             undelta[i] = undelta[i].wrapping_add(prev);
         }
     }
@@ -250,6 +300,26 @@ mod tests {
         assert_eq!(dec, data, "PLY compound 8-float roundtrip failed");
     }
 
+    /// Single-vertex edge case: no delta applied (plane size = fpv, range is empty).
+    #[test]
+    fn roundtrip_ply_compound_single_vertex() {
+        let data = make_ply(1, 4);
+        let enc = apply_filter(&data, FILTER_PLY_DELTA);
+        assert_eq!(enc.len(), data.len());
+        let dec = undo_filter(&enc, FILTER_PLY_DELTA);
+        assert_eq!(dec, data, "PLY compound roundtrip failed for 1 vertex");
+    }
+
+    /// Two-vertex case: exactly one delta applied per float position per plane.
+    #[test]
+    fn roundtrip_ply_compound_two_vertices() {
+        let data = make_ply(2, 6);
+        let enc = apply_filter(&data, FILTER_PLY_DELTA);
+        assert_eq!(enc.len(), data.len());
+        let dec = undo_filter(&enc, FILTER_PLY_DELTA);
+        assert_eq!(dec, data, "PLY compound roundtrip failed for 2 vertices");
+    }
+
     #[test]
     fn detect_ply_returns_compound_flag() {
         let data = make_ply(100, 8);
@@ -277,4 +347,37 @@ mod tests {
         data.extend_from_slice(&vec![0u8; 50]);
         assert_ne!(detect_filter(&data), FILTER_PLY_DELTA);
     }
-  }
+
+    /// Verify that stride-fpv delta reduces entropy in the exponent plane
+    /// compared to the raw shuffled plane, for a ramp of float values.
+    #[test]
+    fn stride_fpv_delta_reduces_exponent_plane_entropy() {
+        use crate::filters::probe::byte_entropy;
+
+        let n_verts = 200usize;
+        let fpv     = 8usize;
+        let data    = make_ply(n_verts, fpv);
+
+        let compound = apply_filter(&data, FILTER_PLY_DELTA);
+        let dec      = undo_filter(&compound, FILTER_PLY_DELTA);
+        assert_eq!(dec, data, "PLY compound roundtrip failed for entropy test");
+
+        // Locate plane 3 (MSByte / exponent) in the shuffled output.
+        let layout = parse_ply_layout(&data).expect("make_ply produces valid PLY");
+        let plane_size = layout.vertex_count * layout.floats_per_vertex;
+        let p3s        = layout.header_end + 3 * plane_size;
+        let p3e        = p3s + plane_size;
+
+        // Build the simple-shuffle (no delta) for comparison.
+        let simple     = shuffle4_ply_encode(&data);
+        let simple_ent   = byte_entropy(&simple[p3s..p3e]);
+        let compound_ent = byte_entropy(&compound[p3s..p3e]);
+
+        assert!(
+            compound_ent <= simple_ent,
+            "plane3 entropy after stride-fpv delta ({:.4}) should be ≤ \
+             simple-shuffle entropy ({:.4})",
+            compound_ent, simple_ent,
+        );
+    }
+            }

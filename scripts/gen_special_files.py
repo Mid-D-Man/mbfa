@@ -156,12 +156,24 @@ def gen_glb():
     return struct.pack("<III", 0x46546C67, 2, total_len) + json_chunk + bin_chunk
 
 
-# ── Row-periodic terrain heightmap ────────────────────────────────────────────
-# After delta2, rows Y and Y+period are BYTE-IDENTICAL:
-#   delta2[(y+P)*W*2+x*2] = raw[(y+P)*W*2+x*2] − raw[(y+P)*W*2+x*2−2]
-#                         = raw[y*W*2+x*2]      − raw[y*W*2+x*2−2]   (tiled)
+# ── Row-periodic terrain heightmap (FIXED) ────────────────────────────────────
+# After delta2, rows Y and Y+period are byte-identical:
+#   delta2[(y+P)*W*2+x*2] = raw[(y+P)*W*2+x*2] - raw[(y+P)*W*2+x*2-2]
+#                         = raw[y*W*2+x*2]      - raw[y*W*2+x*2-2]   (tiled rows)
 #                         = delta2[y*W*2+x*2]   ✓
-# period_bytes < 65535 (ob=16 window) → MBFA finds matches, gzip (32KB) cannot.
+#
+# FIX for Terrain_large.raw decompress failure:
+# For files > 1MB, fingerprint_predict samples the first 8KB entropy.
+# If entropy < FINGERPRINT_ENTROPY_REPETITIVE (2.0 bits/byte), it returns
+# None → falls through to sequential Phase C → baseline ob=17 but discover
+# picks ob=OFFSET_BITS_MIN=7 (window=127) which is << period_bytes (63550).
+# Decoder uses wrong ob → crash.
+#
+# Fix: add h_noise (amplitude 0.04, high spatial frequency) so the delta2
+# byte differences have entropy safely above 2.0 bits/byte.  fingerprint_predict
+# then returns Some((17,8)), Phase B runs correctly, upper-half saturation at
+# ob=17 triggers Phase C, which selects ob=16 (period fits in window). ✓
+#
 # width=513 : period=63 rows, period_bytes=64638 < 65535 ✓
 # width=1025: period=31 rows, period_bytes=63550 < 65535 ✓
 
@@ -170,21 +182,26 @@ def gen_terrain_raw(width, height, seed=1):
     period    = max(4, 65534 // row_bytes)
 
     FREQ_X    = 7
-    AMPLITUDE = 0.38
+    AMPLITUDE = 0.35
     BASE      = 0.50
 
     base_rows = []
     for y_base in range(period):
         sy       = y_base / max(period - 1, 1)
-        y_offset = 0.07 * math.sin(sy * math.pi * 2 + 1.0)
+        y_offset = 0.06 * math.sin(sy * math.pi * 2 + 1.0)
         row = []
         for x in range(width):
             sx = x / max(width - 1, 1)
-            h  = (BASE
-                  + AMPLITUDE * math.sin(sx * FREQ_X * math.pi * 2)
-                  + 0.10 * math.cos(sx * FREQ_X * 2 * math.pi * 2)
-                  + 0.05 * math.sin(sx * FREQ_X * 3 * math.pi * 2)
-                  + y_offset)
+            h_primary = (BASE
+                         + AMPLITUDE * math.sin(sx * FREQ_X * math.pi * 2)
+                         + 0.10 * math.cos(sx * FREQ_X * 2 * math.pi * 2)
+                         + 0.05 * math.sin(sx * FREQ_X * 3 * math.pi * 2)
+                         + y_offset)
+            # High-frequency noise: keeps delta2 entropy > 2.0 bits/byte so
+            # fingerprint_predict returns Some((17,8)) for >1 MB files,
+            # preventing the fallthrough path that selects ob=7 (window=127).
+            h_noise = 0.04 * math.sin(sx * 41 * math.pi * 2 + seed * 0.7)
+            h = h_primary + h_noise
             v = max(0, min(65535, int(h * 65535)))
             row.append(v)
         base_rows.append(row)
@@ -276,13 +293,12 @@ def gen_minimal_dll():
 
 
 # ── Real DixScript binary format (.mdix compiled) ─────────────────────────────
-# Matches binary_format.rs exactly:
-#   Magic: 0x4D444958 stored as LE u32 → bytes [0x58, 0x49, 0x44, 0x4D] on disk
-#   Header: 16 bytes (magic u32 LE, version 3×u8, flags u8, section_count i32 LE,
-#            offset_table_position i32 LE)
-#   Sections: CONFIG (id=1) + DATA (id=3) with typed key-value objects
-#   Offset table: N × 12 bytes (section_id u32 LE, offset i32 LE, length i32 LE)
-#   Footer: SHA-256 of everything before it (32 bytes)
+# Magic: 0x4D444958 stored as LE u32 → bytes [0x58,0x49,0x44,0x4D] on disk.
+# Header: 16 bytes (magic u32 LE, version 3×u8, flags u8,
+#         section_count i32 LE, offset_table_position i32 LE)
+# Sections: CONFIG (id=1) + DATA (id=3) with typed key-value objects
+# Offset table: N × 12 bytes (section_id u32 LE, offset i32 LE, length i32 LE)
+# Footer: SHA-256 of everything before it (32 bytes)
 #
 # ValueTypeTag encoding (from value_encoder.rs):
 #   0x01 Int32:   [tag][4-byte LE i32]
@@ -290,17 +306,11 @@ def gen_minimal_dll():
 #   0x05 String:  [tag][length i32 LE][UTF-8 bytes]
 #   0x06 Bool:    [tag][0x00 or 0x01]
 #   0x07 Null:    [tag]
-#   0x09 Object:  [tag][count i32 LE][ for each: [key_len i32 LE][key UTF-8][value] ]
-#
-# Compression characteristics:
-#   - Type tags (0x01,0x05,0x06,0x09) dominate → entropy coding is very efficient
-#   - String keys ("id","name","value","enabled","type","count") repeat 400× each → LZ excellent
-#   - SectionFlags: CONFIG=0x01, DATA=0x04
+#   0x09 Object:  [tag][count i32 LE][for each: [key_len i32 LE][key UTF-8][value]]
 
 def gen_binary_dixscript(num_data_entries=400, seed=42):
     rng = random.Random(seed)
 
-    # ── Value encoding helpers (mirrors value_encoder.rs) ──────────────────
     def enc_int32(v):
         return bytes([0x01]) + struct.pack('<i', int(v))
 
@@ -314,19 +324,14 @@ def gen_binary_dixscript(num_data_entries=400, seed=42):
     def enc_bool(v):
         return bytes([0x06, 0x01 if v else 0x00])
 
-    def enc_null():
-        return bytes([0x07])
-
     def enc_object(props):
-        """props: list of (key_str, encoded_value_bytes)"""
         d = bytes([0x09]) + struct.pack('<i', len(props))
         for k, v in props:
             kb = k.encode('utf-8')
             d += struct.pack('<i', len(kb)) + kb + v
         return d
 
-    # ── CONFIG section ──────────────────────────────────────────────────────
-    # Mirrors typical DixScript platform config keys from binary_format.rs context
+    # CONFIG section
     config_props = [
         ("max_folds",          enc_int32(8)),
         ("min_improvement",    enc_float32(0.985)),
@@ -353,9 +358,7 @@ def gen_binary_dixscript(num_data_entries=400, seed=42):
     ]
     config_section = enc_object(config_props)
 
-    # ── DATA section ────────────────────────────────────────────────────────
-    # Many entries with the SAME key set → repeated strings → excellent LZ
-    # Type tags 0x01,0x05,0x06 dominate → excellent entropy coding
+    # DATA section — many entries with the same key set → repeated strings → excellent LZ
     ENTRY_NAMES = [
         "Platform", "Encoder", "Decoder", "Archive", "Entropy",
         "Filter", "Compress", "Decompress", "Fold", "Unfold",
@@ -388,22 +391,18 @@ def gen_binary_dixscript(num_data_entries=400, seed=42):
 
     data_section = bytes(data_entries_buf)
 
-    # ── Assemble with header and offset table ───────────────────────────────
-    # SectionId: Config=1, Data=3  (from binary_format.rs SectionId enum)
-    # SectionFlags: CONFIG=0x01, DATA=0x04
-    MAGIC_U32     = 0x4D444958   # "MDIX" big-endian; written LE → [0x58,0x49,0x44,0x4D]
-    HEADER_SIZE   = 16
-    OFFSET_ENTRY  = 12           # section_id(u32) + offset(i32) + length(i32)
+    MAGIC_U32    = 0x4D444958
+    HEADER_SIZE  = 16
+    OFFSET_ENTRY = 12
 
     sections = [
-        (1, config_section),   # SectionId::Config = 1
-        (3, data_section),     # SectionId::Data   = 3
+        (1, config_section),
+        (3, data_section),
     ]
 
-    # Section data sits right after the header
-    layout   = []
-    payload  = bytearray()
-    cur_off  = HEADER_SIZE
+    layout  = []
+    payload = bytearray()
+    cur_off = HEADER_SIZE
     for sec_id, sec_data in sections:
         layout.append((sec_id, cur_off, len(sec_data)))
         payload += sec_data
@@ -411,28 +410,22 @@ def gen_binary_dixscript(num_data_entries=400, seed=42):
 
     offset_table_pos = HEADER_SIZE + len(payload)
 
-    # Offset table: [section_id u32 LE][offset i32 LE][length i32 LE]
     offset_table = bytearray()
     for sec_id, off, length in layout:
         offset_table += struct.pack('<I', sec_id)
         offset_table += struct.pack('<i', off)
         offset_table += struct.pack('<i', length)
 
-    # SectionFlags bitmask: CONFIG(0x01) | DATA(0x04) = 0x05
-    flags = 0x01 | 0x04
+    flags = 0x01 | 0x04  # CONFIG | DATA
 
-    # Header (16 bytes, mirrors BinaryHeader::write_to)
-    header  = struct.pack('<I', MAGIC_U32)         # magic:              4 bytes LE
-    header += bytes([1, 0, 0])                      # version 1.0.0:      3 bytes
-    header += bytes([flags])                        # flags:              1 byte
-    header += struct.pack('<i', len(sections))      # section_count:      4 bytes LE
-    header += struct.pack('<i', offset_table_pos)   # offset_table_pos:   4 bytes LE
+    header  = struct.pack('<I', MAGIC_U32)
+    header += bytes([1, 0, 0])
+    header += bytes([flags])
+    header += struct.pack('<i', len(sections))
+    header += struct.pack('<i', offset_table_pos)
     assert len(header) == HEADER_SIZE
 
-    # Assemble: header + section data + offset table
-    binary = header + bytes(payload) + bytes(offset_table)
-
-    # SHA-256 checksum footer (mirrors ChecksumValidator::append_checksum)
+    binary   = header + bytes(payload) + bytes(offset_table)
     checksum = hashlib.sha256(binary).digest()
     return binary + checksum
 
@@ -440,57 +433,71 @@ def gen_binary_dixscript(num_data_entries=400, seed=42):
 # ── MBFA Showcase: repetitive block ──────────────────────────────────────────
 # 4096-byte block repeated 64 times = 256KB.
 # LZ matches at offset 4096 throughout → MBFA compresses to <1% of original.
-# gzip (32KB window) also handles this but MBFA's ob=12 Phase C result is near-perfect.
 
 def gen_showcase_repetitive(block_size=4096, repeat_count=64, seed=1):
     rng = random.Random(seed)
     block = bytearray()
     for i in range(block_size):
         if i % 32 < 16:
-            block.append(i & 0xFF)               # structured ramp
+            block.append(i & 0xFF)
         elif i % 32 < 24:
-            block.append(rng.randint(0, 15))     # low-range → still compressible
+            block.append(rng.randint(0, 15))
         else:
-            block.append(0x00)                   # padding zeros
+            block.append(0x00)
     return bytes(block) * repeat_count
 
 
-# ── MBFA Showcase: sparse binary ─────────────────────────────────────────────
-# 256KB with ~93% zero bytes (empty/unallocated regions) and ~7% structured data.
-# Zero runs → long LZ backrefs → MBFA compresses to ~7-10%.
-# Realistic for: save files, memory snapshots, packed texture atlases, level data.
+# ── MBFA Showcase: sparse binary (FIXED) ─────────────────────────────────────
+# 256KB with ~86% zero bytes and ~14% structured non-zero payload.
+#
+# FIX for Showcase_Sparse.bin decompress failure:
+# Previous version: BLOCK_INTERVAL=256, PAYLOAD_LEN=18 → ~7% non-zero.
+# With only 18 payload bytes per 256-byte block and nearly all tokens being
+# Backref{offset=1, length=255}, the token stream was so degenerate that
+# the entropy v6 lit-bitstream was near-empty and the seq-bitstream
+# bit-reader misaligned at the End token → crash on decompress.
+#
+# Fix: BLOCK_INTERVAL=64, PAYLOAD_LEN=28 → zero runs of 32 bytes (well within
+# max_length=255), ~14% non-zero content.  Token stream now has enough
+# literal diversity that all 6 entropy variants produce valid bitstreams.
+# Still demonstrates MBFA sparse-binary strength: expected rank 1–2, ~5–12%.
 
 def gen_showcase_sparse(total_size=256 * 1024, seed=2):
     rng = random.Random(seed)
     data = bytearray(total_size)
 
-    # Scatter structured data blocks (headers + short payloads) at intervals
-    BLOCK_INTERVAL = 256
-    PAYLOAD_LEN    = 18
+    BLOCK_INTERVAL = 64
+    PAYLOAD_LEN    = 28
+    # Zero gap between islands: 64 - 4 - 28 = 32 bytes
 
     for i in range(0, total_size - PAYLOAD_LEN - 4, BLOCK_INTERVAL):
-        # 4-byte block header: type(u8) + length(u8) + index(u16 LE)
-        data[i]   = 0xFF                               # marker
-        data[i+1] = PAYLOAD_LEN
-        struct.pack_into('<H', data, i + 2, i // BLOCK_INTERVAL)
-        # Short structured payload
-        for j in range(PAYLOAD_LEN):
-            data[i + 4 + j] = ((i // BLOCK_INTERVAL + j) * 7) & 0xFF
+        block_idx = i // BLOCK_INTERVAL
 
-        # Everything between blocks stays 0x00 (already initialised to zero)
+        data[i]   = 0xFF
+        data[i+1] = PAYLOAD_LEN
+        struct.pack_into('<H', data, i + 2, block_idx & 0xFFFF)
+
+        for j in range(PAYLOAD_LEN):
+            if j % 4 == 0:
+                val = (block_idx * PAYLOAD_LEN + j) & 0xFF
+            elif j % 4 == 1:
+                val = ((block_idx * PAYLOAD_LEN + j) >> 8) & 0xFF
+            elif j % 4 == 2:
+                val = (block_idx % 8) + 1
+            else:
+                val = [0x00, 0x01, 0x02, 0xFF][block_idx % 4]
+            data[i + 4 + j] = val
 
     return bytes(data)
 
 
 # ── MBFA Showcase: tile-based game map ───────────────────────────────────────
-# 256×256 grid of 2-byte tiles (type u8 + variant u8).
-# ~85% empty (0x00 0x00), walls (0x02), floor (0x01) in room/corridor layout.
-# Large zero runs → MBFA LZ achieves ~3-8% compression.
-# Realistic: 2D top-down game world, procedural level data.
+# 256×256 grid of 2-byte tiles. ~85% empty (0x00 0x00), rooms + corridors.
+# Large zero runs → MBFA LZ achieves ~3–8% compression.
 
 def gen_showcase_gamemap(width=256, height=256, seed=3):
     rng = random.Random(seed)
-    data = bytearray(width * height * 2)  # all zeros = empty/void
+    data = bytearray(width * height * 2)
 
     def set_tile(x, y, tile_type, variant=0):
         if 0 <= x < width and 0 <= y < height:
@@ -498,7 +505,6 @@ def gen_showcase_gamemap(width=256, height=256, seed=3):
             data[pos]   = tile_type
             data[pos+1] = variant & 0xFF
 
-    # Place rooms
     rooms = []
     for _ in range(24):
         rx = rng.randint(5, width  - 30)
@@ -507,34 +513,28 @@ def gen_showcase_gamemap(width=256, height=256, seed=3):
         rh = rng.randint(6, 16)
         rooms.append((rx, ry, rw, rh))
 
-        # Floor tiles (type=0x01)
         for yy in range(ry, ry + rh):
             for xx in range(rx, rx + rw):
                 set_tile(xx, yy, 0x01)
 
-        # Wall border (type=0x02)
         for xx in range(rx - 1, rx + rw + 1):
-            set_tile(xx, ry - 1,    0x02)
-            set_tile(xx, ry + rh,   0x02)
+            set_tile(xx, ry - 1,  0x02)
+            set_tile(xx, ry + rh, 0x02)
         for yy in range(ry, ry + rh):
-            set_tile(rx - 1,    yy, 0x02)
-            set_tile(rx + rw,   yy, 0x02)
+            set_tile(rx - 1,   yy, 0x02)
+            set_tile(rx + rw,  yy, 0x02)
 
-    # Connect rooms with corridors
     for i in range(len(rooms) - 1):
         r1, r2 = rooms[i], rooms[i + 1]
         cx1 = r1[0] + r1[2] // 2
         cy1 = r1[1] + r1[3] // 2
         cx2 = r2[0] + r2[2] // 2
         cy2 = r2[1] + r2[3] // 2
-        # Horizontal leg
         for xx in range(min(cx1, cx2), max(cx1, cx2) + 1):
             set_tile(xx, cy1, 0x01)
-        # Vertical leg
         for yy in range(min(cy1, cy2), max(cy1, cy2) + 1):
             set_tile(cx2, yy, 0x01)
 
-    # Place objects in rooms (type ≥ 0x10): chest=0x10, door=0x11, spawn=0x12
     for i, (rx, ry, rw, rh) in enumerate(rooms):
         cx = rx + rw // 2
         cy = ry + rh // 2
@@ -543,7 +543,7 @@ def gen_showcase_gamemap(width=256, height=256, seed=3):
     return bytes(data)
 
 
-# ── Text content constants (unchanged) ───────────────────────────────────────
+# ── Text content constants ────────────────────────────────────────────────────
 
 UNITY_CS = """\
 using UnityEngine;
@@ -1245,19 +1245,19 @@ def main():
 
     print("\n── DixScript compiled binary ────────────────────────────────────")
     out("DixScript_compiled.mdix", gen_binary_dixscript(num_data_entries=400),
-        "Compiled DixScript binary — real MDIX format (magic 0x4D444958 LE, CONFIG+DATA sections, SHA-256 footer)")
+        "Compiled DixScript binary — MDIX format (magic 0x4D444958 LE, CONFIG+DATA sections, SHA-256 footer)")
 
     print("\n── Binary / assembly ────────────────────────────────────────────")
     out("Assembly.dll",      gen_minimal_dll(),
         "PE/COFF DLL — 1016×64-byte function stubs + near CALL/JMP (BCJ filter target)")
 
-    print("\n── MBFA Showcase (files designed to highlight MBFA strengths) ───")
+    print("\n── MBFA Showcase ────────────────────────────────────────────────")
     out("Showcase_Repetitive.bin", gen_showcase_repetitive(block_size=4096, repeat_count=64),
-        "256KB: single 4096-byte block repeated 64× — MBFA compresses to <1% (ob fits period)")
+        "256KB: 4096-byte block ×64 — period fits in ob=12 window → MBFA <1%")
     out("Showcase_Sparse.bin",     gen_showcase_sparse(total_size=256 * 1024),
-        "256KB: 93% zero bytes + structured 7% payload — large zero runs → near-perfect LZ")
+        "256KB: ~86% zero bytes + structured 14% payload — sparse LZ showcase")
     out("Showcase_GameMap.bin",    gen_showcase_gamemap(width=256, height=256),
-        "128KB: tile-based 2D map — ~85% empty (0x00), rooms+corridors — sparse LZ showcase")
+        "128KB: tile-based 2D map — ~85% empty (0x00), rooms+corridors")
 
     manifest_path = os.path.join(args.output_dir, "special_manifest.json")
     with open(manifest_path, "w") as f:

@@ -8,6 +8,13 @@
 //!
 //! WAV and BMP helpers read their format headers to derive the exact stride
 //! (sample_bytes × channels for WAV; bits-per-pixel / 8 for BMP).
+//!
+//! Zero-preservation guard: if the file is sparse (>40% zero bytes in the
+//! sample) and the delta dramatically increases the zero count (>15% of sample
+//! length of artificial zeros created), the filter is rejected regardless of
+//! entropy improvement. This prevents delta from misfiring on sparse binary
+//! data where the zero increase comes from arithmetic cancellations at
+//! payload-to-zero boundaries rather than from genuine numeric correlation.
 
 use crate::filters::{FILTER_DELTA1, FILTER_DELTA2, FILTER_DELTA3, FILTER_DELTA4, FILTER_NONE};
 
@@ -15,14 +22,13 @@ use crate::filters::{FILTER_DELTA1, FILTER_DELTA2, FILTER_DELTA3, FILTER_DELTA4,
 pub const PROBE_MIN_BYTES: usize = 512;
 
 /// Entropy improvement threshold in bits/byte for the stride probe.
-/// Below this the filter is not applied even if it reduces entropy.
 pub const PROBE_DELTA_THRESHOLD: f64 = 0.45;
 
 // ── WAV / BMP stride selection ────────────────────────────────────────────────
 
 /// Parse a WAV/RIFF "fmt " chunk to determine the optimal delta stride.
 pub fn detect_wav_stride(input: &[u8]) -> u8 {
-    let mut pos = 12usize; // skip "RIFF<size>WAVE"
+    let mut pos = 12usize;
     while pos + 8 <= input.len() {
         let id        = &input[pos..pos + 4];
         let chunk_len = u32::from_le_bytes([
@@ -42,12 +48,12 @@ pub fn detect_wav_stride(input: &[u8]) -> u8 {
                 2 => FILTER_DELTA2,
                 3 => FILTER_DELTA3,
                 4 => FILTER_DELTA4,
-                _ => FILTER_DELTA2, // default for unusual configs
+                _ => FILTER_DELTA2,
             };
         }
 
         pos += 8 + chunk_len;
-        if chunk_len % 2 != 0 { pos += 1; } // RIFF chunk padding
+        if chunk_len % 2 != 0 { pos += 1; }
     }
     println!("WAV: fmt chunk not found, falling back to delta2");
     FILTER_DELTA2
@@ -62,7 +68,7 @@ pub fn detect_bmp_stride(input: &[u8]) -> u8 {
         16 => FILTER_DELTA2,
         24 => FILTER_DELTA3,
         32 => FILTER_DELTA4,
-        _  => FILTER_DELTA3, // default for unusual depths
+        _  => FILTER_DELTA3,
     }
 }
 
@@ -81,21 +87,53 @@ pub fn byte_entropy(data: &[u8]) -> f64 {
 }
 
 /// Entropy improvement (bits/byte) from delta-encoding `data` at `stride`.
-/// Samples up to 8 KB.  Returns 0.0 if there is no improvement.
+/// Samples up to 8 KB. Returns 0.0 when the filter should not be applied.
+///
+/// Zero-preservation guard: rejects the filter when the file is sparse
+/// (>40% zeros) AND the delta dramatically inflates the zero count (>15% of
+/// sample size in artificial zeros). This prevents the probe from misfiring
+/// on sparse binary data where arithmetic cancellations at payload-to-zero
+/// boundaries increase zeros without providing genuine LZ benefit.
 pub fn probe_delta_improvement(data: &[u8], stride: usize) -> f64 {
     const SAMPLE: usize = 8192;
     let sample = if data.len() > SAMPLE { &data[..SAMPLE] } else { data };
     if sample.len() < stride * 2 { return 0.0; }
+
     let raw_entropy = byte_entropy(sample);
-    let mut delta   = sample.to_vec();
+
+    let mut delta = sample.to_vec();
     for i in stride..delta.len() {
         delta[i] = sample[i].wrapping_sub(sample[i - stride]);
     }
+
+    // ── Zero-preservation guard ───────────────────────────────────────────────
+    // Sparse binary files (>40% zeros) may show apparent entropy improvement
+    // when delta accidentally creates zeros from payload-to-zero boundaries.
+    // These artificial zeros don't represent LZ-matchable structure — they come
+    // from subtracting non-zero payload bytes from zero padding, producing
+    // pseudo-random non-zero values that happen to cancel in the opposite
+    // direction. Reject if zero count inflates by >15% of the sample length.
+    let zeros_before = sample.iter().filter(|&&b| b == 0).count();
+    let zero_frac    = zeros_before as f64 / sample.len() as f64;
+
+    if zero_frac > 0.40 {
+        let zeros_after = delta.iter().filter(|&&b| b == 0).count();
+        let zero_gain   = (zeros_after as i64 - zeros_before as i64) as f64
+                          / sample.len() as f64;
+        if zero_gain > 0.15 {
+            // Large artificial zero inflation on sparse binary → reject filter.
+            // The raw zero runs are the primary LZ lever; don't disturb them.
+            return 0.0;
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     (raw_entropy - byte_entropy(&delta)).max(0.0)
 }
 
 /// Test strides 1–4 and return the (filter_flag, improvement) pair with the
-/// largest improvement.  Returns (FILTER_NONE, 0.0) when data is empty.
+/// largest improvement.  Returns (FILTER_NONE, 0.0) when data is empty or no
+/// stride improves entropy above zero.
 pub fn probe_best_stride(data: &[u8]) -> (u8, f64) {
     let candidates = [
         (FILTER_DELTA1, probe_delta_improvement(data, 1)),
@@ -167,8 +205,7 @@ mod tests {
         let (filter, imp) = probe_best_stride(&data);
         assert_eq!(
             filter, FILTER_DELTA2,
-            "expected FILTER_DELTA2 for int16, got FILTER_DELTA{}",
-            filter
+            "expected FILTER_DELTA2 for int16, got FILTER_DELTA{}", filter
         );
         assert!(imp >= PROBE_DELTA_THRESHOLD);
     }
@@ -183,13 +220,11 @@ mod tests {
         let (filter, imp) = probe_best_stride(&data);
         assert!(
             imp >= PROBE_DELTA_THRESHOLD,
-            "probe should fire on smooth int32 (improvement={:.2})",
-            imp
+            "probe should fire on smooth int32 (improvement={:.2})", imp
         );
         assert_eq!(
             filter, FILTER_DELTA4,
-            "expected FILTER_DELTA4 for int32, got FILTER_DELTA{}",
-            filter
+            "expected FILTER_DELTA4 for int32, got FILTER_DELTA{}", filter
         );
     }
 
@@ -214,4 +249,64 @@ mod tests {
         );
         assert_eq!(filter, FILTER_DELTA2);
     }
-}
+
+    #[test]
+    fn probe_zero_preservation_rejects_sparse_binary_misfire() {
+        // Simulate Showcase_Sparse pattern: BLOCK_INTERVAL=64, 32 bytes non-zero
+        // + 32 bytes zero per block. Stride-4 delta inflates zeros artificially
+        // (from cancellations at payload-to-zero boundaries) — should be rejected.
+        let total = 8192usize;
+        let mut data = vec![0u8; total];
+        let block_interval = 64usize;
+        let payload_len    = 28usize;
+        for i in (0..total - payload_len - 4).step_by(block_interval) {
+            let bidx = i / block_interval;
+            data[i]   = 0xFF;
+            data[i+1] = payload_len as u8;
+            data[i+2] = (bidx & 0xFF) as u8;
+            data[i+3] = ((bidx >> 8) & 0xFF) as u8;
+            for j in 0..payload_len {
+                data[i + 4 + j] = match j % 4 {
+                    0 => ((bidx * payload_len + j) & 0xFF) as u8,
+                    1 => (((bidx * payload_len + j) >> 8) & 0xFF) as u8,
+                    2 => (bidx % 8 + 1) as u8,
+                    _ => [0u8, 1, 2, 255][bidx % 4],
+                };
+            }
+        }
+        // The probe should return 0.0 for all strides on this sparse binary
+        // (zero_frac ≈ 0.55, stride creates artificial zero inflation > 15%)
+        for stride in 1..=4usize {
+            let imp = probe_delta_improvement(&data, stride);
+            // We accept either 0.0 (guard fired) or below threshold (entropy didn't help)
+            // The key is: the filter should not be applied
+            assert!(
+                imp < PROBE_DELTA_THRESHOLD,
+                "stride-{} should not fire on sparse binary (improvement={:.4})",
+                stride, imp
+            );
+        }
+    }
+
+    #[test]
+    fn probe_terrain_not_affected_by_zero_guard() {
+        // Terrain data: uint16 LE values, all > 0 → zero_frac near 0 → guard never fires
+        let mut data = Vec::with_capacity(8192);
+        for i in 0..4096usize {
+            let v: u16 = (1000 + (i * 13) % 60000) as u16;
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        let zero_count = data.iter().filter(|&&b| b == 0).count();
+        let zero_frac  = zero_count as f64 / data.len() as f64;
+        assert!(
+            zero_frac < 0.40,
+            "terrain should have < 40% zeros, got {:.1}%", zero_frac * 100.0
+        );
+        // Probe should still fire normally for terrain
+        let (_, imp) = probe_best_stride(&data);
+        assert!(
+            imp >= PROBE_DELTA_THRESHOLD,
+            "terrain probe should still fire after guard added (imp={:.3})", imp
+        );
+    }
+                }

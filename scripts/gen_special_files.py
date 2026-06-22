@@ -157,26 +157,6 @@ def gen_glb():
 
 
 # ── Row-periodic terrain heightmap ────────────────────────────────────────────
-#
-# FIX: h_noise amplitude increased from 0.04 → 0.08.
-#
-# Root cause of Terrain_large.raw roundtrip failure:
-#   After FILTER_DELTA2, the encoder's fingerprint_predict samples first 8KB
-#   entropy. With h_noise=0.04, floating-point precision differences between
-#   CPU architectures can push the computed entropy slightly below
-#   FINGERPRINT_ENTROPY_REPETITIVE=2.0 on some CI machines, causing fingerprint
-#   to return None. The Phase C path then runs scan_discover which, with
-#   DISCOVER_CHAIN_LIMIT=256, may fail to traverse back 63550 bytes in the hash
-#   chain, returning wide_ob=OFFSET_BITS_MIN=7 (window=127 << period_bytes=63550).
-#   constrained scan at ob=7 finds no matches → baseline ob=17 wins but the
-#   interaction with the expansion bail can produce wrong ob in some edge cases.
-#
-# Fix: h_noise=0.08 ensures delta2 byte entropy is robustly > 2.5 bits/byte
-# on all CPU architectures, so fingerprint_predict reliably returns Some((17,8))
-# → Phase B → upper-half saturation → Phase C → correct ob=16 selection.
-#
-# period=31 rows (Terrain_large), period_bytes=63550 < ob=16 window (65535) ✓
-# period=63 rows (Terrain_1K),    period_bytes=64638 < ob=16 window (65535) ✓
 
 def gen_terrain_raw(width, height, seed=1):
     row_bytes = width * 2
@@ -198,9 +178,6 @@ def gen_terrain_raw(width, height, seed=1):
                          + 0.10 * math.cos(sx * FREQ_X * 2 * math.pi * 2)
                          + 0.05 * math.sin(sx * FREQ_X * 3 * math.pi * 2)
                          + y_offset)
-            # INCREASED from 0.04 to 0.08: ensures delta2'd entropy stays
-            # robustly above 2.0 bits/byte on all CPU architectures so
-            # fingerprint_predict reliably returns Some((17,8)) → Phase B path.
             h_noise = 0.08 * math.sin(sx * 41 * math.pi * 2 + seed * 0.7)
             h = h_primary + h_noise
             v = max(0, min(65535, int(h * 65535)))
@@ -431,12 +408,6 @@ def gen_showcase_repetitive(block_size=4096, repeat_count=64, seed=1):
 
 
 # ── MBFA Showcase: sparse binary ─────────────────────────────────────────────
-#
-# BLOCK_INTERVAL=64, PAYLOAD_LEN=28: ~50% non-zero content.
-# Note: the "~14% non-zero" comment in old code was incorrect; actual ratio is
-# (4+28)/64 = 50%. Delta4 probe does not fire at 50% non-zero density, so
-# FILTER_NONE is applied and LZ handles the 64-byte periodic structure directly.
-# Expected result: ~18% (rank3) — correct for this file configuration.
 
 def gen_showcase_sparse(total_size=256 * 1024, seed=2):
     rng = random.Random(seed)
@@ -1239,9 +1210,13 @@ def main():
             "files": manifest,
             "total_files": len(manifest),
             "total_bytes": sum(m["size"] for m in manifest),
-        }, f,indent=2)print(f"\n{'─'*60}")
-print(f"Generated {len(manifest)} files, "
-      f"{sum(m['size'] for m in manifest):,} bytes total")
-print(f"Manifest → {manifest_path}")if name == "main":
+        }, f, indent=2)
 
-main()
+    print(f"\n{'─'*60}")
+    print(f"Generated {len(manifest)} files, "
+          f"{sum(m['size'] for m in manifest):,} bytes total")
+    print(f"Manifest → {manifest_path}")
+
+
+if __name__ == "__main__":
+    main()

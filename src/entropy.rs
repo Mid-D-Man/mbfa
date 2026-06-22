@@ -2,10 +2,12 @@
 //
 // Entropy coding variants — all operate on the fold-1 token stream.
 //
-// P6: NUM_SLOTS reduced 8→4 to match MAX_RING_SLOTS.
-// P6: Token::RepRef arms added (unreachable) to every match on Token —
-//     resolve_ring() is always called before entropy functions see tokens,
-//     but Rust requires exhaustive matching.
+// P10 change: serialize_table gains fmt3 (RLE on code-length arrays).
+//   Format 3 uses sentinels 0xFE (zero-run) and 0xFF (nonzero-repeat) in the
+//   raw length array to compress runs of absent symbols (value 0) and runs of
+//   equal-length codes. Practical code lengths are < 50 so sentinels never
+//   conflict. Primary win: small files where table overhead is proportionally
+//   large (Unreal_uplugin 572B, YAML/TOML/INI configs).
 
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
@@ -29,7 +31,7 @@ pub type DecodeTable = HashMap<(u32, u32), u32>;
 
 // ── Recent-offset slot reuse ──────────────────────────────────────────────────
 
-pub const NUM_SLOTS:        usize = 4;  // P6: was 8, now matches MAX_RING_SLOTS
+pub const NUM_SLOTS:        usize = 4;
 pub const SLOT_SYMBOL_BASE: u32   = 1000;
 
 pub struct OffsetSlots {
@@ -235,7 +237,8 @@ fn assign_code_lengths(freq: &HashMap<u32, u64>) -> HashMap<u32, u32> {
     }
 
     let root = heap.pop().unwrap().2;
-    let node_to_sym: HashMap<usize, u32> = sym_to_node.iter().map(|(&s, &id)| (id, s)).collect();
+    let node_to_sym: HashMap<usize, u32> =
+        sym_to_node.iter().map(|(&s, &id)| (id, s)).collect();
 
     let mut depths: HashMap<u32, u32> = HashMap::new();
     let mut stack: Vec<(usize, u32)> = vec![(root, 0)];
@@ -255,8 +258,8 @@ fn assign_code_lengths(freq: &HashMap<u32, u64>) -> HashMap<u32, u32> {
 fn canonical_codes_from_lengths(lengths: &HashMap<u32, u32>) -> EncodeTable {
     let mut sorted: Vec<(u32, u32)> = lengths.iter().map(|(&s, &l)| (s, l)).collect();
     sorted.sort_by_key(|&(s, l)| (l, s));
-    let mut table = EncodeTable::new();
-    let mut code  = 0u32;
+    let mut table    = EncodeTable::new();
+    let mut code     = 0u32;
     let mut prev_len = 0u32;
     for (sym, len) in sorted {
         if len == 0 { continue; }
@@ -307,9 +310,9 @@ pub fn byte_category(b: u8) -> usize {
         b'a' | b'e' | b'i' | b'o' | b'u' => 0,
         b'A'..=b'Z' => 1,
         b'b'..=b'z' => 1,
-        9 | 10 | 13 | 32        => 2,
-        33 | 44 | 46 | 58 | 59  => 2,
-        39 | 40 | 41 | 63 | 45  => 2,
+        9 | 10 | 13 | 32         => 2,
+        33 | 44 | 46 | 58 | 59   => 2,
+        39 | 40 | 41 | 63 | 45   => 2,
         34 | 91 | 93 | 123 | 125 => 2,
         _ => 3,
     }
@@ -321,7 +324,8 @@ pub fn context_idx(after_br: bool, prev_byte: u8) -> usize {
 }
 
 fn count_joint_freq_v3(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32, u64>) {
-    let mut lit_freqs: [Vec<u64>; 8] = std::array::from_fn(|_| vec![0u64; LIT_LEN_FREQ_SIZE]);
+    let mut lit_freqs: [Vec<u64>; 8] =
+        std::array::from_fn(|_| vec![0u64; LIT_LEN_FREQ_SIZE]);
     let mut bucket_freq = [0u64; BUCKET_FREQ_SIZE];
 
     let mut prev_byte: u8 = b' ';
@@ -350,9 +354,8 @@ fn count_joint_freq_v3(tokens: &[Token]) -> ([HashMap<u32, u64>; 8], HashMap<u32
         }
     }
 
-    let lit_maps: [HashMap<u32, u64>; 8] = std::array::from_fn(|i| {
-        lit_len_array_to_map(&lit_freqs[i])
-    });
+    let lit_maps: [HashMap<u32, u64>; 8] =
+        std::array::from_fn(|i| lit_len_array_to_map(&lit_freqs[i]));
 
     (lit_maps, bucket_array_to_map(&bucket_freq))
 }
@@ -380,18 +383,39 @@ pub fn build_encode_tables_v3(tokens: &[Token]) -> Option<([EncodeTable; 8], Enc
 }
 
 // ── Table serialisation ───────────────────────────────────────────────────────
+//
+// Format index:
+//   0x00  fmt0  explicit (sym u16, len u8) list
+//   0x01  fmt1  contiguous range, one len byte per symbol
+//   0x02  fmt2  two-range split (bytes + lengths)
+//   0x03  fmt3  RLE over contiguous range          ← NEW (P10)
+//
+// fmt3 RLE tokens (within the [min_sym..=max_sym] extent):
+//   byte 0x00-0xFD : literal code length (0 = symbol absent)
+//   byte 0xFE       : zero-run; next byte = count - 3  → 3..258 zeros
+//   byte 0xFF       : nonzero-repeat; next byte = value; byte after = count - 3
+//
+// Sentinel values 0xFE/0xFF never conflict with real code lengths because MBFA's
+// Huffman tree over any practical alphabet produces lengths ≤ 30.  The guard in
+// fmt3_rle() enforces this and falls back gracefully if it ever fires.
 
 pub fn serialize_table(table: &EncodeTable) -> Vec<u8> {
     if table.is_empty() { return vec![0x00u8, 0x00, 0x00]; }
 
     let f0 = fmt0_explicit(table);
     let f1 = fmt1_range(table);
+    let f3 = fmt3_rle(table); // empty vec if any length >= 0xFE (guard)
 
     let has_bytes   = table.keys().any(|&s| s <= 255);
     let has_lengths = table.keys().any(|&s| s >= 257);
 
+    // Start with the smaller of fmt0 / fmt1
     let mut best = if f1.len() < f0.len() { f1 } else { f0 };
 
+    // Prefer fmt3 when it wins and is applicable
+    if !f3.is_empty() && f3.len() < best.len() { best = f3; }
+
+    // Try fmt2 (two-range) when both byte-literals and length-symbols are present
     if has_bytes && has_lengths {
         let max_len_val = table.keys()
             .filter(|&&s| s >= 257)
@@ -456,14 +480,70 @@ fn fmt2_two_range(table: &EncodeTable) -> Vec<u8> {
     out
 }
 
+// ── fmt3: RLE over contiguous symbol range (NEW P10) ─────────────────────────
+
+/// Encode a Huffman code-length table using simple RLE.
+///
+/// Returns an empty Vec when any code length >= 0xFE, signalling the caller
+/// to use an alternate format.  In practice this guard never fires.
+fn fmt3_rle(table: &EncodeTable) -> Vec<u8> {
+    // Guard: sentinel bytes 0xFE / 0xFF must not be valid code lengths.
+    if table.values().any(|&(_, l)| l >= 0xFE) {
+        return Vec::new();
+    }
+
+    let min_sym = *table.keys().min().unwrap();
+    let max_sym = *table.keys().max().unwrap();
+
+    // Build contiguous length array over [min_sym..=max_sym]
+    let lengths: Vec<u8> = (min_sym..=max_sym)
+        .map(|s| table.get(&s).map(|&(_, l)| l as u8).unwrap_or(0))
+        .collect();
+
+    let mut out = vec![0x03u8];
+    out.extend_from_slice(&(min_sym as u16).to_le_bytes());
+    out.extend_from_slice(&(max_sym as u16).to_le_bytes());
+
+    let n = lengths.len();
+    let mut i = 0;
+    while i < n {
+        let v = lengths[i];
+        // Count run of this value (capped at 258 per RLE token)
+        let mut run = 1;
+        while i + run < n && lengths[i + run] == v && run < 258 {
+            run += 1;
+        }
+        if run >= 3 {
+            if v == 0 {
+                // 0xFE  count-3  → emits (count-3+3) = count zeros
+                out.push(0xFE);
+                out.push((run - 3) as u8);
+            } else {
+                // 0xFF  value  count-3
+                out.push(0xFF);
+                out.push(v);
+                out.push((run - 3) as u8);
+            }
+            i += run;
+        } else {
+            // Runs < 3: emit literals directly (cheaper than RLE header)
+            for j in 0..run { out.push(lengths[i + j]); }
+            i += run;
+        }
+    }
+    out
+}
+
 pub fn deserialize_table(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
     if data.is_empty() {
-        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "table: empty"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof, "table: empty"));
     }
     match data[0] {
         0x00 => deserialize_fmt0(data),
         0x01 => deserialize_fmt1(data),
         0x02 => deserialize_fmt2(data),
+        0x03 => deserialize_fmt3(data),  // NEW P10
         b    => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("unknown table format: 0x{:02x}", b))),
@@ -472,12 +552,14 @@ pub fn deserialize_table(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
 
 fn deserialize_fmt0(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
     if data.len() < 3 {
-        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "fmt0: too short"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof, "fmt0: too short"));
     }
     let n = u16::from_le_bytes([data[1], data[2]]) as usize;
     let needed = 3 + n * 3;
     if data.len() < needed {
-        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "fmt0: truncated"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof, "fmt0: truncated"));
     }
     let mut lengths: HashMap<u32, u32> = HashMap::new();
     for i in 0..n {
@@ -491,17 +573,20 @@ fn deserialize_fmt0(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
 
 fn deserialize_fmt1(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
     if data.len() < 5 {
-        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "fmt1: too short"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof, "fmt1: too short"));
     }
     let min_sym = u16::from_le_bytes([data[1], data[2]]) as u32;
     let max_sym = u16::from_le_bytes([data[3], data[4]]) as u32;
     if max_sym < min_sym {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "fmt1: max < min"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData, "fmt1: max < min"));
     }
     let range  = (max_sym - min_sym + 1) as usize;
     let needed = 5 + range;
     if data.len() < needed {
-        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "fmt1: truncated"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof, "fmt1: truncated"));
     }
     let mut lengths: HashMap<u32, u32> = HashMap::new();
     for i in 0..range {
@@ -513,18 +598,21 @@ fn deserialize_fmt1(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
 
 fn deserialize_fmt2(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
     if data.len() < 4 {
-        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "fmt2: too short"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof, "fmt2: too short"));
     }
     let min_byte   = data[1] as u32;
     let max_byte   = data[2] as u32;
     let end_len    = data[3] as u32;
     if max_byte < min_byte {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "fmt2: max_byte < min_byte"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData, "fmt2: max_byte < min_byte"));
     }
     let byte_range = (max_byte - min_byte + 1) as usize;
     let len_hdr    = 4 + byte_range;
     if data.len() < len_hdr + 2 {
-        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "fmt2: byte section truncated"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof, "fmt2: byte section truncated"));
     }
     let mut lengths: HashMap<u32, u32> = HashMap::new();
     for i in 0..byte_range {
@@ -535,12 +623,14 @@ fn deserialize_fmt2(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
     let min_len   = data[len_hdr]     as u32;
     let max_len   = data[len_hdr + 1] as u32;
     if max_len < min_len {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "fmt2: max_len < min_len"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData, "fmt2: max_len < min_len"));
     }
     let len_range = (max_len - min_len + 1) as usize;
     let needed    = len_hdr + 2 + len_range;
     if data.len() < needed {
-        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "fmt2: len section truncated"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof, "fmt2: len section truncated"));
     }
     for i in 0..len_range {
         let l = data[len_hdr + 2 + i] as u32;
@@ -550,6 +640,88 @@ fn deserialize_fmt2(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
         }
     }
     Ok((canonical_codes_from_lengths(&lengths), needed))
+}
+
+/// Deserialize a fmt3 RLE-encoded code-length table. (NEW P10)
+fn deserialize_fmt3(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
+    if data.len() < 5 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof, "fmt3: too short"));
+    }
+    let min_sym = u16::from_le_bytes([data[1], data[2]]) as u32;
+    let max_sym = u16::from_le_bytes([data[3], data[4]]) as u32;
+    if max_sym < min_sym {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData, "fmt3: max < min"));
+    }
+
+    let range = (max_sym - min_sym + 1) as usize;
+    let mut lengths = vec![0u8; range];
+    let mut pos = 0usize;  // write position in lengths[]
+    let mut cur = 5usize;  // read position in data[]
+
+    while pos < range {
+        if cur >= data.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("fmt3: RLE payload truncated at pos {}/{}", pos, range)));
+        }
+        let b = data[cur];
+        cur += 1;
+        match b {
+            0xFE => {
+                // Zero run: next byte is count - 3
+                if cur >= data.len() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "fmt3: zero-run count byte missing"));
+                }
+                let count = data[cur] as usize + 3;
+                cur += 1;
+                if pos + count > range {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("fmt3: zero-run overflow (pos={} count={} range={})",
+                            pos, count, range)));
+                }
+                // lengths already zeroed; just advance pos
+                pos += count;
+            }
+            0xFF => {
+                // Nonzero repeat: next byte = value, byte after = count - 3
+                if cur + 1 >= data.len() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "fmt3: repeat header truncated"));
+                }
+                let v     = data[cur];
+                let count = data[cur + 1] as usize + 3;
+                cur += 2;
+                if pos + count > range {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("fmt3: repeat overflow (pos={} count={} range={})",
+                            pos, count, range)));
+                }
+                for _ in 0..count {
+                    lengths[pos] = v;
+                    pos += 1;
+                }
+            }
+            v => {
+                // Literal code length (0 = absent, 1-253 = real length)
+                lengths[pos] = v;
+                pos += 1;
+            }
+        }
+    }
+
+    let mut length_map: HashMap<u32, u32> = HashMap::new();
+    for (i, &l) in lengths.iter().enumerate() {
+        if l > 0 { length_map.insert(min_sym + i as u32, l as u32); }
+    }
+
+    Ok((canonical_codes_from_lengths(&length_map), cur))
 }
 
 // ── v1 ────────────────────────────────────────────────────────────────────────
@@ -566,7 +738,8 @@ pub fn write_tokens_v1(
             match token {
                 Token::Lit { byte } => {
                     let &(code, len) = lit_table.get(&(*byte as u32)).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v1 lit sym missing")
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            "v1 lit sym missing")
                     })?;
                     w.write(len, code)?;
                 }
@@ -587,7 +760,8 @@ pub fn write_tokens_v1(
                 }
                 Token::End => {
                     let &(code, len) = lit_table.get(&SYM_END).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v1 END sym missing")
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            "v1 END sym missing")
                     })?;
                     w.write(len, code)?;
                 }
@@ -699,12 +873,16 @@ pub fn read_tokens_v2(
     let lit_max0   = lit_dtable0.keys().map(|&(_, l)| l).max().unwrap_or(32);
     let lit_max1   = lit_dtable1.keys().map(|&(_, l)| l).max().unwrap_or(32);
     let offset_max = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
-    let mut tokens = Vec::new();
-    let mut r      = BitReader::endian(std::io::Cursor::new(input), BigEndian);
+    let mut tokens   = Vec::new();
+    let mut r        = BitReader::endian(std::io::Cursor::new(input), BigEndian);
     let mut after_br = false;
 
     loop {
-        let (dt, ml) = if after_br { (lit_dtable1, lit_max1) } else { (lit_dtable0, lit_max0) };
+        let (dt, ml) = if after_br {
+            (lit_dtable1, lit_max1)
+        } else {
+            (lit_dtable0, lit_max0)
+        };
         let sym = match read_huffman_sym(&mut r, dt, ml) {
             Ok(s)  => s,
             Err(_) => break,
@@ -798,9 +976,8 @@ pub fn read_tokens_v3(
 ) -> std::io::Result<Vec<Token>> {
     assert!(dtables.len() == 8, "v3 requires exactly 8 decode tables");
 
-    let max_lens: [u32; 8] = std::array::from_fn(|i| {
-        dtables[i].keys().map(|&(_, l)| l).max().unwrap_or(1)
-    });
+    let max_lens: [u32; 8] =
+        std::array::from_fn(|i| dtables[i].keys().map(|&(_, l)| l).max().unwrap_or(1));
     let offset_max = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
 
     let mut tokens    = Vec::new();
@@ -856,7 +1033,8 @@ pub fn write_tokens_v4(
             match token {
                 Token::Lit { byte } => {
                     let &(code, len) = lit_table.get(&(*byte as u32)).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v4 lit sym missing")
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            "v4 lit sym missing")
                     })?;
                     w.write(len, code)?;
                 }
@@ -886,7 +1064,8 @@ pub fn write_tokens_v4(
                 }
                 Token::End => {
                     let &(code, len) = lit_table.get(&SYM_END).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "v4 END sym missing")
+                        std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            "v4 END sym missing")
                     })?;
                     w.write(len, code)?;
                 }
@@ -1025,7 +1204,11 @@ pub fn read_tokens_v5(
     let mut slots    = OffsetSlots::new();
 
     loop {
-        let (dt, ml) = if after_br { (lit_dtable1, lit_max1) } else { (lit_dtable0, lit_max0) };
+        let (dt, ml) = if after_br {
+            (lit_dtable1, lit_max1)
+        } else {
+            (lit_dtable0, lit_max0)
+        };
         let sym = match read_huffman_sym(&mut r, dt, ml) {
             Ok(s)  => s,
             Err(_) => break,
@@ -1205,7 +1388,8 @@ pub fn read_tokens_v6(
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             format!("v6: lit_bitstream truncated (need {} bytes, have {})",
-                lit_bitstream_len, input.len().saturating_sub(8)),
+                lit_bitstream_len,
+                input.len().saturating_sub(8)),
         ));
     }
 
@@ -1222,11 +1406,13 @@ pub fn read_tokens_v6(
         for idx in 0..lit_count {
             let sym = read_huffman_sym(&mut r, lit_dtable, lit_max).map_err(|e| {
                 std::io::Error::new(e.kind(),
-                    format!("v6: lit_bitstream error at literal {}/{}: {}", idx, lit_count, e))
+                    format!("v6: lit_bitstream error at literal {}/{}: {}",
+                        idx, lit_count, e))
             })?;
             if sym > 255 {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
-                    format!("v6: non-byte symbol {} in lit_bitstream at index {}", sym, idx)));
+                    format!("v6: non-byte symbol {} in lit_bitstream at index {}",
+                        sym, idx)));
             }
             lit_bytes.push(sym as u8);
         }
@@ -1282,4 +1468,4 @@ fn read_huffman_sym<R: std::io::Read>(
         std::io::ErrorKind::InvalidData,
         format!("invalid huffman symbol after {} bits", max_len),
     ))
-    }
+}

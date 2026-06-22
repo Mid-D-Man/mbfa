@@ -451,8 +451,9 @@ fn jal_decode_imm(instr: u32) -> i32 {
 }
 
 /// Re-encode a signed byte offset into the scrambled JAL immediate fields.
+/// Re-encode a signed byte offset into the scrambled JAL immediate fields.
 #[inline]
-fn jal_encode_imm(instr: u32, value: i32) -> u32 {
+pub(crate) fn jal_encode_imm(instr: u32, value: i32) -> u32 {
     let v = value as u32;
     let new_imm20    = (v >> 20) & 1;
     let new_imm10_1  = (v >> 1) & 0x3FF;
@@ -466,6 +467,7 @@ fn jal_encode_imm(instr: u32, value: i32) -> u32 {
     // Preserve rd (bits 11:7) and opcode (bits 6:0); replace immediate bits.
     (instr & 0x0000_0FFF) | new_bits
 }
+
 
 /// Apply RISC-V BCJ transform (JAL instructions only).
 pub fn bcj_riscv_encode(data: &[u8]) -> Vec<u8> {

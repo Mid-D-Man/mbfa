@@ -9,31 +9,32 @@
 //!   probe  — multi-stride entropy probe + WAV/BMP stride detection helpers
 //!
 //! Filter flags (header byte 3):
-//!   0 = none
-//!   1 = delta stride 1
-//!   2 = delta stride 2
-//!   3 = delta stride 3
-//!   4 = delta stride 4
-//!   7 = STL: plane-shuffle + stride-12 delta (LEGACY DECODE ONLY)
-//!   8 = PLY: plane-shuffle × 4 + per-vertex-stride delta1
-//!   9 = x86 BCJ for PE/COFF executables (existing)
-//!  10 = STL: field-major plane-split + stride-1 delta (CURRENT)
-//!  11 = ARM 32-bit BCJ (BL instructions)
-//!  12 = ARM64 BCJ (B/BL unconditional branches)
-//!  13 = PowerPC BCJ (B/BL relative, big-endian)
-//!  14 = SPARC BCJ (CALL instructions, big-endian)
-//!  15 = RISC-V BCJ (JAL instructions)
+//!    0 = none
+//!    1 = delta stride 1
+//!    2 = delta stride 2
+//!    3 = delta stride 3
+//!    4 = delta stride 4
+//!    7 = STL: plane-shuffle + stride-12 delta (LEGACY DECODE ONLY)
+//!    8 = PLY: plane-shuffle × 4 + per-vertex-stride delta1
+//!    9 = x86 BCJ for PE/COFF executables (and x86 ELF/Mach-O/a.out)
+//!   10 = STL: field-major plane-split + stride-1 delta (CURRENT)
+//!   11 = ARM 32-bit BCJ
+//!   12 = ARM64 BCJ
+//!   13 = PowerPC BCJ (big-endian)
+//!   14 = SPARC BCJ (big-endian)
+//!   15 = RISC-V BCJ
 //!
 //! Detection order:
-//!   1. Binary STL  — exact size equation               → flag 10
-//!   2. WAV/RIFF    — "RIFF....WAVE" magic              → flag 1–4
-//!   3. BMP         — "BM" magic                        → flag 1–4
-//!   4. Binary PLY  — "ply\n" + binary_little_endian    → flag 8
-//!   5. DixScript   — magic 0x4D444958 LE               → flag 0 (skip probe)
-//!   6. PE/COFF     — "MZ" + PE offset + "PE\0\0"       → flag 9
-//!   7. ELF         — "\x7fELF" magic + e_machine       → flag 9/11–15
-//!   8. Mach-O      — Mach-O magic + cpu_type           → flag 9/11–13
-//!   9. Stride probe — 8 KB entropy, threshold 0.45     → best of 1–4
+//!    1. Binary STL  — exact size equation               → flag 10
+//!    2. WAV/RIFF    — "RIFF....WAVE" magic              → flag 1–4
+//!    3. BMP         — "BM" magic                        → flag 1–4
+//!    4. Binary PLY  — "ply\n" + binary_little_endian    → flag 8
+//!    5. DixScript   — magic 0x4D444958 LE               → flag 0 (skip probe)
+//!    6. PE/COFF     — "MZ" + PE offset + "PE\0\0"       → flag 9
+//!    7. ELF         — "\x7fELF" magic + e_machine       → flag 9/11–15
+//!    8. Mach-O      — Mach-O magic + cpu_type           → flag 9/11–13
+//!    9. Unix a.out  — SunOS 4.x exec header             → flag 9/14
+//!   10. Stride probe — 8 KB entropy, threshold 0.45     → best of 1–4
 
 pub mod delta;
 pub mod stl;
@@ -50,7 +51,7 @@ pub use stl::{
 pub use ply::{parse_ply_layout, shuffle4_ply_delta_encode, shuffle4_ply_delta_decode};
 pub use bcj::{
     detect_pe_coff, bcj_x86_encode, bcj_x86_decode,
-    detect_elf, detect_macho,
+    detect_elf, detect_macho, detect_aout,
     bcj_arm_encode,   bcj_arm_decode,
     bcj_arm64_encode, bcj_arm64_decode,
     bcj_ppc_encode,   bcj_ppc_decode,
@@ -65,24 +66,23 @@ pub use probe::{
 
 // ── Filter flag constants ─────────────────────────────────────────────────────
 
-pub const FILTER_NONE:              u8 = 0;
-pub const FILTER_DELTA1:            u8 = 1;
-pub const FILTER_DELTA2:            u8 = 2;
-pub const FILTER_DELTA3:            u8 = 3;
-pub const FILTER_DELTA4:            u8 = 4;
-/// Legacy STL filter (plane-shuffle + stride-12). Decode only — new compressions use flag 10.
-pub const FILTER_SHUFFLE4_DELTA:    u8 = 7;
-pub const FILTER_PLY_DELTA:         u8 = 8;
-pub const FILTER_BCJ:               u8 = 9;   // x86 (PE/COFF or ELF x86/x86-64)
-/// STL field-major filter (field-major plane-split + stride-1). Current default for STL.
-pub const FILTER_STL_FIELD_MAJOR:   u8 = 10;
-pub const FILTER_BCJ_ARM:           u8 = 11;  // ARM 32-bit ELF / Mach-O
-pub const FILTER_BCJ_ARM64:         u8 = 12;  // AArch64 ELF / Mach-O
-pub const FILTER_BCJ_PPC:           u8 = 13;  // PowerPC ELF / Mach-O (big-endian)
-pub const FILTER_BCJ_SPARC:         u8 = 14;  // SPARC ELF (big-endian)
-pub const FILTER_BCJ_RISCV:         u8 = 15;  // RISC-V ELF
+pub const FILTER_NONE:            u8 = 0;
+pub const FILTER_DELTA1:          u8 = 1;
+pub const FILTER_DELTA2:          u8 = 2;
+pub const FILTER_DELTA3:          u8 = 3;
+pub const FILTER_DELTA4:          u8 = 4;
+/// Legacy STL filter (plane-shuffle + stride-12). Decode only.
+pub const FILTER_SHUFFLE4_DELTA:  u8 = 7;
+pub const FILTER_PLY_DELTA:       u8 = 8;
+pub const FILTER_BCJ:             u8 = 9;   // x86
+pub const FILTER_STL_FIELD_MAJOR: u8 = 10;
+pub const FILTER_BCJ_ARM:         u8 = 11;
+pub const FILTER_BCJ_ARM64:       u8 = 12;
+pub const FILTER_BCJ_PPC:         u8 = 13;
+pub const FILTER_BCJ_SPARC:       u8 = 14;
+pub const FILTER_BCJ_RISCV:       u8 = 15;
 
-/// DixScript binary magic: 0x4D444958 as LE u32 = [0x58,0x49,0x44,0x4D].
+/// DixScript binary magic: 0x4D444958 LE = bytes [0x58, 0x49, 0x44, 0x4D].
 const DIXSCRIPT_MAGIC_BYTES: [u8; 4] = [0x58, 0x49, 0x44, 0x4D];
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -114,13 +114,13 @@ pub fn detect_filter(input: &[u8]) -> u8 {
         }
     }
 
-    // 5. DixScript binary — skip probe, LZ+entropy handles it directly
+    // 5. DixScript binary — LZ+entropy handles it directly, no BCJ
     if input.len() >= 16 && input[0..4] == DIXSCRIPT_MAGIC_BYTES {
         println!("DixScript binary (.mdix compiled) detected — MDIX magic → FILTER_NONE");
         return FILTER_NONE;
     }
 
-    // 6. PE/COFF → flag 9 (x86 BCJ, existing)
+    // 6. PE/COFF → flag 9
     if detect_pe_coff(input) {
         println!("PE/COFF binary detected → FILTER_BCJ (flag 9)");
         return FILTER_BCJ;
@@ -129,36 +129,42 @@ pub fn detect_filter(input: &[u8]) -> u8 {
     // 7. ELF — arch-specific BCJ
     if let Some(flag) = detect_elf(
         input,
-        FILTER_BCJ,       // x86 / x86-64
+        FILTER_BCJ,
         FILTER_BCJ_ARM,
         FILTER_BCJ_ARM64,
         FILTER_BCJ_PPC,
         FILTER_BCJ_SPARC,
         FILTER_BCJ_RISCV,
     ) {
-        println!(
-            "ELF binary detected (e_machine lookup) → FILTER_BCJ_* (flag {})",
-            flag
-        );
+        println!("ELF binary detected (e_machine) → flag {}", flag);
         return flag;
     }
 
     // 8. Mach-O — arch-specific BCJ
     if let Some(flag) = detect_macho(
         input,
-        FILTER_BCJ,       // x86 / x86-64
+        FILTER_BCJ,
         FILTER_BCJ_ARM,
         FILTER_BCJ_ARM64,
         FILTER_BCJ_PPC,
     ) {
+        println!("Mach-O binary detected (cpu_type) → flag {}", flag);
+        return flag;
+    }
+
+    // 9. Unix a.out — covers SunOS 4.x SPARC/68k/386i executables.
+    //    The Canterbury corpus `sum` file is a SunOS 4.1.3 SPARC a.out (ZMAGIC).
+    //    It is NOT ELF (SunOS 4.x pre-dates ELF; Solaris 2.x introduced ELF),
+    //    so it falls through steps 6-8 and is caught here.
+    if let Some(flag) = detect_aout(input, FILTER_BCJ, FILTER_BCJ_SPARC) {
         println!(
-            "Mach-O binary detected (cpu_type lookup) → FILTER_BCJ_* (flag {})",
+            "Unix a.out binary detected (SunOS exec header) → flag {}",
             flag
         );
         return flag;
     }
 
-    // 9. Multi-stride entropy probe (generic numeric streams)
+    // 10. Multi-stride entropy probe (generic numeric streams)
     if input.len() >= PROBE_MIN_BYTES {
         let (best_filter, improvement) = probe_best_stride(input);
         if improvement >= PROBE_DELTA_THRESHOLD {
@@ -262,15 +268,13 @@ mod tests {
     fn detect_dixscript_binary_returns_filter_none() {
         let mut data = vec![0u8; 64];
         data[0..4].copy_from_slice(&0x4D444958u32.to_le_bytes());
-        data[4] = 1; data[5] = 0; data[6] = 0; data[7] = 0x05;
-        assert_eq!(detect_filter(&data), FILTER_NONE,
-            "MDIX magic should return FILTER_NONE");
+        data[4] = 1;
+        assert_eq!(detect_filter(&data), FILTER_NONE);
     }
 
     #[test]
     fn mdix_magic_bytes_are_correct_le_encoding() {
-        let expected = 0x4D444958u32.to_le_bytes();
-        assert_eq!(DIXSCRIPT_MAGIC_BYTES, expected);
+        assert_eq!(DIXSCRIPT_MAGIC_BYTES, 0x4D444958u32.to_le_bytes());
         assert_eq!(&DIXSCRIPT_MAGIC_BYTES, b"XIDM");
     }
 
@@ -282,11 +286,6 @@ mod tests {
         data[0x40] = b'P'; data[0x41] = b'E';
         data[0x42] = 0x00; data[0x43] = 0x00;
         assert_eq!(detect_filter(&data), FILTER_BCJ);
-    }
-
-    #[test]
-    fn dixscript_magic_does_not_match_pe_coff() {
-        assert_ne!(&DIXSCRIPT_MAGIC_BYTES[0..2], b"MZ");
     }
 
     #[test]
@@ -309,59 +308,50 @@ mod tests {
     fn make_elf(e_machine_le: u16) -> Vec<u8> {
         let mut data = vec![0u8; 64];
         data[0..4].copy_from_slice(b"\x7fELF");
-        data[4] = 1;  // EI_CLASS = ELFCLASS32
-        data[5] = 1;  // EI_DATA = little-endian
+        data[4] = 1; data[5] = 1;
         data[18..20].copy_from_slice(&e_machine_le.to_le_bytes());
         data
     }
 
     #[test]
     fn detect_filter_elf_arm_returns_bcj_arm() {
-        assert_eq!(detect_filter(&make_elf(0x28)), FILTER_BCJ_ARM,
-            "ARM ELF (EM_ARM=0x28) should return FILTER_BCJ_ARM");
+        assert_eq!(detect_filter(&make_elf(0x28)), FILTER_BCJ_ARM);
     }
 
     #[test]
     fn detect_filter_elf_arm64_returns_bcj_arm64() {
-        assert_eq!(detect_filter(&make_elf(0xB7)), FILTER_BCJ_ARM64,
-            "AArch64 ELF (EM_AARCH64=0xB7) should return FILTER_BCJ_ARM64");
+        assert_eq!(detect_filter(&make_elf(0xB7)), FILTER_BCJ_ARM64);
     }
 
     #[test]
     fn detect_filter_elf_ppc_returns_bcj_ppc() {
-        assert_eq!(detect_filter(&make_elf(0x14)), FILTER_BCJ_PPC,
-            "PowerPC ELF (EM_PPC=0x14) should return FILTER_BCJ_PPC");
+        assert_eq!(detect_filter(&make_elf(0x14)), FILTER_BCJ_PPC);
     }
 
     #[test]
     fn detect_filter_elf_sparc_returns_bcj_sparc() {
-        assert_eq!(detect_filter(&make_elf(0x02)), FILTER_BCJ_SPARC,
-            "SPARC ELF (EM_SPARC=0x02) should return FILTER_BCJ_SPARC");
+        assert_eq!(detect_filter(&make_elf(0x02)), FILTER_BCJ_SPARC);
     }
 
     #[test]
     fn detect_filter_elf_riscv_returns_bcj_riscv() {
-        assert_eq!(detect_filter(&make_elf(0xF3)), FILTER_BCJ_RISCV,
-            "RISC-V ELF (EM_RISCV=0xF3) should return FILTER_BCJ_RISCV");
+        assert_eq!(detect_filter(&make_elf(0xF3)), FILTER_BCJ_RISCV);
     }
 
     #[test]
     fn detect_filter_elf_x86_returns_bcj() {
-        assert_eq!(detect_filter(&make_elf(0x03)), FILTER_BCJ,
-            "x86 ELF (EM_386=0x03) should return existing FILTER_BCJ");
+        assert_eq!(detect_filter(&make_elf(0x03)), FILTER_BCJ);
     }
 
     #[test]
     fn detect_filter_elf_x86_64_returns_bcj() {
-        assert_eq!(detect_filter(&make_elf(0x3E)), FILTER_BCJ,
-            "x86-64 ELF (EM_X86_64=0x3E) should return FILTER_BCJ");
+        assert_eq!(detect_filter(&make_elf(0x3E)), FILTER_BCJ);
     }
 
     // ── Mach-O detection ─────────────────────────────────────────────────────
 
     fn make_macho_le(cpu_type: u32) -> Vec<u8> {
         let mut data = vec![0u8; 64];
-        // LE 64-bit Mach-O magic: bytes CF FA ED FE
         data[0] = 0xCF; data[1] = 0xFA; data[2] = 0xED; data[3] = 0xFE;
         data[4..8].copy_from_slice(&cpu_type.to_le_bytes());
         data
@@ -369,23 +359,66 @@ mod tests {
 
     #[test]
     fn detect_filter_macho_arm64_returns_bcj_arm64() {
-        // CPU_TYPE_ARM64 = 0x0100000C
-        assert_eq!(detect_filter(&make_macho_le(0x0100_000C)), FILTER_BCJ_ARM64,
-            "ARM64 Mach-O should return FILTER_BCJ_ARM64");
+        assert_eq!(detect_filter(&make_macho_le(0x0100_000C)), FILTER_BCJ_ARM64);
     }
 
     #[test]
     fn detect_filter_macho_arm_returns_bcj_arm() {
-        // CPU_TYPE_ARM = 0x0000000C
-        assert_eq!(detect_filter(&make_macho_le(0x0000_000C)), FILTER_BCJ_ARM,
-            "ARM32 Mach-O should return FILTER_BCJ_ARM");
+        assert_eq!(detect_filter(&make_macho_le(0x0000_000C)), FILTER_BCJ_ARM);
     }
 
     #[test]
     fn detect_filter_macho_x86_64_returns_bcj() {
-        // CPU_TYPE_X86_64 = 0x01000007
-        assert_eq!(detect_filter(&make_macho_le(0x0100_0007)), FILTER_BCJ,
-            "x86-64 Mach-O should return FILTER_BCJ");
+        assert_eq!(detect_filter(&make_macho_le(0x0100_0007)), FILTER_BCJ);
+    }
+
+    // ── a.out detection via detect_filter ─────────────────────────────────────
+
+    fn make_sunos_aout_input(machtype: u8, magic: u16) -> Vec<u8> {
+        let mut data = vec![0u8; 32];
+        data[0] = 0x01;           // flags
+        data[1] = machtype;
+        data[2] = (magic >> 8) as u8;
+        data[3] = magic as u8;
+        data[4..8].copy_from_slice(&0x0000_4000u32.to_be_bytes()); // a_text
+        data
+    }
+
+    #[test]
+    fn detect_filter_aout_sparc_returns_bcj_sparc() {
+        let data = make_sunos_aout_input(3, 0x010B);
+        assert_eq!(detect_filter(&data), FILTER_BCJ_SPARC,
+            "SunOS SPARC ZMAGIC a.out should → FILTER_BCJ_SPARC");
+    }
+
+    #[test]
+    fn detect_filter_aout_68k_returns_bcj_sparc() {
+        // 68020 binary uses SPARC BCJ as best available
+        let data = make_sunos_aout_input(2, 0x0108);
+        assert_eq!(detect_filter(&data), FILTER_BCJ_SPARC);
+    }
+
+    #[test]
+    fn detect_filter_aout_sun386i_returns_bcj() {
+        let data = make_sunos_aout_input(4, 0x010B);
+        assert_eq!(detect_filter(&data), FILTER_BCJ,
+            "Sun 386i a.out (x86) should → FILTER_BCJ");
+    }
+
+    #[test]
+    fn detect_filter_aout_does_not_fire_for_text() {
+        // English text: byte 0 will be an ASCII letter (< 0x80 ✓),
+        // but machtype (byte 1) will be ASCII and likely > 9, and
+        // magic (bytes 2-3) extremely unlikely to be 0x010B/0x0108/0x0107.
+        let data = b"the quick brown fox jumps over the lazy dog ".to_vec();
+        // If it somehow returns a BCJ flag, that's a false positive.
+        // With real text this should be FILTER_NONE (no probe at < 512 bytes).
+        let result = detect_filter(&data);
+        assert!(
+            result == FILTER_NONE || result == FILTER_DELTA1 || result == FILTER_DELTA2,
+            "English text should not trigger BCJ a.out detection, got flag {}",
+            result
+        );
     }
 
     // ── New filter flag constants ─────────────────────────────────────────────
@@ -404,51 +437,50 @@ mod tests {
     #[test]
     fn apply_undo_arm_bcj_roundtrip() {
         let mut data = vec![0u8; 64];
-        // BL at position 0 with offset 50 words forward
         data[3] = 0xEB; data[0] = 50;
         let enc = apply_filter(&data, FILTER_BCJ_ARM);
         let dec = undo_filter(&enc, FILTER_BCJ_ARM);
-        assert_eq!(dec, data, "apply/undo ARM BCJ roundtrip failed");
+        assert_eq!(dec, data);
     }
 
     #[test]
     fn apply_undo_arm64_bcj_roundtrip() {
         let mut data = vec![0u8; 32];
-        let instr: u32 = 0x14000014; // B with imm26=20
+        let instr: u32 = 0x14000014;
         data[0..4].copy_from_slice(&instr.to_le_bytes());
         let enc = apply_filter(&data, FILTER_BCJ_ARM64);
         let dec = undo_filter(&enc, FILTER_BCJ_ARM64);
-        assert_eq!(dec, data, "apply/undo ARM64 BCJ roundtrip failed");
+        assert_eq!(dec, data);
     }
 
     #[test]
     fn apply_undo_ppc_bcj_roundtrip() {
         let mut data = vec![0u8; 32];
-        let instr: u32 = (18u32 << 26) | (20u32 & 0x03FF_FFFC) | 1; // BL +20
+        let instr: u32 = (18u32 << 26) | (20u32 & 0x03FF_FFFC) | 1;
         data[0..4].copy_from_slice(&instr.to_be_bytes());
         let enc = apply_filter(&data, FILTER_BCJ_PPC);
         let dec = undo_filter(&enc, FILTER_BCJ_PPC);
-        assert_eq!(dec, data, "apply/undo PPC BCJ roundtrip failed");
+        assert_eq!(dec, data);
     }
 
     #[test]
     fn apply_undo_sparc_bcj_roundtrip() {
         let mut data = vec![0u8; 32];
-        let instr: u32 = (1u32 << 30) | 15; // CALL disp30=15
+        let instr: u32 = (1u32 << 30) | 15;
         data[0..4].copy_from_slice(&instr.to_be_bytes());
         let enc = apply_filter(&data, FILTER_BCJ_SPARC);
         let dec = undo_filter(&enc, FILTER_BCJ_SPARC);
-        assert_eq!(dec, data, "apply/undo SPARC BCJ roundtrip failed");
+        assert_eq!(dec, data);
     }
 
     #[test]
     fn apply_undo_riscv_bcj_roundtrip() {
         use crate::filters::bcj::jal_encode_imm;
         let mut data = vec![0u8; 32];
-        let instr: u32 = jal_encode_imm(0x0000_006F, 12); // JAL x0, +12
+        let instr: u32 = jal_encode_imm(0x0000_006F, 12);
         data[0..4].copy_from_slice(&instr.to_le_bytes());
         let enc = apply_filter(&data, FILTER_BCJ_RISCV);
         let dec = undo_filter(&enc, FILTER_BCJ_RISCV);
-        assert_eq!(dec, data, "apply/undo RISC-V BCJ roundtrip failed");
+        assert_eq!(dec, data);
     }
     }

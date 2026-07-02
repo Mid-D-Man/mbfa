@@ -1,10 +1,7 @@
 // src/unfold.rs
 //
-// P6 changes vs previous version:
-//   - Parse ring_flag from bit 1 of pair_flag byte in the header.
-//   - Pass ring_active = (pass == 1 && ring_flag) to bitreader::read_tokens.
-//     Fold 1's LZ bitstream uses ring-active opcodes when ring_flag = 1.
-//     All other passes (fold 2+, pair decode) are unaffected.
+// P6 changes: ring_flag parsed from bit 1 of pair_flag byte.
+// P10 changes: entropy_flag=7 decoded via read_tokens_v7 (no tables needed).
 
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
@@ -22,8 +19,8 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
 
     let fold_count    = input[0] as usize;
     let pair_flag_raw = input[1];
-    let pair_flag     = pair_flag_raw & 0x01;       // bit 0: fold 2 used pair encoding
-    let ring_flag     = (pair_flag_raw >> 1) & 0x01 != 0; // bit 1: fold 1 uses ring opcodes (P6)
+    let pair_flag     = pair_flag_raw & 0x01;
+    let ring_flag     = (pair_flag_raw >> 1) & 0x01 != 0;
     let entropy_flag  = input[2];
     let filter_flag   = input[3];
 
@@ -158,15 +155,23 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
+        // ── v7: adaptive binary range coder ──────────────────────────────────
+        // No tables stored -- decoder reconstructs probability model from
+        // the same initial state (all probs = RC_PROB_INIT = 1024).
+        // Payload is the raw range-coder byte stream.
         7 => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "entropy flag 7 (prose-tuned v7) has been removed — \
-                 this file was compressed with a development build",
-            ));
+            let payload = &input[payload_start..];
+            let tokens  = entropy::read_tokens_v7(payload)
+                .map_err(|e| std::io::Error::new(e.kind(),
+                    format!("v7 unfold: range coder decode failed: {}", e)))?;
+            let rec = reconstruct(&tokens);
+            println!("Entropy v7 (range coder) unfold: {} bytes", rec.len());
+            (rec, fold_count.saturating_sub(1))
         }
 
         _ => {
+            // entropy_flag=0: raw LZ bitstream, no entropy coding
+            // entropy_flag=8+: unknown/future, treat as raw
             (input[payload_start..].to_vec(), fold_count)
         }
     };
@@ -185,7 +190,6 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             break;
         } else {
             // P6: fold 1's bitstream uses ring-active opcodes when ring_flag=1.
-            // All other passes use the legacy opcode set (ring_active=false).
             let ring_active = pass == 1 && ring_flag;
             let tokens = read_tokens(&current, ob, lb, ring_active)?;
             current = reconstruct(&tokens);
@@ -202,7 +206,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
         let before = current.len();
         current = filters::undo_filter(&current, filter_flag);
         println!(
-            "Filter flag={} reversed: {} bytes → {} bytes",
+            "Filter flag={} reversed: {} bytes -> {} bytes",
             filter_flag, before, current.len()
         );
     }
@@ -246,4 +250,4 @@ fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) 
         vec![LENGTH_BITS_DEFAULT; fold_count],
         payload_start,
     )
-                     }
+        }

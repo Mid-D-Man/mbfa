@@ -1,11 +1,11 @@
 // src/lib.rs
 //
-// P6 changes vs previous version:
-//   - fold() now returns a 7-tuple; destructure ring_was_used (7th element).
-//   - bitreader::read_tokens takes ring_active: bool (for entropy token reading).
-//   - RepRef tokens resolved to Backref before entropy functions see them.
-//   - ring_flag stored in bit 1 of the pair_flag header byte.
-//   - pair_vs_entropy: resolve RepRef in fold1_tokens before entropy tournament.
+// P10 addition: v7 (adaptive binary range coder) added to entropy tournament.
+//   tokens_safe_for_v7() checks all Backref lengths <= RC_MAX_BACKREF_LEN (272).
+//   try_entropy_v7() requires no pre-built tables -- the range coder adapts
+//   its own probability model during encoding.
+//   v7 competes in the same rayon tournament as v1-v6; it wins on
+//   near-degenerate distributions where Huffman's integer-bit floor is visible.
 
 pub mod opcode;
 pub mod encoder;
@@ -26,7 +26,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 const INCOMPRESSIBLE_ENTROPY_THRESHOLD: f64 = 7.8;
-const INCOMPRESSIBLE_MIN_BYTES: usize = 50_000;
+const INCOMPRESSIBLE_MIN_BYTES:         usize = 50_000;
 
 fn sample_entropy(data: &[u8]) -> f64 {
     const SAMPLE_SIZE: usize = 8192;
@@ -40,18 +40,23 @@ fn sample_entropy(data: &[u8]) -> f64 {
         .sum()
 }
 
-/// File header layout (bytes 0–3 + N ob + N lb):
+/// File header layout (bytes 0-3 + N ob + N lb):
 ///   Byte 0: fold_count
 ///   Byte 1: pair_flag byte
-///              bit 0 — fold 2 used pair encoding (bool)
-///              bit 1 — fold 1 LZ bitstream uses ring-active opcodes (P6)
-///   Byte 2: entropy_flag (0=none, 1–6=variant)
-///   Byte 3: filter_flag  (0=none, 1–4=delta, 7=STL, 8=PLY, 9=BCJ)
+///              bit 0 -- fold 2 used pair encoding (bool)
+///              bit 1 -- fold 1 LZ bitstream uses ring-active opcodes (P6)
+///   Byte 2: entropy_flag (0=none, 1-7=variant)
+///   Byte 3: filter_flag  (0=none, 1-4=delta, 7=STL, 8=PLY, 9=BCJ, 10-15=BCJ variants)
 ///   Bytes 4..4+N:    offset_bits[0..N]  N = fold_count
 ///   Bytes 4+N..4+2N: length_bits[0..N]
 ///   Remaining: compressed payload
 ///
-/// fold_count=0: passthrough — payload is original uncompressed bytes.
+/// fold_count=0: passthrough -- payload is original uncompressed bytes.
+///
+/// entropy_flag=7: v7 range coder.
+///   Payload is the raw range-coder byte stream.
+///   No Huffman tables are stored -- the decoder reconstructs the
+///   probability model from the same initial state (all probs = 1024).
 pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     // ── Pre-filter ────────────────────────────────────────────────────────────
     let filter_flag = filters::detect_filter(input);
@@ -76,13 +81,11 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
         let ent = sample_entropy(to_fold);
         if ent > INCOMPRESSIBLE_ENTROPY_THRESHOLD {
             println!(
-                "Incompressible early exit: entropy={:.3} bits/byte, {} bytes — passthrough",
+                "Incompressible early exit: entropy={:.3} bits/byte, {} bytes -- passthrough",
                 ent, input.len()
             );
             let mut out = Vec::with_capacity(4 + input.len());
-            out.push(0u8);
-            out.push(0u8);
-            out.push(0u8);
+            out.push(0u8); out.push(0u8); out.push(0u8);
             out.push(filters::FILTER_NONE);
             out.extend_from_slice(input);
             return Ok(out);
@@ -90,7 +93,6 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     }
 
     // ── Fold passes ───────────────────────────────────────────────────────────
-    // P6: fold() now returns 7-tuple (adds ring_was_used).
     let (compressed, folds_done, used_pairing,
          offset_bits_per_fold, length_bits_per_fold,
          fold1_tokens_opt, ring_was_used) =
@@ -112,8 +114,8 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     let (final_payload, entropy_flag, out_pair_flag, out_folds, out_ob, out_lb) =
         if try_entropy_standard {
             // P6: the stored bitstream may use ring-active encoding if fold 1
-            // is the final fold.  Read with ring_active so RepRef tokens decode
-            // correctly, then resolve → Backref before entropy functions.
+            // is the final fold. Read with ring_active so RepRef tokens decode
+            // correctly, then resolve -> Backref before entropy functions.
             let read_ring_active = ring_was_used && folds_done == 1;
             let tokens_raw =
                 bitreader::read_tokens(&compressed, final_ob, final_lb, read_ring_active)?;
@@ -126,15 +128,18 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let raw_size   = compressed.len();
             let entropy_ok = tokens_safe_for_entropy(&tokens);
             let v2_ok      = entropy_ok && raw_size >= entropy::ENTROPY_V2_MIN_BYTES;
+            // v7 gate: all Backref lengths must be <= RC_MAX_BACKREF_LEN (272)
+            let v7_ok      = tokens_safe_for_v7(&tokens);
 
             let lit_arc: Option<Arc<entropy::EncodeTable>> = if entropy_ok {
                 entropy::build_encode_table(&tokens).map(Arc::new)
             } else { None };
 
-            let ctx_arc: Option<(Arc<entropy::EncodeTable>, Arc<entropy::EncodeTable>)> = if v2_ok {
-                entropy::build_encode_tables_by_context(&tokens)
-                    .map(|(t0, t1)| (Arc::new(t0), Arc::new(t1)))
-            } else { None };
+            let ctx_arc: Option<(Arc<entropy::EncodeTable>, Arc<entropy::EncodeTable>)> =
+                if v2_ok {
+                    entropy::build_encode_tables_by_context(&tokens)
+                        .map(|(t0, t1)| (Arc::new(t0), Arc::new(t1)))
+                } else { None };
 
             let off_arc: Option<Arc<entropy::EncodeTable>> = if entropy_ok {
                 entropy::build_offset_encode_table(&tokens).map(Arc::new)
@@ -144,41 +149,50 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                 entropy::build_offset_encode_table_slotted(&tokens).map(Arc::new)
             } else { None };
 
-            let v6_arc: Option<(Arc<entropy::EncodeTable>, Arc<entropy::EncodeTable>, Arc<entropy::EncodeTable>)> =
-                if entropy_ok {
-                    entropy::build_v6_tables(&tokens)
-                        .map(|(lt, st, ot)| (Arc::new(lt), Arc::new(st), Arc::new(ot)))
-                } else { None };
+            let v6_arc: Option<(
+                Arc<entropy::EncodeTable>,
+                Arc<entropy::EncodeTable>,
+                Arc<entropy::EncodeTable>,
+            )> = if entropy_ok {
+                entropy::build_v6_tables(&tokens)
+                    .map(|(lt, st, ot)| (Arc::new(lt), Arc::new(st), Arc::new(ot)))
+            } else { None };
 
-            let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6]
+            // v7 shares the token vec via Arc -- no table building needed
+            let tokens_arc = Arc::new(tokens);
+            let ta = Arc::clone(&tokens_arc);
+
+            let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7]
                 .into_par_iter()
                 .map(|flag| {
+                    let tokens = &*ta;
                     let payload = match flag {
                         1 => match (&lit_arc, &off_arc) {
                             (Some(lt), Some(ot)) if entropy_ok =>
-                                encode_v1_shared(&tokens, lt, ot),
+                                encode_v1_shared(tokens, lt, ot),
                             _ => None,
                         },
                         2 => match (&ctx_arc, &off_arc) {
                             (Some((t0, t1)), Some(ot)) if v2_ok =>
-                                encode_v2_shared(&tokens, t0, t1, ot),
+                                encode_v2_shared(tokens, t0, t1, ot),
                             _ => None,
                         },
-                        3 => if v2_ok { try_entropy_v3(&tokens) } else { None },
+                        3 => if v2_ok { try_entropy_v3(tokens) } else { None },
                         4 => match (&lit_arc, &off_slot_arc) {
                             (Some(lt), Some(ost)) if entropy_ok =>
-                                encode_v4_shared(&tokens, lt, ost),
+                                encode_v4_shared(tokens, lt, ost),
                             _ => None,
                         },
                         5 => match (&ctx_arc, &off_slot_arc) {
                             (Some((t0, t1)), Some(ost)) if v2_ok =>
-                                encode_v5_shared(&tokens, t0, t1, ost),
+                                encode_v5_shared(tokens, t0, t1, ost),
                             _ => None,
                         },
                         6 => match &v6_arc {
-                            Some((lt, st, ot)) => encode_v6_shared(&tokens, lt, st, ot),
+                            Some((lt, st, ot)) => encode_v6_shared(tokens, lt, st, ot),
                             None => None,
                         },
+                        7 => if v7_ok { try_entropy_v7(tokens) } else { None },
                         _ => None,
                     };
                     (flag, payload)
@@ -201,25 +215,18 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let best_size = results.iter().map(|(_, o)| sz(o)).min().unwrap_or(usize::MAX);
 
             if best_size >= raw_size {
-                let detail: Vec<String> = results.iter()
-                    .map(|(f, o)| {
-                        let s = sz(o);
-                        if s == usize::MAX { format!("v{}=skip", f) }
-                        else               { format!("v{}={}B", f, s) }
-                    })
-                    .collect();
-                println!(
-                    "Joint entropy skipped (no gain: {} vs raw={}B)",
-                    detail.join(" "), raw_size
-                );
+                println!("Joint entropy skipped (no gain vs raw={}B)", raw_size);
+                // Drop Arc before returning compressed
+                drop(tokens_arc);
                 (compressed, 0u8, false, folds_done,
                  offset_bits_per_fold, length_bits_per_fold)
             } else {
+                drop(tokens_arc);
                 let (flag, payload) = results.into_iter()
                     .filter_map(|(f, opt)| opt.map(|p| (f, p)))
                     .min_by_key(|(_, p)| p.len())
                     .unwrap();
-                println!("Joint entropy flag={}: {} → {} B", flag, raw_size, payload.len());
+                println!("Joint entropy flag={}: {} -> {} B", flag, raw_size, payload.len());
                 (payload, flag, false, folds_done,
                  offset_bits_per_fold, length_bits_per_fold)
             }
@@ -227,8 +234,6 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let f1t = fold1_tokens_opt
                 .expect("fold1_tokens must be Some when used_pairing is true");
 
-            // P6: resolve RepRef → Backref before entropy (entropy functions
-            // don't handle RepRef; pair_vs_entropy forwards to entropy tournament).
             let f1t_resolved = if ring_was_used {
                 opcode::resolve_ring(&f1t)
             } else {
@@ -245,10 +250,6 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
         };
 
     // ── Serialise header ──────────────────────────────────────────────────────
-    // P6: ring_flag lives in bit 1 of the pair_flag byte.
-    //     ring_was_used is set whenever fold 1's LZ bitstream used ring encoding.
-    //     The decompressor (unfold.rs) uses it to select the ring-active opcode
-    //     set when reading fold 1's bitstream (pass==1 in the unfold loop).
     let final_ring_flag = ring_was_used;
     let pair_flag_byte  = (out_pair_flag as u8) | ((final_ring_flag as u8) << 1);
 
@@ -265,7 +266,7 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
-// ── Safety check ──────────────────────────────────────────────────────────────
+// ── Safety checks ─────────────────────────────────────────────────────────────
 
 #[inline]
 fn tokens_safe_for_entropy(tokens: &[opcode::Token]) -> bool {
@@ -276,10 +277,21 @@ fn tokens_safe_for_entropy(tokens: &[opcode::Token]) -> bool {
     })
 }
 
+/// v7 gate: RC_MAX_BACKREF_LEN = 272 is the max encodable length.
+/// Lengths 273+ use HI-tier value 255 which is reserved for the End sentinel.
+#[inline]
+fn tokens_safe_for_v7(tokens: &[opcode::Token]) -> bool {
+    tokens.iter().all(|t| match t {
+        opcode::Token::Backref { length, .. } => *length <= entropy::RC_MAX_BACKREF_LEN,
+        _ => true,
+    })
+}
+
 // ── Entropy variant encoders ──────────────────────────────────────────────────
 
 fn encode_v1_shared(
-    tokens: &[opcode::Token], lit_table: &entropy::EncodeTable,
+    tokens:       &[opcode::Token],
+    lit_table:    &entropy::EncodeTable,
     offset_table: &entropy::EncodeTable,
 ) -> Option<Vec<u8>> {
     let coded = entropy::write_tokens_v1(tokens, lit_table, offset_table).ok()?;
@@ -290,7 +302,9 @@ fn encode_v1_shared(
 }
 
 fn encode_v2_shared(
-    tokens: &[opcode::Token], t0: &entropy::EncodeTable, t1: &entropy::EncodeTable,
+    tokens:       &[opcode::Token],
+    t0:           &entropy::EncodeTable,
+    t1:           &entropy::EncodeTable,
     offset_table: &entropy::EncodeTable,
 ) -> Option<Vec<u8>> {
     let coded = entropy::write_tokens_v2(tokens, t0, t1, offset_table).ok()?;
@@ -312,7 +326,8 @@ fn try_entropy_v3(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
 }
 
 fn encode_v4_shared(
-    tokens: &[opcode::Token], lit_table: &entropy::EncodeTable,
+    tokens:               &[opcode::Token],
+    lit_table:            &entropy::EncodeTable,
     offset_table_slotted: &entropy::EncodeTable,
 ) -> Option<Vec<u8>> {
     let coded = entropy::write_tokens_v4(tokens, lit_table, offset_table_slotted).ok()?;
@@ -323,7 +338,9 @@ fn encode_v4_shared(
 }
 
 fn encode_v5_shared(
-    tokens: &[opcode::Token], t0: &entropy::EncodeTable, t1: &entropy::EncodeTable,
+    tokens:               &[opcode::Token],
+    t0:                   &entropy::EncodeTable,
+    t1:                   &entropy::EncodeTable,
     offset_table_slotted: &entropy::EncodeTable,
 ) -> Option<Vec<u8>> {
     let coded = entropy::write_tokens_v5(tokens, t0, t1, offset_table_slotted).ok()?;
@@ -335,16 +352,23 @@ fn encode_v5_shared(
 }
 
 fn encode_v6_shared(
-    tokens: &[opcode::Token], lit_table: &entropy::EncodeTable,
-    seq_table: &entropy::EncodeTable, offset_table: &entropy::EncodeTable,
+    tokens:       &[opcode::Token],
+    lit_table:    &entropy::EncodeTable,
+    seq_table:    &entropy::EncodeTable,
+    offset_table: &entropy::EncodeTable,
 ) -> Option<Vec<u8>> {
     entropy::write_tokens_v6(tokens, lit_table, seq_table, offset_table).ok()
+}
+
+/// v7: no pre-built tables -- encode directly, payload is the raw RC byte stream.
+fn try_entropy_v7(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
+    entropy::write_tokens_v7(tokens).ok()
 }
 
 // ── pair_vs_entropy ───────────────────────────────────────────────────────────
 
 fn pair_vs_entropy(
-    fold1_tokens:     Vec<opcode::Token>, // already resolved (no RepRef)
+    fold1_tokens:     Vec<opcode::Token>,
     ob1:              u32,
     lb1:              u32,
     pair_output:      &[u8],
@@ -374,6 +398,7 @@ fn pair_vs_entropy(
 
     let entropy_ok = tokens_safe_for_entropy(&fold1_tokens);
     let v2_ok      = entropy_ok && fold1_bytes_est >= entropy::ENTROPY_V2_MIN_BYTES;
+    let v7_ok      = tokens_safe_for_v7(&fold1_tokens);
 
     let lit_arc: Option<Arc<entropy::EncodeTable>> = if entropy_ok {
         entropy::build_encode_table(&fold1_tokens).map(Arc::new)
@@ -392,41 +417,49 @@ fn pair_vs_entropy(
         entropy::build_offset_encode_table_slotted(&fold1_tokens).map(Arc::new)
     } else { None };
 
-    let v6_arc: Option<(Arc<entropy::EncodeTable>, Arc<entropy::EncodeTable>, Arc<entropy::EncodeTable>)> =
-        if entropy_ok {
-            entropy::build_v6_tables(&fold1_tokens)
-                .map(|(lt, st, ot)| (Arc::new(lt), Arc::new(st), Arc::new(ot)))
-        } else { None };
+    let v6_arc: Option<(
+        Arc<entropy::EncodeTable>,
+        Arc<entropy::EncodeTable>,
+        Arc<entropy::EncodeTable>,
+    )> = if entropy_ok {
+        entropy::build_v6_tables(&fold1_tokens)
+            .map(|(lt, st, ot)| (Arc::new(lt), Arc::new(st), Arc::new(ot)))
+    } else { None };
 
-    let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6]
+    let tokens_arc = Arc::new(fold1_tokens);
+    let ta = Arc::clone(&tokens_arc);
+
+    let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7]
         .into_par_iter()
         .map(|flag| {
+            let tokens = &*ta;
             let payload = match flag {
                 1 => match (&lit_arc, &off_arc) {
                     (Some(lt), Some(ot)) if entropy_ok =>
-                        encode_v1_shared(&fold1_tokens, lt, ot),
+                        encode_v1_shared(tokens, lt, ot),
                     _ => None,
                 },
                 2 => match (&ctx_arc, &off_arc) {
                     (Some((t0, t1)), Some(ot)) if v2_ok =>
-                        encode_v2_shared(&fold1_tokens, t0, t1, ot),
+                        encode_v2_shared(tokens, t0, t1, ot),
                     _ => None,
                 },
-                3 => if v2_ok { try_entropy_v3(&fold1_tokens) } else { None },
+                3 => if v2_ok { try_entropy_v3(tokens) } else { None },
                 4 => match (&lit_arc, &off_slot_arc) {
                     (Some(lt), Some(ost)) if entropy_ok =>
-                        encode_v4_shared(&fold1_tokens, lt, ost),
+                        encode_v4_shared(tokens, lt, ost),
                     _ => None,
                 },
                 5 => match (&ctx_arc, &off_slot_arc) {
                     (Some((t0, t1)), Some(ost)) if v2_ok =>
-                        encode_v5_shared(&fold1_tokens, t0, t1, ost),
+                        encode_v5_shared(tokens, t0, t1, ost),
                     _ => None,
                 },
                 6 => match &v6_arc {
-                    Some((lt, st, ot)) => encode_v6_shared(&fold1_tokens, lt, st, ot),
+                    Some((lt, st, ot)) => encode_v6_shared(tokens, lt, st, ot),
                     None => None,
                 },
+                7 => if v7_ok { try_entropy_v7(tokens) } else { None },
                 _ => None,
             };
             (flag, payload)
@@ -445,6 +478,8 @@ fn pair_vs_entropy(
             fold1_bytes_est, detail.join(" ")
         );
     }
+
+    drop(tokens_arc);
 
     let best_entropy = results.into_iter()
         .filter_map(|(f, opt)| opt.map(|p| (f, p)))
@@ -472,4 +507,4 @@ fn pair_vs_entropy(
 
 pub fn decompress(input: &[u8]) -> io::Result<Vec<u8>> {
     unfold::unfold(input)
-    }
+        }

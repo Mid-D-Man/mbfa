@@ -1,0 +1,17 @@
+Original size: 16777216 bits (2097152 bytes)
+  fingerprint: entropy=3.58 size=2097152
+  fingerprint Rule 3: default -> ob=17 lb=8
+  Phase B scan: ob=17 lb=8 chain_limit=64 raw_cost=214706
+  ceiling check: length peak hit 255 >= lb_ceil=229 (max_len=255 lb=8)
+  Step 1: length peak -- Phase C required
+  chain_limit (baseline ob=17): 64  raw_cost=214706
+  discovery (capped 2MB/chain=256): discovered ob=10 lb=21
+  chain_limit (constrained ob=10): 256  raw_cost=1000
+  constrained wins: ob=10 lb=21 raw_cost=1000 vs baseline raw_cost=214706
+Window diagnostics: 9/80 tokens BACKREF/REPREF (11.2%) | offset: 0.0% at max (1023) | 11.1% upper half | length: 0.0% at max (2097151) | offset_bits=10 length_bits=21 — OK
+  DIAG phase_c_gain: ob=10 lb=21 actual_ratio=0.0060% baseline_hyp_ratio=0.0056% gain_pp=-0.0003pp input_bytes=2097152
+Fold 1 adaptive: offset_bits=10 (window=1023 bytes) length_bits=21 (max_len=2097151)
+Fold 1 (LZ): 1000 bits (125 bytes)
+  Parallel path post-scan: baseline expanding (1.206) — incompressible, skipping Phase C re-scan
+Fold 2: LZ scan incompressible signal — stopping at fold 1
+Done. 2097152 bytes → 131 bytes

@@ -10,6 +10,12 @@
 //
 // P10 addition: fmt3 RLE serialization for Huffman tables.
 //   Reduces table overhead for small files (Unreal_uplugin, YAML/TOML/INI).
+//
+// P11 addition: fmt4 adaptive range-coded table serialization.
+//   Reuses the v7 Rc7Enc/Rc7Dec bit primitives (not a new coder) to code the
+//   length sequence with a "same as previous" bit + adaptive 8-bit bittree,
+//   instead of fmt3's raw-byte RLE. serialize_table brute-force-compares it
+//   against fmt0-fmt3, so it only wins when it's actually smaller.
 
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
@@ -428,12 +434,14 @@ pub fn serialize_table(table: &EncodeTable) -> Vec<u8> {
     let f0 = fmt0_explicit(table);
     let f1 = fmt1_range(table);
     let f3 = fmt3_rle(table);
+    let f4 = fmt4_rc(table);
 
     let has_bytes   = table.keys().any(|&s| s <= 255);
     let has_lengths = table.keys().any(|&s| s >= 257);
 
     let mut best = if f1.len() < f0.len() { f1 } else { f0 };
     if !f3.is_empty() && f3.len() < best.len() { best = f3; }
+    if !f4.is_empty() && f4.len() < best.len() { best = f4; }
 
     if has_bytes && has_lengths {
         let max_len_val = table.keys()
@@ -522,6 +530,74 @@ fn fmt3_rle(table: &EncodeTable) -> Vec<u8> {
     out
 }
 
+const FMT4_IDX_ZERO:   usize = 0;         // 1 prob: is this length zero?
+const FMT4_IDX_SAME:   usize = 1;         // 1 prob: same length as previous position?
+const FMT4_IDX_VAL:    usize = 2;         // 255 probs (8-bit bittree) for nonzero values
+const FMT4_PROB_TOTAL: usize = 2 + 255;
+
+fn fmt4_rc_init() -> Vec<u16> { vec![RC_PROB_INIT; FMT4_PROB_TOTAL] }
+
+fn fmt4_encode_value(enc: &mut Rc7Enc, probs: &mut [u16], v: u8) {
+    if v == 0 {
+        enc.encode_bit(&mut probs[FMT4_IDX_ZERO], 0);
+    } else {
+        enc.encode_bit(&mut probs[FMT4_IDX_ZERO], 1);
+        enc.encode_bittree(probs, FMT4_IDX_VAL, 8, (v as u32) - 1);
+    }
+}
+
+fn fmt4_decode_value(dec: &mut Rc7Dec, probs: &mut [u16]) -> std::io::Result<u8> {
+    let nz = dec.decode_bit(&mut probs[FMT4_IDX_ZERO])?;
+    if nz == 0 {
+        Ok(0)
+    } else {
+        let v = dec.decode_bittree(probs, FMT4_IDX_VAL, 8)?;
+        Ok((v + 1) as u8)
+    }
+}
+
+/// Adaptive range-coded table format. Same min_sym/max_sym framing as fmt1/fmt3,
+/// but the length sequence is coded through a dedicated (tiny, freshly-initialised)
+/// instance of the v7 range coder rather than written as raw bytes. A "same as
+/// previous" bit captures runs of any length -- including runs of 1-2 that fmt3's
+/// run>=3 RLE sentinel can't touch -- and nonzero lengths go through an adaptive
+/// 8-bit bittree instead of a flat byte. No table-of-a-table is needed: both
+/// sides start from identical fixed initial probabilities, exactly like v7.
+/// Costs more than fmt3 on tiny tables (fixed range-coder drain + 2-byte length
+/// prefix outweighs the savings), wins big once there's real structure to exploit.
+fn fmt4_rc(table: &EncodeTable) -> Vec<u8> {
+    if table.is_empty() { return Vec::new(); }
+    // Same length-fits-in-a-byte assumption every other fmt already makes.
+    if table.values().any(|&(_, l)| l == 0 || l > 255) { return Vec::new(); }
+
+    let min_sym = *table.keys().min().unwrap();
+    let max_sym = *table.keys().max().unwrap();
+    let lengths: Vec<u8> = (min_sym..=max_sym)
+        .map(|s| table.get(&s).map(|&(_, l)| l as u8).unwrap_or(0))
+        .collect();
+
+    let mut probs = fmt4_rc_init();
+    let mut enc = Rc7Enc::new();
+    for (i, &v) in lengths.iter().enumerate() {
+        if i == 0 {
+            fmt4_encode_value(&mut enc, &mut probs, v);
+        } else {
+            let same = (v == lengths[i - 1]) as u32;
+            enc.encode_bit(&mut probs[FMT4_IDX_SAME], same);
+            if same == 0 { fmt4_encode_value(&mut enc, &mut probs, v); }
+        }
+    }
+    let payload = enc.finish();
+    if payload.len() > u16::MAX as usize { return Vec::new(); } // never expected in practice
+
+    let mut out = vec![0x04u8];
+    out.extend_from_slice(&(min_sym as u16).to_le_bytes());
+    out.extend_from_slice(&(max_sym as u16).to_le_bytes());
+    out.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+    out.extend_from_slice(&payload);
+    out
+}
+
 pub fn deserialize_table(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
     if data.is_empty() {
         return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "table: empty"));
@@ -531,6 +607,7 @@ pub fn deserialize_table(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
         0x01 => deserialize_fmt1(data),
         0x02 => deserialize_fmt2(data),
         0x03 => deserialize_fmt3(data),
+        0x04 => deserialize_fmt4(data),
         b    => Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
             format!("unknown table format: 0x{:02x}", b))),
     }
@@ -670,6 +747,166 @@ fn deserialize_fmt3(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
         if l > 0 { length_map.insert(min_sym + i as u32, l as u32); }
     }
     Ok((canonical_codes_from_lengths(&length_map), cur))
+}
+
+fn deserialize_fmt4(data: &[u8]) -> std::io::Result<(EncodeTable, usize)> {
+    if data.len() < 7 {
+        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "fmt4: too short"));
+    }
+    let min_sym = u16::from_le_bytes([data[1], data[2]]) as u32;
+    let max_sym = u16::from_le_bytes([data[3], data[4]]) as u32;
+    if max_sym < min_sym {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "fmt4: max < min"));
+    }
+    let payload_len = u16::from_le_bytes([data[5], data[6]]) as usize;
+    let start = 7usize;
+    let end   = start + payload_len;
+    if data.len() < end {
+        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "fmt4: truncated payload"));
+    }
+    let range = (max_sym - min_sym + 1) as usize;
+
+    let mut probs = fmt4_rc_init();
+    let mut dec = Rc7Dec::new(&data[start..end])?;
+    let mut lengths = vec![0u8; range];
+    for i in 0..range {
+        lengths[i] = if i == 0 {
+            fmt4_decode_value(&mut dec, &mut probs)?
+        } else {
+            let same = dec.decode_bit(&mut probs[FMT4_IDX_SAME])?;
+            if same == 1 { lengths[i - 1] } else { fmt4_decode_value(&mut dec, &mut probs)? }
+        };
+    }
+
+    let mut length_map: HashMap<u32, u32> = HashMap::new();
+    for (i, &l) in lengths.iter().enumerate() {
+        if l > 0 { length_map.insert(min_sym + i as u32, l as u32); }
+    }
+    Ok((canonical_codes_from_lengths(&length_map), end))
+}
+
+#[cfg(test)]
+mod fmt4_tests {
+    use super::*;
+
+    fn tbl(pairs: &[(u32, u32)]) -> EncodeTable {
+        pairs.iter().map(|&(s, l)| (s, (0u32, l))).collect()
+    }
+
+    // Codes are re-derived canonically by deserialize_fmt4 (via
+    // canonical_codes_from_lengths) and were never meant to match whatever
+    // placeholder code the input table happened to carry -- only lengths are
+    // the real roundtrip invariant, exactly like fmt0-fmt3 already assume.
+    fn lengths_of(table: &EncodeTable) -> HashMap<u32, u32> {
+        table.iter().map(|(&s, &(_, l))| (s, l)).collect()
+    }
+
+    fn roundtrip_lengths(table: &EncodeTable) -> HashMap<u32, u32> {
+        let encoded = fmt4_rc(table);
+        assert!(!encoded.is_empty(), "fmt4 should not guard-skip a valid table");
+        let (decoded, consumed) = deserialize_fmt4(&encoded).expect("fmt4 decode failed");
+        assert_eq!(consumed, encoded.len(), "fmt4 byte accounting mismatch");
+        lengths_of(&decoded)
+    }
+
+    #[test]
+    fn fmt4_roundtrip_single_symbol() {
+        let t = tbl(&[(0, 1)]);
+        assert_eq!(roundtrip_lengths(&t), lengths_of(&t));
+    }
+
+    #[test]
+    fn fmt4_roundtrip_two_same_length() {
+        let t = tbl(&[(0, 4), (1, 4)]);
+        assert_eq!(roundtrip_lengths(&t), lengths_of(&t));
+    }
+
+    #[test]
+    fn fmt4_roundtrip_long_identical_run() {
+        let t: EncodeTable = (0..300u32).map(|i| (i, (0u32, 5u32))).collect();
+        assert_eq!(roundtrip_lengths(&t), lengths_of(&t));
+    }
+
+    #[test]
+    fn fmt4_roundtrip_sparse_with_gaps() {
+        let mut pairs = vec![];
+        for i in 0..256u32 {
+            let l = match i {
+                0..=9 => 3, 10..=19 => 0, 20..=200 => 7, _ => (i % 12) + 1,
+            };
+            if l > 0 { pairs.push((i, l)); }
+        }
+        let t = tbl(&pairs);
+        assert_eq!(roundtrip_lengths(&t), lengths_of(&t));
+    }
+
+    #[test]
+    fn fmt4_roundtrip_extreme_lengths() {
+        let t = tbl(&[(0, 1), (1, 255), (2, 1), (3, 255), (4, 1)]);
+        assert_eq!(roundtrip_lengths(&t), lengths_of(&t));
+    }
+
+    #[test]
+    fn fmt4_guards_on_empty_table() {
+        assert!(fmt4_rc(&EncodeTable::new()).is_empty());
+    }
+
+    // fmt3's sentinel RLE encodes a run of any length in a flat 3 bytes, with
+    // zero per-symbol cost -- for one pathologically uniform 300-symbol run
+    // (nothing for the adaptive coder to actually adapt to besides "still the
+    // same"), that flat encoding legitimately beats fmt4's per-symbol SAME-bit
+    // cost, tiny as it is. This is not a bug: serialize_table brute-force-
+    // compares both and picks whichever wins, which is the property that
+    // actually matters and is what this test checks.
+    #[test]
+    fn tournament_picks_fmt3_on_pathologically_uniform_run() {
+        let t: EncodeTable = (0..300u32).map(|i| (i, (0u32, 5u32))).collect();
+        let f3 = fmt3_rle(&t);
+        let chosen = serialize_table(&t);
+        assert_eq!(chosen, f3, "tournament should have picked fmt3 here");
+    }
+
+    // Real-world tables are rarely one giant uniform run -- they're sparse,
+    // with clusters and gaps. That's exactly where fmt4's per-bit adaptation
+    // has room to beat fmt3's run>=3-only sentinel scheme.
+    #[test]
+    fn fmt4_beats_fmt3_on_sparse_structured_data() {
+        let mut pairs = vec![];
+        for i in 0..256u32 {
+            let l = match i {
+                0..=9 => 3, 10..=19 => 0, 20..=200 => 7, _ => (i % 12) + 1,
+            };
+            if l > 0 { pairs.push((i, l)); }
+        }
+        let t = tbl(&pairs);
+        let f3 = fmt3_rle(&t);
+        let f4 = fmt4_rc(&t);
+        assert!(f4.len() < f3.len(),
+            "fmt4 ({} B) should beat fmt3 ({} B) on sparse structured data", f4.len(), f3.len());
+    }
+
+    #[test]
+    fn serialize_table_never_regresses_vs_fmt0_baseline() {
+        // The actual safety property that matters: serialize_table is a brute-force
+        // "pick smallest" tournament, so whatever it picks must never be larger
+        // than the always-valid fmt0 fallback.
+        let t: EncodeTable = (0..300u32).map(|i| (i, (0u32, 5u32))).collect();
+        let chosen   = serialize_table(&t);
+        let baseline = fmt0_explicit(&t);
+        assert!(chosen.len() <= baseline.len());
+    }
+
+    #[test]
+    fn deserialize_table_dispatches_fmt4() {
+        let t: EncodeTable = (0..300u32).map(|i| (i, (0u32, 5u32))).collect();
+        let encoded = fmt4_rc(&t);
+        assert_eq!(encoded[0], 0x04);
+        let (decoded, consumed) = deserialize_table(&encoded).expect("dispatch decode failed");
+        assert_eq!(consumed, encoded.len());
+        for (&sym, &(_, len)) in &t {
+            assert_eq!(decoded.get(&sym).map(|&(_, l)| l), Some(len));
+        }
+    }
 }
 
 // ── v1 ────────────────────────────────────────────────────────────────────────
@@ -1748,4 +1985,4 @@ fn read_huffman_sym<R: std::io::Read>(
         std::io::ErrorKind::InvalidData,
         format!("invalid huffman symbol after {} bits", max_len),
     ))
-}
+        }

@@ -265,7 +265,13 @@ fn canonical_codes_from_lengths(lengths: &HashMap<u32, u32>) -> EncodeTable {
     let mut prev_len = 0u32;
     for (sym, len) in sorted {
         if len == 0 { continue; }
-        if prev_len > 0 { code = (code + 1) << (len - prev_len); }
+        // Clamp: realistic Huffman tables never have anywhere near a 31-bit gap
+        // between adjacent-by-length symbols, so this never engages in practice.
+        // It exists purely so a pathological/adversarial length table can't panic
+        // a u32 shift -- both encode and decode call this same function on the
+        // same lengths, so the (possibly degenerate, for such inputs) result
+        // stays consistent between the two sides either way.
+        if prev_len > 0 { code = (code + 1) << (len - prev_len).min(31); }
         table.insert(sym, (code, len));
         prev_len = len;
     }

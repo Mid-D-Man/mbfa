@@ -3,153 +3,153 @@
   "file": "alice29.txt",
   "type": "Text",
   "original_bytes": 152089,
-  "mbfa_bytes": 51622,   "mbfa_pct": 33.94,   "mbfa_ms": 236,   "mbfa_decomp_ms": 6,
-  "gzip_bytes": 54435,     "gzip_pct": 35.79,     "gzip_ms": 11,     "gzip_decomp_ms": 3,
-  "zstd_bytes": 56974,    "zstd_pct": 37.46,    "zstd_ms": 4,    "zstd_decomp_ms": 4,
-  "xz_bytes": 48492,       "xz_pct": 31.88,       "xz_ms": 45,       "xz_decomp_ms": 5,
-  "brotli_bytes": 46487,   "brotli_pct": 30.56,   "brotli_ms": 256,   "brotli_decomp_ms": 3,
-  "zpaq_bytes": 59926,   "zpaq_pct": 39.40,   "zpaq_ms": 25,   "zpaq_decomp_ms": 2,
+  "mbfa_bytes": 51622,   "mbfa_pct": 33.94,   "mbfa_ms": 256,   "mbfa_decomp_ms": 6,
+  "gzip_bytes": 54435,     "gzip_pct": 35.79,     "gzip_ms": 11,     "gzip_decomp_ms": 2,
+  "zstd_bytes": 56974,    "zstd_pct": 37.46,    "zstd_ms": 40,    "zstd_decomp_ms": 2,
+  "xz_bytes": 48492,       "xz_pct": 31.88,       "xz_ms": 44,       "xz_decomp_ms": 5,
+  "brotli_bytes": 46487,   "brotli_pct": 30.56,   "brotli_ms": 279,   "brotli_decomp_ms": 3,
+  "zpaq_bytes": 59926,   "zpaq_pct": 39.40,   "zpaq_ms": 26,   "zpaq_decomp_ms": 2,
   "mbfa_rank": 3,
-  "fold_detail": "Original size: 1216712 bits (152089 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 550392 bits (68799 bytes)|Fold 2 (PAIR/EG): 670496 bits (83812 bytes)|Fold 2 PAIR not worth it (ratio 1.218) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.452 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=68799B): v1=52446B v2=52376B v3=52502B v4=52451B v5=52382B v6=52574B v7=51616B|Joint entropy flag=7: 68799 -> 51616 B|Done. 152089 bytes → 51622 bytes|"
+  "fold_detail": "Original size: 1216712 bits (152089 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 550392 bits (68799 bytes)|Fold 2 (PAIR/EG): 670496 bits (83812 bytes)|Fold 2 PAIR not worth it (ratio 1.218) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.452 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=68799B): v1=52446B v2=52376B v3=52502B v4=52451B v5=52382B v6=52574B v7=51616B v8=52368B|Joint entropy flag=7: 68799 -> 51616 B|Done. 152089 bytes → 51622 bytes|"
 }
 ,
 {
   "file": "asyoulik.txt",
   "type": "Text",
   "original_bytes": 125179,
-  "mbfa_bytes": 47300,   "mbfa_pct": 37.78,   "mbfa_ms": 117,   "mbfa_decomp_ms": 5,
+  "mbfa_bytes": 47300,   "mbfa_pct": 37.78,   "mbfa_ms": 131,   "mbfa_decomp_ms": 5,
   "gzip_bytes": 48951,     "gzip_pct": 39.10,     "gzip_ms": 10,     "gzip_decomp_ms": 2,
-  "zstd_bytes": 50328,    "zstd_pct": 40.20,    "zstd_ms": 3,    "zstd_decomp_ms": 2,
-  "xz_bytes": 44536,       "xz_pct": 35.57,       "xz_ms": 35,       "xz_decomp_ms": 4,
-  "brotli_bytes": 42713,   "brotli_pct": 34.12,   "brotli_ms": 172,   "brotli_decomp_ms": 3,
+  "zstd_bytes": 50328,    "zstd_pct": 40.20,    "zstd_ms": 4,    "zstd_decomp_ms": 2,
+  "xz_bytes": 44536,       "xz_pct": 35.57,       "xz_ms": 36,       "xz_decomp_ms": 4,
+  "brotli_bytes": 42713,   "brotli_pct": 34.12,   "brotli_ms": 172,   "brotli_decomp_ms": 2,
   "zpaq_bytes": 55566,   "zpaq_pct": 44.38,   "zpaq_ms": 22,   "zpaq_decomp_ms": 2,
   "mbfa_rank": 3,
-  "fold_detail": "Original size: 1001432 bits (125179 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 516104 bits (64513 bytes)|Fold 2 (PAIR/EG): 616496 bits (77062 bytes)|Fold 2 PAIR not worth it (ratio 1.195) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.515 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=64513B): v1=47973B v2=47956B v3=48064B v4=47978B v5=47961B v6=48065B v7=47294B|Joint entropy flag=7: 64513 -> 47294 B|Done. 125179 bytes → 47300 bytes|"
+  "fold_detail": "Original size: 1001432 bits (125179 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 516104 bits (64513 bytes)|Fold 2 (PAIR/EG): 616496 bits (77062 bytes)|Fold 2 PAIR not worth it (ratio 1.195) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.515 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=64513B): v1=47973B v2=47956B v3=48064B v4=47978B v5=47961B v6=48065B v7=47294B v8=47900B|Joint entropy flag=7: 64513 -> 47294 B|Done. 125179 bytes → 47300 bytes|"
 }
 ,
 {
   "file": "cp.html",
   "type": "HTML",
   "original_bytes": 24603,
-  "mbfa_bytes": 7920,   "mbfa_pct": 32.19,   "mbfa_ms": 15,   "mbfa_decomp_ms": 2,
+  "mbfa_bytes": 7920,   "mbfa_pct": 32.19,   "mbfa_ms": 19,   "mbfa_decomp_ms": 3,
   "gzip_bytes": 7999,     "gzip_pct": 32.51,     "gzip_ms": 2,     "gzip_decomp_ms": 2,
   "zstd_bytes": 8468,    "zstd_pct": 34.41,    "zstd_ms": 3,    "zstd_decomp_ms": 2,
   "xz_bytes": 7644,       "xz_pct": 31.06,       "xz_ms": 9,       "xz_decomp_ms": 3,
   "brotli_bytes": 6895,   "brotli_pct": 28.02,   "brotli_ms": 31,   "brotli_decomp_ms": 2,
   "zpaq_bytes": 10913,   "zpaq_pct": 44.35,   "zpaq_ms": 7,   "zpaq_decomp_ms": 2,
   "mbfa_rank": 3,
-  "fold_detail": "Original size: 196824 bits (24603 bytes)|Fold 1 adaptive: offset_bits=15 (window=32767 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 87000 bits (10875 bytes)|Fold 2 (PAIR/EG): 93960 bits (11745 bytes)|Fold 2 PAIR not worth it (ratio 1.080) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.442 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=10875B): v1=8008B v2=8087B v3=8405B v4=8007B v5=8086B v6=8067B v7=7914B|Joint entropy flag=7: 10875 -> 7914 B|Done. 24603 bytes → 7920 bytes|"
+  "fold_detail": "Original size: 196824 bits (24603 bytes)|Fold 1 adaptive: offset_bits=15 (window=32767 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 87000 bits (10875 bytes)|Fold 2 (PAIR/EG): 93960 bits (11745 bytes)|Fold 2 PAIR not worth it (ratio 1.080) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.442 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=10875B): v1=8008B v2=8087B v3=8405B v4=8007B v5=8086B v6=8067B v7=7914B v8=8083B|Joint entropy flag=7: 10875 -> 7914 B|Done. 24603 bytes → 7920 bytes|"
 }
 ,
 {
   "file": "fields.c",
   "type": "Source",
   "original_bytes": 11150,
-  "mbfa_bytes": 3070,   "mbfa_pct": 27.53,   "mbfa_ms": 9,   "mbfa_decomp_ms": 2,
+  "mbfa_bytes": 3070,   "mbfa_pct": 27.53,   "mbfa_ms": 12,   "mbfa_decomp_ms": 2,
   "gzip_bytes": 3143,     "gzip_pct": 28.18,     "gzip_ms": 2,     "gzip_decomp_ms": 2,
   "zstd_bytes": 3384,    "zstd_pct": 30.34,    "zstd_ms": 2,    "zstd_decomp_ms": 2,
   "xz_bytes": 3028,       "xz_pct": 27.15,       "xz_ms": 6,       "xz_decomp_ms": 2,
   "brotli_bytes": 2717,   "brotli_pct": 24.36,   "brotli_ms": 16,   "brotli_decomp_ms": 2,
   "zpaq_bytes": 4725,   "zpaq_pct": 42.37,   "zpaq_ms": 6,   "zpaq_decomp_ms": 2,
   "mbfa_rank": 3,
-  "fold_detail": "Original size: 89200 bits (11150 bytes)|Fold 1 adaptive: offset_bits=14 (window=16383 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 33808 bits (4226 bytes)|Fold 2 (PAIR/EG): 35304 bits (4413 bytes)|Fold 2 PAIR not worth it (ratio 1.044) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.379 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=4226B): v1=3179B v2=3236B v3=3501B v4=3171B v5=3228B v6=3207B v7=3064B|Joint entropy flag=7: 4226 -> 3064 B|Done. 11150 bytes → 3070 bytes|"
+  "fold_detail": "Original size: 89200 bits (11150 bytes)|Fold 1 adaptive: offset_bits=14 (window=16383 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 33808 bits (4226 bytes)|Fold 2 (PAIR/EG): 35304 bits (4413 bytes)|Fold 2 PAIR not worth it (ratio 1.044) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.379 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=4226B): v1=3179B v2=3236B v3=3501B v4=3171B v5=3228B v6=3207B v7=3064B v8=3222B|Joint entropy flag=7: 4226 -> 3064 B|Done. 11150 bytes → 3070 bytes|"
 }
 ,
 {
   "file": "grammar.lsp",
   "type": "Lisp",
   "original_bytes": 3721,
-  "mbfa_bytes": 1236,   "mbfa_pct": 33.21,   "mbfa_ms": 6,   "mbfa_decomp_ms": 2,
+  "mbfa_bytes": 1236,   "mbfa_pct": 33.21,   "mbfa_ms": 8,   "mbfa_decomp_ms": 2,
   "gzip_bytes": 1246,     "gzip_pct": 33.48,     "gzip_ms": 2,     "gzip_decomp_ms": 2,
   "zstd_bytes": 1295,    "zstd_pct": 34.80,    "zstd_ms": 2,    "zstd_decomp_ms": 2,
   "xz_bytes": 1292,       "xz_pct": 34.72,       "xz_ms": 4,       "xz_decomp_ms": 2,
-  "brotli_bytes": 1125,   "brotli_pct": 30.23,   "brotli_ms": 8,   "brotli_decomp_ms": 2,
+  "brotli_bytes": 1125,   "brotli_pct": 30.23,   "brotli_ms": 7,   "brotli_decomp_ms": 2,
   "zpaq_bytes": 2615,   "zpaq_pct": 70.27,   "zpaq_ms": 5,   "zpaq_decomp_ms": 2,
   "mbfa_rank": 2,
-  "fold_detail": "Original size: 29768 bits (3721 bytes)|Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 13664 bits (1708 bytes)|Fold 2 (PAIR/EG): 13736 bits (1717 bytes)|Fold 2 PAIR not worth it (ratio 1.005) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.459 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=1708B): v1=1261B v2=1318B v3=1559B v4=1271B v5=1327B v6=1299B v7=1230B|Joint entropy flag=7: 1708 -> 1230 B|Done. 3721 bytes → 1236 bytes|"
+  "fold_detail": "Original size: 29768 bits (3721 bytes)|Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 13664 bits (1708 bytes)|Fold 2 (PAIR/EG): 13736 bits (1717 bytes)|Fold 2 PAIR not worth it (ratio 1.005) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.459 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=1708B): v1=1261B v2=1318B v3=1559B v4=1271B v5=1327B v6=1299B v7=1230B v8=1332B|Joint entropy flag=7: 1708 -> 1230 B|Done. 3721 bytes → 1236 bytes|"
 }
 ,
 {
   "file": "kennedy.xls",
   "type": "Spreadsheet",
   "original_bytes": 1029744,
-  "mbfa_bytes": 125590,   "mbfa_pct": 12.19,   "mbfa_ms": 1885,   "mbfa_decomp_ms": 29,
+  "mbfa_bytes": 125590,   "mbfa_pct": 12.19,   "mbfa_ms": 1946,   "mbfa_decomp_ms": 29,
   "gzip_bytes": 206779,     "gzip_pct": 20.08,     "gzip_ms": 36,     "gzip_decomp_ms": 6,
   "zstd_bytes": 111831,    "zstd_pct": 10.86,    "zstd_ms": 7,    "zstd_decomp_ms": 4,
-  "xz_bytes": 49116,       "xz_pct": 4.76,       "xz_ms": 305,       "xz_decomp_ms": 8,
-  "brotli_bytes": 61498,   "brotli_pct": 5.97,   "brotli_ms": 2048,   "brotli_decomp_ms": 5,
-  "zpaq_bytes": 327795,   "zpaq_pct": 31.83,   "zpaq_ms": 233,   "zpaq_decomp_ms": 2,
+  "xz_bytes": 49116,       "xz_pct": 4.76,       "xz_ms": 308,       "xz_decomp_ms": 8,
+  "brotli_bytes": 61498,   "brotli_pct": 5.97,   "brotli_ms": 2045,   "brotli_decomp_ms": 5,
+  "zpaq_bytes": 327795,   "zpaq_pct": 31.83,   "zpaq_ms": 232,   "zpaq_decomp_ms": 2,
   "mbfa_rank": 4,
-  "fold_detail": "Original size: 8237952 bits (1029744 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 1996008 bits (249501 bytes)|Fold 2 (PAIR/EG): 3486616 bits (435827 bytes)|Fold 2 PAIR not worth it (ratio 1.747) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.242 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=249501B): v1=258690B v2=246552B v3=236378B v4=137722B v5=125584B v6=265421B v7=159535B|Joint entropy flag=5: 249501 -> 125584 B|Done. 1029744 bytes → 125590 bytes|"
+  "fold_detail": "Original size: 8237952 bits (1029744 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 1996008 bits (249501 bytes)|Fold 2 (PAIR/EG): 3486616 bits (435827 bytes)|Fold 2 PAIR not worth it (ratio 1.747) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.242 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=249501B): v1=258690B v2=246552B v3=236378B v4=137722B v5=125584B v6=265421B v7=159535B v8=252987B|Joint entropy flag=5: 249501 -> 125584 B|Done. 1029744 bytes → 125590 bytes|"
 }
 ,
 {
   "file": "lcet10.txt",
   "type": "Text",
   "original_bytes": 426754,
-  "mbfa_bytes": 130370,   "mbfa_pct": 30.54,   "mbfa_ms": 728,   "mbfa_decomp_ms": 11,
+  "mbfa_bytes": 130370,   "mbfa_pct": 30.54,   "mbfa_ms": 759,   "mbfa_decomp_ms": 11,
   "gzip_bytes": 144885,     "gzip_pct": 33.95,     "gzip_ms": 25,     "gzip_decomp_ms": 4,
   "zstd_bytes": 141028,    "zstd_pct": 33.04,    "zstd_ms": 6,    "zstd_decomp_ms": 3,
-  "xz_bytes": 119500,       "xz_pct": 28.00,       "xz_ms": 118,       "xz_decomp_ms": 8,
-  "brotli_bytes": 113416,   "brotli_pct": 26.57,   "brotli_ms": 659,   "brotli_decomp_ms": 4,
+  "xz_bytes": 119500,       "xz_pct": 28.00,       "xz_ms": 120,       "xz_decomp_ms": 8,
+  "brotli_bytes": 113416,   "brotli_pct": 26.57,   "brotli_ms": 660,   "brotli_decomp_ms": 4,
   "zpaq_bytes": 145252,   "zpaq_pct": 34.03,   "zpaq_ms": 63,   "zpaq_decomp_ms": 2,
   "mbfa_rank": 3,
-  "fold_detail": "Original size: 3414032 bits (426754 bytes)|Fold 1 adaptive: offset_bits=19 (window=524287 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 1400272 bits (175034 bytes)|Fold 2 (PAIR/EG): 1708440 bits (213555 bytes)|Fold 2 PAIR not worth it (ratio 1.220) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.410 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=175034B): v1=132558B v2=132363B v3=132036B v4=132503B v5=132308B v6=132690B v7=130364B|Joint entropy flag=7: 175034 -> 130364 B|Done. 426754 bytes → 130370 bytes|"
+  "fold_detail": "Original size: 3414032 bits (426754 bytes)|Fold 1 adaptive: offset_bits=19 (window=524287 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 1400272 bits (175034 bytes)|Fold 2 (PAIR/EG): 1708440 bits (213555 bytes)|Fold 2 PAIR not worth it (ratio 1.220) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.410 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=175034B): v1=132558B v2=132363B v3=132036B v4=132503B v5=132308B v6=132690B v7=130364B v8=132370B|Joint entropy flag=7: 175034 -> 130364 B|Done. 426754 bytes → 130370 bytes|"
 }
 ,
 {
   "file": "plrabn12.txt",
   "type": "Text",
   "original_bytes": 481861,
-  "mbfa_bytes": 181166,   "mbfa_pct": 37.59,   "mbfa_ms": 1152,   "mbfa_decomp_ms": 14,
-  "gzip_bytes": 195208,     "gzip_pct": 40.51,     "gzip_ms": 37,     "gzip_decomp_ms": 5,
+  "mbfa_bytes": 181166,   "mbfa_pct": 37.59,   "mbfa_ms": 1193,   "mbfa_decomp_ms": 15,
+  "gzip_bytes": 195208,     "gzip_pct": 40.51,     "gzip_ms": 38,     "gzip_decomp_ms": 5,
   "zstd_bytes": 191688,    "zstd_pct": 39.78,    "zstd_ms": 7,    "zstd_decomp_ms": 3,
-  "xz_bytes": 165412,       "xz_pct": 34.32,       "xz_ms": 144,       "xz_decomp_ms": 10,
-  "brotli_bytes": 163267,   "brotli_pct": 33.88,   "brotli_ms": 700,   "brotli_decomp_ms": 4,
+  "xz_bytes": 165412,       "xz_pct": 34.32,       "xz_ms": 149,       "xz_decomp_ms": 10,
+  "brotli_bytes": 163267,   "brotli_pct": 33.88,   "brotli_ms": 712,   "brotli_decomp_ms": 4,
   "zpaq_bytes": 203596,   "zpaq_pct": 42.25,   "zpaq_ms": 83,   "zpaq_decomp_ms": 2,
   "mbfa_rank": 3,
-  "fold_detail": "Original size: 3854888 bits (481861 bytes)|Fold 1 adaptive: offset_bits=19 (window=524287 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 1959768 bits (244971 bytes)|Fold 2 (PAIR/EG): 2442648 bits (305331 bytes)|Fold 2 PAIR not worth it (ratio 1.246) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.508 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=244971B): v1=183215B v2=182889B v3=182695B v4=183207B v5=182882B v6=183432B v7=181160B|Joint entropy flag=7: 244971 -> 181160 B|Done. 481861 bytes → 181166 bytes|"
+  "fold_detail": "Original size: 3854888 bits (481861 bytes)|Fold 1 adaptive: offset_bits=19 (window=524287 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 1959768 bits (244971 bytes)|Fold 2 (PAIR/EG): 2442648 bits (305331 bytes)|Fold 2 PAIR not worth it (ratio 1.246) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.508 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=244971B): v1=183215B v2=182889B v3=182695B v4=183207B v5=182882B v6=183432B v7=181160B v8=182667B|Joint entropy flag=7: 244971 -> 181160 B|Done. 481861 bytes → 181166 bytes|"
 }
 ,
 {
   "file": "ptt5",
   "type": "Binary",
   "original_bytes": 513216,
-  "mbfa_bytes": 53097,   "mbfa_pct": 10.34,   "mbfa_ms": 857,   "mbfa_decomp_ms": 12,
+  "mbfa_bytes": 53097,   "mbfa_pct": 10.34,   "mbfa_ms": 888,   "mbfa_decomp_ms": 12,
   "gzip_bytes": 56443,     "gzip_pct": 10.99,     "gzip_ms": 13,     "gzip_decomp_ms": 4,
   "zstd_bytes": 54424,    "zstd_pct": 10.60,    "zstd_ms": 4,    "zstd_decomp_ms": 3,
-  "xz_bytes": 41992,       "xz_pct": 8.18,       "xz_ms": 90,       "xz_decomp_ms": 5,
+  "xz_bytes": 41992,       "xz_pct": 8.18,       "xz_ms": 92,       "xz_decomp_ms": 5,
   "brotli_bytes": 40939,   "brotli_pct": 7.97,   "brotli_ms": 957,   "brotli_decomp_ms": 3,
   "zpaq_bytes": 65477,   "zpaq_pct": 12.75,   "zpaq_ms": 38,   "zpaq_decomp_ms": 2,
   "mbfa_rank": 3,
-  "fold_detail": "Original size: 4105728 bits (513216 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 545952 bits (68244 bytes)|Fold 2 (PAIR/EG): 663288 bits (82911 bytes)|Fold 2 PAIR not worth it (ratio 1.215) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.133 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=68244B): v1=55049B v2=55099B v3=55591B v4=53091B v5=53141B v6=55092B v7=53400B|Joint entropy flag=4: 68244 -> 53091 B|Done. 513216 bytes → 53097 bytes|"
+  "fold_detail": "Original size: 4105728 bits (513216 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 545952 bits (68244 bytes)|Fold 2 (PAIR/EG): 663288 bits (82911 bytes)|Fold 2 PAIR not worth it (ratio 1.215) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.133 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=68244B): v1=55049B v2=55099B v3=55591B v4=53091B v5=53141B v6=55092B v7=53400B v8=55151B|Joint entropy flag=4: 68244 -> 53091 B|Done. 513216 bytes → 53097 bytes|"
 }
 ,
 {
   "file": "sum",
   "type": "Executable",
   "original_bytes": 38240,
-  "mbfa_bytes": 17978,   "mbfa_pct": 47.01,   "mbfa_ms": 40,   "mbfa_decomp_ms": 3,
+  "mbfa_bytes": 17978,   "mbfa_pct": 47.01,   "mbfa_ms": 48,   "mbfa_decomp_ms": 3,
   "gzip_bytes": 12924,     "gzip_pct": 33.79,     "gzip_ms": 4,     "gzip_decomp_ms": 2,
   "zstd_bytes": 13379,    "zstd_pct": 34.98,    "zstd_ms": 3,    "zstd_decomp_ms": 2,
   "xz_bytes": 9452,       "xz_pct": 24.71,       "xz_ms": 12,       "xz_decomp_ms": 3,
   "brotli_bytes": 10143,   "brotli_pct": 26.52,   "brotli_ms": 51,   "brotli_decomp_ms": 2,
   "zpaq_bytes": 16269,   "zpaq_pct": 42.54,   "zpaq_ms": 9,   "zpaq_decomp_ms": 2,
   "mbfa_rank": 6,
-  "fold_detail": "Original size: 305920 bits (38240 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 216832 bits (27104 bytes)|Fold 2 (PAIR/EG): 200136 bits (25017 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.654, threshold 0.10)|Entropy variant sizes (fold1 est=27104B): v1=19688B v2=19649B v3=19920B v4=18882B v5=18842B v6=20050B v7=17972B|Entropy flag=7 beats PAIR: 17972 B < 25017 B|Done. 38240 bytes → 17978 bytes|"
+  "fold_detail": "Original size: 305920 bits (38240 bytes)|Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 216832 bits (27104 bytes)|Fold 2 (PAIR/EG): 200136 bits (25017 bytes)|Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.654, threshold 0.10)|Entropy variant sizes (fold1 est=27104B): v1=19688B v2=19649B v3=19920B v4=18882B v5=18842B v6=20050B v7=17972B v8=19516B|Entropy flag=7 beats PAIR: 17972 B < 25017 B|Done. 38240 bytes → 17978 bytes|"
 }
 ,
 {
   "file": "xargs.1",
   "type": "Binary",
   "original_bytes": 4227,
-  "mbfa_bytes": 1770,   "mbfa_pct": 41.87,   "mbfa_ms": 6,   "mbfa_decomp_ms": 2,
+  "mbfa_bytes": 1770,   "mbfa_pct": 41.87,   "mbfa_ms": 9,   "mbfa_decomp_ms": 2,
   "gzip_bytes": 1756,     "gzip_pct": 41.54,     "gzip_ms": 2,     "gzip_decomp_ms": 2,
   "zstd_bytes": 1803,    "zstd_pct": 42.65,    "zstd_ms": 2,    "zstd_decomp_ms": 2,
   "xz_bytes": 1812,       "xz_pct": 42.86,       "xz_ms": 5,       "xz_decomp_ms": 2,
   "brotli_bytes": 1464,   "brotli_pct": 34.63,   "brotli_ms": 8,   "brotli_decomp_ms": 2,
   "zpaq_bytes": 3299,   "zpaq_pct": 78.04,   "zpaq_ms": 5,   "zpaq_decomp_ms": 2,
   "mbfa_rank": 3,
-  "fold_detail": "Original size: 33816 bits (4227 bytes)|Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 19328 bits (2416 bytes)|Fold 2 (PAIR/EG): 20208 bits (2526 bytes)|Fold 2 PAIR not worth it (ratio 1.046) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.572 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=2416B): v1=1772B v2=1833B v3=2098B v4=1781B v5=1842B v6=1809B v7=1764B|Joint entropy flag=7: 2416 -> 1764 B|Done. 4227 bytes → 1770 bytes|"
+  "fold_detail": "Original size: 33816 bits (4227 bytes)|Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)|Fold 1 (LZ): 19328 bits (2416 bytes)|Fold 2 (PAIR/EG): 20208 bits (2526 bytes)|Fold 2 PAIR not worth it (ratio 1.046) — checking LZ fallback|Fold 2 PAIR failed and LZ not applicable (ratio 0.572 >= threshold 0.10) — stopping at fold 1|Entropy variant sizes (raw=2416B): v1=1772B v2=1833B v3=2098B v4=1781B v5=1842B v6=1809B v7=1764B v8=1838B|Joint entropy flag=7: 2416 -> 1764 B|Done. 4227 bytes → 1770 bytes|"
 }
 ]

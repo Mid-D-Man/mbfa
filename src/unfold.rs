@@ -169,9 +169,61 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
+        // ── v8: block-split (path-2 first cut) ────────────────────────────────
+        // Header is num_segments, then each segment's token count, then the
+        // shared offset table, then each segment's own literal table, then
+        // each segment's length-prefixed token payload (decoded with a
+        // *counted* read -- only the last segment's slice actually contains
+        // Token::End, so earlier segments have nothing to break on otherwise).
+        8 => {
+            let payload = &input[payload_start..];
+            let num_segments = payload[0] as usize;
+            let mut cursor = 1usize;
+
+            let mut seg_counts: Vec<usize> = Vec::with_capacity(num_segments);
+            for _ in 0..num_segments {
+                let count = u32::from_le_bytes(
+                    payload[cursor..cursor + 4].try_into().unwrap()) as usize;
+                seg_counts.push(count);
+                cursor += 4;
+            }
+
+            let (off_enc, off_c) = entropy::deserialize_table(&payload[cursor..])
+                .map_err(|e| std::io::Error::new(e.kind(),
+                    format!("v8 unfold: offset table failed: {}", e)))?;
+            let off_dt = entropy::decode_table_from_encode(&off_enc);
+            cursor += off_c;
+
+            let mut seg_dtables: Vec<entropy::DecodeTable> = Vec::with_capacity(num_segments);
+            for i in 0..num_segments {
+                let (enc, consumed) = entropy::deserialize_table(&payload[cursor..])
+                    .map_err(|e| std::io::Error::new(e.kind(),
+                        format!("v8 unfold: segment {} table failed: {}", i, e)))?;
+                seg_dtables.push(entropy::decode_table_from_encode(&enc));
+                cursor += consumed;
+            }
+
+            let mut tokens = Vec::new();
+            for i in 0..num_segments {
+                let seg_len = u32::from_le_bytes(
+                    payload[cursor..cursor + 4].try_into().unwrap()) as usize;
+                cursor += 4;
+                let seg_tokens = entropy::read_tokens_v1_counted(
+                    &payload[cursor..cursor + seg_len],
+                    &seg_dtables[i], &off_dt, seg_counts[i],
+                ).map_err(|e| std::io::Error::new(e.kind(),
+                    format!("v8 unfold: segment {} tokens failed: {}", i, e)))?;
+                tokens.extend(seg_tokens);
+                cursor += seg_len;
+            }
+            let rec = reconstruct(&tokens);
+            println!("Entropy v8 (block-split, {} segments) unfold: {} bytes", num_segments, rec.len());
+            (rec, fold_count.saturating_sub(1))
+        }
+
         _ => {
             // entropy_flag=0: raw LZ bitstream, no entropy coding
-            // entropy_flag=8+: unknown/future, treat as raw
+            // entropy_flag=9+: unknown/future, treat as raw
             (input[payload_start..].to_vec(), fold_count)
         }
     };

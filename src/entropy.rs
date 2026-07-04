@@ -992,6 +992,41 @@ pub fn read_tokens_v1(
     Ok(tokens)
 }
 
+/// Like read_tokens_v1, but decodes exactly `count` tokens instead of relying on
+/// hitting Token::End or a decode error to know when to stop. Needed for v8
+/// (block-split) segments: only the *last* segment's token slice actually
+/// contains the file's one Token::End, so earlier segments have no sentinel to
+/// stop on -- but every segment's exact token count is already known from the
+/// v8 header, so a counted read is both necessary and safe here (no risk of
+/// the "decode one garbage token from trailing padding bits" edge case that a
+/// bare error-triggered break would have).
+pub fn read_tokens_v1_counted(
+    input:         &[u8],
+    lit_dtable:    &DecodeTable,
+    offset_dtable: &DecodeTable,
+    count:         usize,
+) -> std::io::Result<Vec<Token>> {
+    let lit_max    = lit_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
+    let offset_max = offset_dtable.keys().map(|&(_, l)| l).max().unwrap_or(32);
+    let mut tokens = Vec::with_capacity(count);
+    let mut r = BitReader::endian(std::io::Cursor::new(input), BigEndian);
+    for _ in 0..count {
+        let sym = read_huffman_sym(&mut r, lit_dtable, lit_max)?;
+        if sym < 256 {
+            tokens.push(Token::Lit { byte: sym as u8 });
+        } else if sym == SYM_END {
+            tokens.push(Token::End);
+        } else {
+            let length = length_from_sym(sym);
+            let bucket = read_huffman_sym(&mut r, offset_dtable, offset_max)?;
+            let extra_cnt = bucket_extra_bits(bucket);
+            let extra_val = if extra_cnt > 0 { r.read::<u32>(extra_cnt)? } else { 0 };
+            tokens.push(Token::Backref { offset: bucket_to_offset(bucket, extra_val), length });
+        }
+    }
+    Ok(tokens)
+}
+
 // ── v2 ────────────────────────────────────────────────────────────────────────
 
 pub fn write_tokens_v2(

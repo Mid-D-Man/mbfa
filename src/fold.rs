@@ -140,7 +140,7 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
 
         // ── Fold 1: adaptive scan on raw input ───────────────────────────────
         if fold_num == 1 {
-            let (tokens, ob, lb, definitely_incompressible) =
+            let (mut tokens, mut ob, lb, definitely_incompressible) =
                 scan_adaptive(&current, skip_incompressible_bail);
 
             if definitely_incompressible {
@@ -150,6 +150,38 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
                 );
                 folds_done = 0;
                 break;
+            }
+
+            // Try the static-dictionary-seeded candidate too (dictionary.rs) --
+            // same "measure both, keep whichever is actually smaller" pattern as
+            // everything else in this pipeline. Only ever replaces the normal
+            // scan if it genuinely wins; guarded off if any resulting match
+            // length wouldn't fit the already-chosen length_bits (conservative:
+            // skip the candidate rather than widen length_bits for it).
+            {
+                let dict_ob = crate::encoder::min_offset_bits_for_dict(current.len()).max(ob);
+                let (dict_tokens, dict_bailed) =
+                    crate::encoder::scan_with_dict(&current, dict_ob, lb, true, true);
+                let lengths_fit = dict_tokens.iter().all(|t| match t {
+                    Token::Backref { length, .. } | Token::RepRef { length, .. } =>
+                        (*length as usize) <= crate::opcode::max_length(lb),
+                    _ => true,
+                });
+                if !dict_bailed && !dict_tokens.is_empty() && lengths_fit {
+                    if let (Ok((dict_folded, _)), Ok((normal_folded, _))) = (
+                        write_tokens(&dict_tokens, dict_ob, lb),
+                        write_tokens(&tokens, ob, lb),
+                    ) {
+                        if dict_folded.len() < normal_folded.len() {
+                            println!(
+                                "Dictionary candidate wins: {} B < {} B (raw, offset_bits {} -> {})",
+                                dict_folded.len(), normal_folded.len(), ob, dict_ob
+                            );
+                            tokens = dict_tokens;
+                            ob     = dict_ob;
+                        }
+                    }
+                }
             }
 
             log_window_diagnostics(&tokens, ob, lb);
@@ -283,8 +315,18 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
             break;
         }
 
-        // P6: fold 2+ bitstream not ring-encoded (scanning packed bytes).
-        let (encoded, _) = write_tokens(&lz_tokens, lz_ob, lz_lb)?;
+        // P6: fold 2+ bitstream must never be ring-encoded (scanning packed
+        // bytes) -- but scan_adaptive's skip_incompressible_bail=false above
+        // also sets final_emit_repref=true internally, so it CAN legitimately
+        // emit RepRef tokens here. The decoder unconditionally assumes fold 2+
+        // is never ring-active (read_ring_active is gated to folds_done==1
+        // only), so any RepRef that slips through desyncs the opcode set on
+        // decode. resolve_ring() enforces the documented invariant directly:
+        // convert any RepRef back to its equivalent Backref before write_tokens
+        // ever sees it, so ring_active is guaranteed false for fold 2+, always.
+        let lz_tokens = opcode::resolve_ring(&lz_tokens);
+        let (encoded, ring_used_fold2) = write_tokens(&lz_tokens, lz_ob, lz_lb)?;
+        debug_assert!(!ring_used_fold2, "fold 2+ must never be ring-encoded");
         let folded_bits  = encoded.len() * 8;
         println!(
             "Fold {} (LZ): {} bits ({} bytes)",
@@ -320,4 +362,4 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
 
     Ok((current, folds_done, final_used_pairing,
         offset_bits_per_fold, length_bits_per_fold, fold1_tokens, ring_was_used))
-}
+        }

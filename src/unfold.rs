@@ -302,4 +302,4 @@ fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) 
         vec![LENGTH_BITS_DEFAULT; fold_count],
         payload_start,
     )
-        }
+    }

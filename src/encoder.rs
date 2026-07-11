@@ -161,6 +161,45 @@ fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
 ///   Uses backref_bits threshold for ref_worthwhile (fix 1).
 ///   Use only for final output scan after ob/lb determined.
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool, emit_repref: bool) -> (Vec<Token>, bool) {
+    scan_from(input, 0, offset_bits, length_bits, skip_bail, emit_repref)
+}
+
+/// Tries scanning `real_input` with the static dictionary (dictionary.rs) prepended
+/// as addressable history. Hash chains are seeded over the dictionary via
+/// scan_from's start_at parameter, but no tokens are ever emitted to reconstruct
+/// the dictionary itself -- only for real_input, where offsets may legitimately
+/// reach back into the dictionary region.
+///
+/// `offset_bits` must already be wide enough to cover DICT_LEN + real_input.len()
+/// (the caller is responsible for this -- see try_dict_candidate in lib.rs, which
+/// compares the resulting raw bit cost against the non-dictionary baseline and
+/// only keeps this candidate if it actually wins).
+pub fn scan_with_dict(
+    real_input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool, emit_repref: bool,
+) -> (Vec<Token>, bool) {
+    let dict = crate::dictionary::DICTIONARY;
+    let mut combined = Vec::with_capacity(dict.len() + real_input.len());
+    combined.extend_from_slice(dict);
+    combined.extend_from_slice(real_input);
+    scan_from(&combined, dict.len(), offset_bits, length_bits, skip_bail, emit_repref)
+}
+
+/// Minimum offset_bits needed to address DICT_LEN + real_len positions back.
+pub fn min_offset_bits_for_dict(real_len: usize) -> u32 {
+    let needed = crate::dictionary::DICT_LEN + real_len;
+    let mut bits = 1u32;
+    while (1usize << bits) - 1 < needed && bits < 31 { bits += 1; }
+    bits
+}
+
+/// Same as scan(), but hash chains are seeded over `input[0..start_at]` without
+/// emitting any tokens for that region -- used to prepend the static dictionary
+/// (dictionary.rs) as addressable history. Backrefs found for the real data
+/// (input[start_at..]) can then legitimately have offsets reaching back before
+/// start_at, into the dictionary region -- decoder.rs::reconstruct resolves
+/// those transparently via its DICT++output virtual addressing.
+/// start_at=0 (scan()'s case) preserves the original behavior exactly.
+pub fn scan_from(input: &[u8], start_at: usize, offset_bits: u32, length_bits: u32, skip_bail: bool, emit_repref: bool) -> (Vec<Token>, bool) {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
     let backref_bits = backref_total_bits(offset_bits, length_bits);
@@ -176,14 +215,25 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool, e
     let mut i         = 0;
     let mut lit_count: usize = 0;
 
+    // Seed hash chains over the prepended dictionary region -- indexed exactly
+    // like real input positions, just never considered as a candidate to emit
+    // a token FOR (no lazy matching, no RepRef bookkeeping needed there; it's
+    // only ever a source of matches for i >= start_at, never a match target).
+    while i < start_at.min(n) {
+        let h = hash3(input, i);
+        prev[i & window_mask] = head[h];
+        head[h] = i as u32;
+        i += 1;
+    }
+
     while i < n {
-        if i > 0 && (i & SCAN_EXPANSION_INTERVAL_MASK) == 0 && !skip_bail {
+        if i > start_at && ((i - start_at) & SCAN_EXPANSION_INTERVAL_MASK) == 0 && !skip_bail {
             let total_tokens = tokens.len();
             if total_tokens >= EXPANSION_MIN_TOKENS {
                 let backref_count = total_tokens - lit_count;
                 let token_bits: u64 = (lit_count * (LIT_TOTAL_BITS as usize)
                     + backref_count * (backref_bits as usize)) as u64;
-                let input_bits: u64 = (i as u64) * 8;
+                let input_bits: u64 = ((i - start_at) as u64) * 8;
                 let expanding   = token_bits * 100 > input_bits * EXPANSION_BAIL_PCT;
                 let mostly_lits = lit_count * 100 > total_tokens * EXPANSION_LIT_PCT;
                 if expanding && mostly_lits {
@@ -819,4 +869,4 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
     let (tokens, ob, lb) =
         phase_c_from_baseline(baseline, wide_discovery, input, skip_incompressible_bail, final_emit_repref);
     (tokens, ob, lb, false)
-}
+        }

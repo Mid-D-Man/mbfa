@@ -1,0 +1,18 @@
+WAV fmt: 1 ch, 16 bps → delta stride 2
+Filter flag=2: 44144 bytes in, 44144 bytes filtered
+Original size: 353152 bits (44144 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=47024
+  chain_limit (baseline ob=17): 512  raw_cost=47024
+  discovery (capped 2MB/chain=256): discovered ob=13 lb=16
+  chain_limit (constrained ob=13): 256  raw_cost=44402
+  lb cap: constrained lb=16 output=5551B >= threshold 400B -- capped raw_cost=44094 chain_limit=256
+  capped wins over baseline
+Window diagnostics: 358/3729 tokens BACKREF/REPREF (9.6%) | offset: 0.0% at max (8191) | 4.7% upper half | length: 0.3% at max (32767) | offset_bits=13 length_bits=15 — OK
+  DIAG phase_c_gain: ob=13 lb=15 actual_ratio=12.4858% baseline_hyp_ratio=12.1817% gain_pp=-0.3041pp input_bytes=44144
+Fold 1 adaptive: offset_bits=13 (window=8191 bytes) length_bits=15 (max_len=32767)
+Fold 1 (LZ): 44096 bits (5512 bytes)
+Fold 2 (PAIR/EG): 41000 bits (5125 bytes)
+Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.116, threshold 0.10)
+Entropy variant sizes (fold1 est=5512B): v1=3942B v2=4005B v3=4201B v4=3950B v5=4013B v6=4159B v7=skip v8=4036B
+Entropy flag=1 beats PAIR: 3942 B < 5125 B
+Done. 44144 bytes → 3948 bytes

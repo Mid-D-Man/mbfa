@@ -12,6 +12,7 @@ pub mod encoder;
 pub mod bitwriter;
 pub mod bitreader;
 pub mod decoder;
+pub mod dictionary;
 pub mod pairing;
 pub mod fold;
 pub mod unfold;
@@ -192,7 +193,18 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                             Some((lt, st, ot)) => encode_v6_shared(tokens, lt, st, ot),
                             None => None,
                         },
-                        7 => if v7_ok { try_entropy_v7(tokens) } else { None },
+                        7 => if v7_ok {
+                            // Defense in depth: verify v7's own roundtrip before ever
+                            // trusting it. The actual bug that motivated this (fold 2+
+                            // ring-encoding mismatch) is now fixed at its source in
+                            // fold.rs, but this check is cheap and catches any other
+                            // encode/decode desync before it could ship, not just this one.
+                            try_entropy_v7(tokens).filter(|payload| {
+                                entropy::read_tokens_v7(payload)
+                                    .map(|decoded| decoded == *tokens)
+                                    .unwrap_or(false)
+                            })
+                        } else { None },
                         8 => if entropy_ok { try_entropy_v8(tokens) } else { None },
                         _ => None,
                     };
@@ -560,7 +572,14 @@ fn pair_vs_entropy(
                     Some((lt, st, ot)) => encode_v6_shared(tokens, lt, st, ot),
                     None => None,
                 },
-                7 => if v7_ok { try_entropy_v7(tokens) } else { None },
+                7 => if v7_ok {
+                    // Same defense-in-depth check as the other tournament call site.
+                    try_entropy_v7(tokens).filter(|payload| {
+                        entropy::read_tokens_v7(payload)
+                            .map(|decoded| &decoded == tokens)
+                            .unwrap_or(false)
+                    })
+                } else { None },
                 8 => if entropy_ok { try_entropy_v8(tokens) } else { None },
                 _ => None,
             };

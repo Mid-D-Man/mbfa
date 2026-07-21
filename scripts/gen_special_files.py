@@ -993,108 +993,91 @@ cron     = "0 * * * *"
 """
 
 PLATFORM_MDIX = """\
-@(platform v2.1)
-
 // DixScript platform configuration — MBFA benchmark
+// Real, grammar-valid DixScript (others/midx.ebnf) -- the previous version
+// of this fixture used `module Platform { const ... fn ... }` pseudo-syntax
+// that was never valid DixScript to begin with (no `module`/`fn`/top-level
+// `enum`/`config` production exists in the real grammar; the only seven
+// top-level sections are @CONFIG/@IMPORTS/@DLM/@ENUMS/@QUICKFUNCS/@DATA/
+// @SECURITY). See src/dictionary/dixscript.rs's doc comment for the full
+// regression writeup this fixture fix is paired with.
 
-module Platform {
-    const VERSION: str = "2.1.0"
-    const MAX_FOLDS: int = 8
-    const MIN_IMPROVEMENT: float = 0.985
+@CONFIG(
+  version -> "2.1.0",
+  encoding -> "UTF-8",
+  created -> 2026-07-19T00:00:00Z,
+  features -> "advanced",
+  debug_mode -> "regular",
+  error_handling -> "halt",
+  compatibility_mode -> "strict"
+)
 
-    config Encoder {
-        offset_bits_min:     int = 7
-        offset_bits_max:     int = 24
-        offset_bits_default: int = 15
-        length_bits_min:     int = 8
-        length_bits_max:     int = 24
-        hash_size:           int = 65536
-        chain_limit:         int = 256
-        lazy_short_len:      int = 6
-        rep_slots:           int = 4
+@DLM(
+  DAuditor.enhanced
+)
+
+@ENUMS(
+  SimilarityGroup { Source = 0, Markup = 1, Binary = 2, Compressed = 3, Other = 4 }
+  FilterFlag { None = 0, Delta1 = 1, Delta2 = 2, Delta3 = 3, Delta4 = 4, Stl = 7, Ply = 8, Bcj = 9 }
+)
+
+@QUICKFUNCS(
+  ~detectPlatform<string>() {
+    let mut result = "Unknown";
+    chk: os {
+      -> "linux" {
+        result = "Linux";
+      }
+      -> "windows" {
+        result = "Windows";
+      }
+      -> "macos" {
+        result = "macOS";
+      }
+      -> miss {
+        result = "Unknown";
+      }
     }
+    return result;
+  }
 
-    config Decoder {
-        ring_slots:       int  = 4
-        verify_roundtrip: bool = true
-        strict_end_token: bool = false
+  ~autoChunkSize<int>(availableMb<int>) {
+    let mut chunk = availableMb / 256;
+    if: chunk < 1 {
+      chunk = 1;
     }
-
-    config Entropy {
-        min_bytes:    int  = 400
-        v2_min_bytes: int  = 1000
-        num_variants: int  = 6
-        parallel:     bool = true
+    if: chunk > 8 {
+      chunk = 8;
     }
+    return chunk * 1024 * 1024;
+  }
+)
 
-    config Archive {
-        chunk_min_mb:       int   = 1
-        chunk_max_mb:       int   = 8
-        entropy_threshold:  float = 7.5
-        similarity_groups:  int   = 5
-    }
+@DATA(
+  max_folds<int> = 8
+  min_improvement<double> = 0.985
+  min_fold_bits<int> = 64
 
-    filters {
-        delta1:      bool = true
-        delta2:      bool = true
-        delta3:      bool = true
-        delta4:      bool = true
-        stl_shuffle: bool = true
-        ply_shuffle: bool = true
-        bcj_x86:     bool = true
-    }
+  encoder:
+    offset_bits_min<int> = 7, offset_bits_max<int> = 24, offset_bits_default<int> = 15,
+    length_bits_min<int> = 8, length_bits_max<int> = 24,
+    hash_size<int> = 65536, chain_limit<int> = 256, lazy_short_len<int> = 6, rep_slots<int> = 4
 
-    opcodes {
-        BACKREF: bits = 1
-        LIT:     bits = 2
-        END:     bits = 2
-        REPREF:  bits = 3
-    }
+  decoder:
+    ring_slots<int> = 4, verify_roundtrip<bool> = true, strict_end_token<bool> = false
 
-    stopping {
-        min_improvement_ratio: float = 0.985
-        min_fold_bits:         int   = 64
-        max_folds:             int   = 8
-    }
-}
+  entropy:
+    min_bytes<int> = 400, v2_min_bytes<int> = 1000, num_variants<int> = 6, parallel<bool> = true
 
-const FILTER_NONE:   int = 0
-const FILTER_DELTA1: int = 1
-const FILTER_DELTA2: int = 2
-const FILTER_DELTA3: int = 3
-const FILTER_DELTA4: int = 4
-const FILTER_STL:    int = 7
-const FILTER_PLY:    int = 8
-const FILTER_BCJ:    int = 9
+  archive:
+    chunk_min_mb<int> = 1, chunk_max_mb<int> = 8, entropy_threshold<double> = 7.5, similarity_groups<int> = 5
 
-enum SimilarityGroup {
-    Source     = 0
-    Markup     = 1
-    Binary     = 2
-    Compressed = 3
-    Other      = 4
-}
+  opcodes::
+    "BACKREF", "LIT", "END", "REPREF"
+)
 
-fn detect_platform() -> str {
-    @(os) match {
-        "linux"   => "Linux"
-        "windows" => "Windows"
-        "macos"   => "macOS"
-        _         => "Unknown"
-    }
-}
-
-fn auto_chunk_size(available_mb: int) -> int {
-    clamp(available_mb / 256, 1, 8) * 1024 * 1024
-}
-
-@(main)
-fn run() {
-    let platform = detect_platform()
-    print(f"MBFA Platform Config v{Platform::VERSION} on {platform}")
-    print(f"Max folds:       {Platform::MAX_FOLDS}")
-    print(f"Min improvement: {Platform::MIN_IMPROVEMENT}")
-}
+@SECURITY(
+)
 """
 
 

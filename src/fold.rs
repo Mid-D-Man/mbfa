@@ -105,16 +105,23 @@ fn log_phase_c_gain(tokens: &[Token], ob: u32, lb: u32, input_len: usize) {
 ///
 /// Returns:
 ///   (compressed_bytes, folds_done, used_pairing,
-///    offset_bits_per_fold, length_bits_per_fold, fold1_tokens, ring_was_used)
+///    offset_bits_per_fold, length_bits_per_fold, fold1_tokens, ring_was_used,
+///    dict_id_used)
 ///
 /// `ring_was_used` is true when fold 1's LZ bitstream contains RepRef tokens
 /// (ring-active encoding). The caller stores this in the header (pair_flag bit 1)
 /// so the decompressor knows to parse fold 1's bitstream with ring opcodes.
 ///
+/// `dict_id_used` is which per-format dictionary (dictionary/mod.rs) fold 1's
+/// trial picked, or `DictId::None` if none won (or folds_done==0, in which
+/// case the caller must treat it as None regardless -- see lib.rs). Stored
+/// in the header's `dict_flag` byte so the decompressor knows which bytes
+/// to prepend when undoing fold 1.
+///
 /// `filter_flag`: when non-zero a structural filter was applied; suppresses
 /// incompressible-bail in scan_adaptive and relaxes fold-1 worthiness threshold.
 pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
-    -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>, Vec<u32>, Option<Vec<Token>>, bool)>
+    -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>, Vec<u32>, Option<Vec<Token>>, bool, crate::dictionary::DictId)>
 {
     let skip_incompressible_bail = filter_flag != 0u8;
     let fold1_min_improvement = if skip_incompressible_bail { 1.0_f64 } else { MIN_IMPROVEMENT_RATIO };
@@ -126,6 +133,7 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
     let mut final_used_pairing = false;
     let mut fold1_tokens: Option<Vec<Token>> = None;
     let mut ring_was_used      = false; // P6: set when fold 1 emits RepRef tokens
+    let mut dict_id_used       = crate::dictionary::DictId::None; // set when fold 1's dictionary trial wins
 
     let mut offset_bits_per_fold: Vec<u32> = Vec::with_capacity(max_folds as usize);
     let mut length_bits_per_fold: Vec<u32> = Vec::with_capacity(max_folds as usize);
@@ -152,34 +160,52 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
                 break;
             }
 
-            // Try the static-dictionary-seeded candidate too (dictionary.rs) --
-            // same "measure both, keep whichever is actually smaller" pattern as
-            // everything else in this pipeline. Only ever replaces the normal
-            // scan if it genuinely wins; guarded off if any resulting match
-            // length wouldn't fit the already-chosen length_bits (conservative:
-            // skip the candidate rather than widen length_bits for it).
+            // Try each shortlisted per-format dictionary candidate too
+            // (dictionary/mod.rs) -- same "measure both, keep whichever is
+            // actually smaller" pattern as everything else in this pipeline,
+            // just now over >1 candidate since dictionary/mod.rs replaced
+            // the old single combined dictionary with one file per format.
+            // Only ever replaces the normal scan if a candidate genuinely
+            // wins; guarded off if any resulting match length wouldn't fit
+            // the already-chosen length_bits (conservative: skip the
+            // candidate rather than widen length_bits for it).
             {
-                let dict_ob = crate::encoder::min_offset_bits_for_dict(current.len()).max(ob);
-                let (dict_tokens, dict_bailed) =
-                    crate::encoder::scan_with_dict(&current, dict_ob, lb, true, true);
-                let lengths_fit = dict_tokens.iter().all(|t| match t {
-                    Token::Backref { length, .. } | Token::RepRef { length, .. } =>
-                        (*length as usize) <= crate::opcode::max_length(lb),
-                    _ => true,
-                });
-                if !dict_bailed && !dict_tokens.is_empty() && lengths_fit {
-                    if let (Ok((dict_folded, _)), Ok((normal_folded, _))) = (
-                        write_tokens(&dict_tokens, dict_ob, lb),
-                        write_tokens(&tokens, ob, lb),
-                    ) {
-                        if dict_folded.len() < normal_folded.len() {
-                            println!(
-                                "Dictionary candidate wins: {} B < {} B (raw, offset_bits {} -> {})",
-                                dict_folded.len(), normal_folded.len(), ob, dict_ob
-                            );
-                            tokens = dict_tokens;
-                            ob     = dict_ob;
+                if let Ok((normal_folded, _)) = write_tokens(&tokens, ob, lb) {
+                    let mut best_size   = normal_folded.len();
+                    let mut best_tokens: Option<Vec<Token>> = None;
+                    let mut best_ob     = ob;
+                    let mut best_id     = crate::dictionary::DictId::None;
+
+                    for candidate in crate::dictionary::candidates_for(&current) {
+                        let dict = candidate.bytes();
+                        if dict.is_empty() { continue; }
+                        let dict_ob = crate::encoder::min_offset_bits_for_dict(dict.len(), current.len()).max(ob);
+                        let (dict_tokens, dict_bailed) =
+                            crate::encoder::scan_with_dict(&current, dict, dict_ob, lb, true, true);
+                        let lengths_fit = dict_tokens.iter().all(|t| match t {
+                            Token::Backref { length, .. } | Token::RepRef { length, .. } =>
+                                (*length as usize) <= crate::opcode::max_length(lb),
+                            _ => true,
+                        });
+                        if dict_bailed || dict_tokens.is_empty() || !lengths_fit { continue; }
+                        if let Ok((dict_folded, _)) = write_tokens(&dict_tokens, dict_ob, lb) {
+                            if dict_folded.len() < best_size {
+                                best_size   = dict_folded.len();
+                                best_tokens = Some(dict_tokens);
+                                best_ob     = dict_ob;
+                                best_id     = candidate;
+                            }
                         }
+                    }
+
+                    if let Some(winning_tokens) = best_tokens {
+                        println!(
+                            "Dictionary candidate {:?} ({}B) wins: {} B < {} B (raw, offset_bits {} -> {})",
+                            best_id, best_id.bytes().len(), best_size, normal_folded.len(), ob, best_ob
+                        );
+                        tokens       = winning_tokens;
+                        ob           = best_ob;
+                        dict_id_used = best_id;
                     }
                 }
             }
@@ -360,6 +386,15 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
         length_bits_per_fold.push(lz_lb);
     }
 
+    // folds_done==0 means fold 1 was tried but discarded as not worth it
+    // (or the file was flagged incompressible before the dictionary trial
+    // even ran) -- current is still the original, unfolded bytes in that
+    // case, so there is nothing for dict_id_used to describe. Force it back
+    // to None here rather than relying on every early-break path above to
+    // have already done so.
+    let dict_id_used = if folds_done == 0 { crate::dictionary::DictId::None } else { dict_id_used };
+
     Ok((current, folds_done, final_used_pairing,
-        offset_bits_per_fold, length_bits_per_fold, fold1_tokens, ring_was_used))
+        offset_bits_per_fold, length_bits_per_fold, fold1_tokens, ring_was_used,
+        dict_id_used))
         }

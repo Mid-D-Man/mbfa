@@ -15,7 +15,7 @@ use crate::pairing::pair_decode;
 
 pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     if input.is_empty() { return Ok(Vec::new()); }
-    if input.len() < 4  { return Ok(input.to_vec()); }
+    if input.len() < 5  { return Ok(input.to_vec()); }
 
     let fold_count    = input[0] as usize;
     let pair_flag_raw = input[1];
@@ -23,15 +23,26 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
     let ring_flag     = (pair_flag_raw >> 1) & 0x01 != 0;
     let entropy_flag  = input[2];
     let filter_flag   = input[3];
+    let dict_flag     = input[4];
+
+    // Which per-format dictionary (if any) fold 1 was seeded with -- see
+    // dictionary/mod.rs::DictId. An unrecognized byte falls back to None
+    // rather than erroring: this only matters for the rare token whose
+    // offset actually reaches past output.len(), and if this file's fold 1
+    // never used a dictionary (the overwhelmingly common case, dict_flag=0)
+    // it's never consulted at all.
+    let dict: &[u8] = crate::dictionary::DictId::from_u8(dict_flag)
+        .unwrap_or(crate::dictionary::DictId::None)
+        .bytes();
 
     let (offset_bits_per_fold, length_bits_per_fold, payload_start) =
         parse_header(input, fold_count);
 
     println!(
         "Unfolding {} pass(es) | pair_flag={} | ring_flag={} | \
-         entropy_flag={} | filter_flag={} | \
+         entropy_flag={} | filter_flag={} | dict_flag={} | \
          offset_bits={:?} | length_bits={:?}",
-        fold_count, pair_flag, ring_flag as u8, entropy_flag, filter_flag,
+        fold_count, pair_flag, ring_flag as u8, entropy_flag, filter_flag, dict_flag,
         offset_bits_per_fold, length_bits_per_fold
     );
 
@@ -58,7 +69,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let off_dt  = entropy::decode_table_from_encode(&off_enc);
             let tokens  = entropy::read_tokens_v1(
                 &payload[lit_c + off_c..], &lit_dt, &off_dt)?;
-            let rec = reconstruct(&tokens);
+            let rec = reconstruct(&tokens, dict);
             println!("Entropy v1 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
@@ -73,7 +84,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let off_dt = entropy::decode_table_from_encode(&off_enc);
             let tokens = entropy::read_tokens_v2(
                 &payload[c0 + c1 + c2..], &dt0, &dt1, &off_dt)?;
-            let rec = reconstruct(&tokens);
+            let rec = reconstruct(&tokens, dict);
             println!("Entropy v2 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
@@ -99,7 +110,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
                     std::io::ErrorKind::InvalidData,
                     "v3 unfold: expected exactly 8 literal tables"))?;
             let tokens = entropy::read_tokens_v3(&payload[cursor..], &arr, &off_dt)?;
-            let rec    = reconstruct(&tokens);
+            let rec    = reconstruct(&tokens, dict);
             println!("Entropy v3 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
@@ -112,7 +123,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let off_dt = entropy::decode_table_from_encode(&off_enc);
             let tokens = entropy::read_tokens_v4(
                 &payload[lit_c + off_c..], &lit_dt, &off_dt)?;
-            let rec = reconstruct(&tokens);
+            let rec = reconstruct(&tokens, dict);
             println!("Entropy v4 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
@@ -127,7 +138,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let off_dt = entropy::decode_table_from_encode(&off_enc);
             let tokens = entropy::read_tokens_v5(
                 &payload[c0 + c1 + c2..], &dt0, &dt1, &off_dt)?;
-            let rec = reconstruct(&tokens);
+            let rec = reconstruct(&tokens, dict);
             println!("Entropy v5 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
@@ -150,7 +161,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
                 &payload[lit_c + seq_c + off_c..],
                 &lit_dt, &seq_dt, &off_dt,
             )?;
-            let rec = reconstruct(&tokens);
+            let rec = reconstruct(&tokens, dict);
             println!("Entropy v6 unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
@@ -164,7 +175,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let tokens  = entropy::read_tokens_v7(payload)
                 .map_err(|e| std::io::Error::new(e.kind(),
                     format!("v7 unfold: range coder decode failed: {}", e)))?;
-            let rec = reconstruct(&tokens);
+            let rec = reconstruct(&tokens, dict);
             println!("Entropy v7 (range coder) unfold: {} bytes", rec.len());
             (rec, fold_count.saturating_sub(1))
         }
@@ -216,7 +227,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
                 tokens.extend(seg_tokens);
                 cursor += seg_len;
             }
-            let rec = reconstruct(&tokens);
+            let rec = reconstruct(&tokens, dict);
             println!("Entropy v8 (block-split, {} segments) unfold: {} bytes", num_segments, rec.len());
             (rec, fold_count.saturating_sub(1))
         }
@@ -237,14 +248,14 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             let ob1 = ob_for_fold(1);
             let lb1 = lb_for_fold(1);
             let tokens = pair_decode(&current, ob1, lb1)?;
-            current = reconstruct(&tokens);
+            current = reconstruct(&tokens, dict);
             println!("Unfold pass 2 (PAIR/EG) + pass 1 (LZ): {} bytes", current.len());
             break;
         } else {
             // P6: fold 1's bitstream uses ring-active opcodes when ring_flag=1.
             let ring_active = pass == 1 && ring_flag;
             let tokens = read_tokens(&current, ob, lb, ring_active)?;
-            current = reconstruct(&tokens);
+            current = reconstruct(&tokens, dict);
             println!("Unfold pass {} (LZ{}): {} bytes",
                 pass,
                 if ring_active { "+ring" } else { "" },
@@ -267,15 +278,15 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
 }
 
 fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) {
-    let payload_start = 4 + 2 * fold_count;
+    let payload_start = 5 + 2 * fold_count;
 
     if fold_count == 0 {
-        return (vec![], vec![], 4);
+        return (vec![], vec![], 5);
     }
 
     if input.len() >= payload_start {
-        let ob_slice = &input[4..4 + fold_count];
-        let lb_slice = &input[4 + fold_count..payload_start];
+        let ob_slice = &input[5..5 + fold_count];
+        let lb_slice = &input[5 + fold_count..payload_start];
 
         let ob_valid = ob_slice.iter().all(|&b| {
             let v = b as u32;
@@ -302,4 +313,4 @@ fn parse_header(input: &[u8], fold_count: usize) -> (Vec<u32>, Vec<u32>, usize) 
         vec![LENGTH_BITS_DEFAULT; fold_count],
         payload_start,
     )
-    }
+}

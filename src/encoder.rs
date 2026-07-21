@@ -164,29 +164,31 @@ pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool, e
     scan_from(input, 0, offset_bits, length_bits, skip_bail, emit_repref)
 }
 
-/// Tries scanning `real_input` with the static dictionary (dictionary.rs) prepended
-/// as addressable history. Hash chains are seeded over the dictionary via
-/// scan_from's start_at parameter, but no tokens are ever emitted to reconstruct
-/// the dictionary itself -- only for real_input, where offsets may legitimately
-/// reach back into the dictionary region.
+/// Tries scanning `real_input` with `dict` prepended as addressable history.
+/// Hash chains are seeded over `dict` via scan_from's start_at parameter,
+/// but no tokens are ever emitted to reconstruct the dictionary itself --
+/// only for real_input, where offsets may legitimately reach back into the
+/// dictionary region.
 ///
-/// `offset_bits` must already be wide enough to cover DICT_LEN + real_input.len()
-/// (the caller is responsible for this -- see try_dict_candidate in lib.rs, which
-/// compares the resulting raw bit cost against the non-dictionary baseline and
-/// only keeps this candidate if it actually wins).
+/// `dict` is one of dictionary::DictId's per-format byte slices (or `&[]`
+/// for none) -- see dictionary/mod.rs for why there's more than one now.
+///
+/// `offset_bits` must already be wide enough to cover dict.len() + real_input.len()
+/// (the caller is responsible for this -- see fold.rs's fold-1 dictionary
+/// trial, which compares the resulting raw bit cost against the
+/// non-dictionary baseline and only keeps this candidate if it actually wins).
 pub fn scan_with_dict(
-    real_input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool, emit_repref: bool,
+    real_input: &[u8], dict: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool, emit_repref: bool,
 ) -> (Vec<Token>, bool) {
-    let dict = crate::dictionary::DICTIONARY;
     let mut combined = Vec::with_capacity(dict.len() + real_input.len());
     combined.extend_from_slice(dict);
     combined.extend_from_slice(real_input);
     scan_from(&combined, dict.len(), offset_bits, length_bits, skip_bail, emit_repref)
 }
 
-/// Minimum offset_bits needed to address DICT_LEN + real_len positions back.
-pub fn min_offset_bits_for_dict(real_len: usize) -> u32 {
-    let needed = crate::dictionary::DICT_LEN + real_len;
+/// Minimum offset_bits needed to address dict_len + real_len positions back.
+pub fn min_offset_bits_for_dict(dict_len: usize, real_len: usize) -> u32 {
+    let needed = dict_len + real_len;
     let mut bits = 1u32;
     while (1usize << bits) - 1 < needed && bits < 31 { bits += 1; }
     bits
@@ -869,4 +871,4 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
     let (tokens, ob, lb) =
         phase_c_from_baseline(baseline, wide_discovery, input, skip_incompressible_bail, final_emit_repref);
     (tokens, ob, lb, false)
-        }
+            }

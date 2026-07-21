@@ -14,22 +14,30 @@
 //! call), so it can be called concurrently on different token streams.
 //!
 //! Static dictionary support: the addressable "history" for any offset is
-//! conceptually `DICTIONARY ++ output`, not just `output`. A normal backref
+//! conceptually `dict ++ output`, not just `output`. A normal backref
 //! (offset <= output.len()) resolves identically to before -- the virtual
-//! position is always >= DICT_LEN in that case, so this is a pure
+//! position is always >= dict.len() in that case, so this is a pure
 //! generalization, not a behavior change, for every existing token stream.
 //! Only offsets that deliberately reach further back (only ever produced by
 //! encoder::scan_with_dict) actually fall into the dictionary.
+//!
+//! `dict` is passed in by the caller (unfold.rs), resolved from the
+//! header's `dict_flag` byte via dictionary::DictId::bytes(). Before the
+//! dictionary/ subdirectory split there was exactly one possible
+//! dictionary, so this module could import it as a fixed const; now there
+//! are four (plus "none"), so reconstruct() takes it as a parameter and
+//! the caller is responsible for picking the right one. Passing `&[]`
+//! (dict.len()==0) reproduces the original no-dictionary behavior exactly.
 
 use crate::opcode::{Token, MAX_RING_SLOTS};
-use crate::dictionary::{DICTIONARY, DICT_LEN};
 
 #[inline]
-fn virtual_byte(output: &[u8], vpos: usize) -> u8 {
-    if vpos < DICT_LEN { DICTIONARY[vpos] } else { output[vpos - DICT_LEN] }
+fn virtual_byte(output: &[u8], dict: &[u8], vpos: usize) -> u8 {
+    if vpos < dict.len() { dict[vpos] } else { output[vpos - dict.len()] }
 }
 
-pub fn reconstruct(tokens: &[Token]) -> Vec<u8> {
+pub fn reconstruct(tokens: &[Token], dict: &[u8]) -> Vec<u8> {
+    let dict_len = dict.len();
     // Pre-pass: compute exact output byte count to allocate once.
     let capacity: usize = tokens.iter().map(|t| match t {
         Token::Lit { .. }                                         => 1,
@@ -53,14 +61,14 @@ pub fn reconstruct(tokens: &[Token]) -> Vec<u8> {
                     eprintln!("Warning: Backref offset=0 — skipping corrupt token");
                     continue;
                 }
-                // Apply copy. virtual_start is relative to DICT_LEN + output.len(),
+                // Apply copy. virtual_start is relative to dict_len + output.len(),
                 // so this is exactly the old `output.len() - offset` when offset
-                // stays within the real window (virtual_start ends up >= DICT_LEN),
+                // stays within the real window (virtual_start ends up >= dict_len),
                 // and falls into the dictionary when it doesn't.
-                let virtual_start = (DICT_LEN + output.len()).saturating_sub(*offset as usize);
+                let virtual_start = (dict_len + output.len()).saturating_sub(*offset as usize);
                 for k in 0..*length as usize {
                     let vpos = virtual_start + (k % *offset as usize);
-                    output.push(virtual_byte(&output, vpos));
+                    output.push(virtual_byte(&output, dict, vpos));
                 }
                 // Update ring: push to front iff different from ring[0].
                 if ring_count == 0 || ring[0] != *offset {
@@ -85,10 +93,10 @@ pub fn reconstruct(tokens: &[Token]) -> Vec<u8> {
                     continue;
                 }
                 // Apply copy (same logic as Backref, dictionary-aware too).
-                let virtual_start = (DICT_LEN + output.len()).saturating_sub(offset as usize);
+                let virtual_start = (dict_len + output.len()).saturating_sub(offset as usize);
                 for k in 0..*length as usize {
                     let vpos = virtual_start + (k % offset as usize);
-                    output.push(virtual_byte(&output, vpos));
+                    output.push(virtual_byte(&output, dict, vpos));
                 }
                 // Update ring: move ring[s] to front (LRU move-to-front).
                 for j in (1..=s).rev() { ring[j] = ring[j - 1]; }
@@ -105,6 +113,7 @@ pub fn reconstruct(tokens: &[Token]) -> Vec<u8> {
 #[cfg(test)]
 mod dict_reconstruct_tests {
     use super::*;
+    use crate::dictionary::dixscript;
 
     #[test]
     fn normal_backref_unaffected_by_dictionary_generalization() {
@@ -114,22 +123,23 @@ mod dict_reconstruct_tests {
             Token::Backref { offset: 3, length: 3 }, // repeats "ABC"
             Token::End,
         ];
-        assert_eq!(reconstruct(&tokens), b"ABCABC".to_vec());
+        assert_eq!(reconstruct(&tokens, &[]), b"ABCABC".to_vec());
     }
 
     #[test]
     fn backref_reaching_past_output_resolves_into_dictionary() {
         // First byte(s) of output, then a backref whose offset exceeds
-        // output.len() entirely -- must resolve into the tail of DICTIONARY.
+        // output.len() entirely -- must resolve into the tail of the dictionary.
         // offset=6 with output.len()=1 at that point => virtual_start =
-        // (DICT_LEN+1)-6 = DICT_LEN-5, i.e. the dictionary's last 5 bytes.
-        let tail = &DICTIONARY[DICT_LEN - 5..];
+        // (dict_len+1)-6 = dict_len-5, i.e. the dictionary's last 5 bytes.
+        let dict = dixscript::DICTIONARY;
+        let tail = &dict[dict.len() - 5..];
         let tokens = vec![
             Token::Lit { byte: b'X' },
             Token::Backref { offset: 6, length: 5 },
             Token::End,
         ];
-        let out = reconstruct(&tokens);
+        let out = reconstruct(&tokens, dict);
         assert_eq!(&out[1..], tail);
     }
 
@@ -138,14 +148,30 @@ mod dict_reconstruct_tests {
         // offset chosen so the copy starts inside the dictionary's last 2
         // bytes and continues into freshly-written output.
         // offset=4 with output.len()=2 at that point => virtual_start =
-        // (DICT_LEN+2)-4 = DICT_LEN-2.
+        // (dict_len+2)-4 = dict_len-2.
+        let dict = dixscript::DICTIONARY;
         let tokens = vec![
             Token::Lit { byte: b'Q' }, Token::Lit { byte: b'R' },
             Token::Backref { offset: 4, length: 4 },
             Token::End,
         ];
-        let out = reconstruct(&tokens);
-        let expected_start = &DICTIONARY[DICT_LEN - 2..];
+        let out = reconstruct(&tokens, dict);
+        let expected_start = &dict[dict.len() - 2..];
         assert_eq!(&out[2..4], expected_start);
     }
-                                                  }
+
+    #[test]
+    fn empty_dict_matches_pre_split_no_dictionary_behavior() {
+        // dict=&[] must be indistinguishable from "no dictionary" -- any
+        // offset that would have reached the dictionary now has nowhere to
+        // resolve, so this only matters for tokens whose offsets stay
+        // within output.len(), which is exactly what fold 2+ and
+        // no-dictionary-winner fold-1 streams guarantee by construction.
+        let tokens = vec![
+            Token::Lit { byte: b'H' }, Token::Lit { byte: b'I' },
+            Token::Backref { offset: 2, length: 4 },
+            Token::End,
+        ];
+        assert_eq!(reconstruct(&tokens, &[]), b"HIHIHI".to_vec());
+    }
+                }

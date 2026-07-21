@@ -41,15 +41,25 @@ fn sample_entropy(data: &[u8]) -> f64 {
         .sum()
 }
 
-/// File header layout (bytes 0-3 + N ob + N lb):
+/// File header layout (bytes 0-4 + N ob + N lb):
 ///   Byte 0: fold_count
 ///   Byte 1: pair_flag byte
 ///              bit 0 -- fold 2 used pair encoding (bool)
 ///              bit 1 -- fold 1 LZ bitstream uses ring-active opcodes (P6)
 ///   Byte 2: entropy_flag (0=none, 1-7=variant)
 ///   Byte 3: filter_flag  (0=none, 1-4=delta, 7=STL, 8=PLY, 9=BCJ, 10-15=BCJ variants)
-///   Bytes 4..4+N:    offset_bits[0..N]  N = fold_count
-///   Bytes 4+N..4+2N: length_bits[0..N]
+///   Byte 4: dict_flag    (0=none, 1=DixScript, 2=Unity, 3=Unreal, 4=Config --
+///                         see dictionary/mod.rs::DictId. Only ever non-zero
+///                         when fold_count>=1; identifies which per-format
+///                         dictionary fold 1's LZ pass was seeded with, so
+///                         the decompressor knows which bytes to prepend
+///                         when undoing fold 1. Added when dictionary.rs
+///                         split into dictionary/{dixscript,unity,unreal,
+///                         config}.rs -- with only one possible dictionary
+///                         this byte wasn't needed; with four differently-
+///                         sized ones, it is.)
+///   Bytes 5..5+N:    offset_bits[0..N]  N = fold_count
+///   Bytes 5+N..5+2N: length_bits[0..N]
 ///   Remaining: compressed payload
 ///
 /// fold_count=0: passthrough -- payload is original uncompressed bytes.
@@ -85,9 +95,10 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                 "Incompressible early exit: entropy={:.3} bits/byte, {} bytes -- passthrough",
                 ent, input.len()
             );
-            let mut out = Vec::with_capacity(4 + input.len());
+            let mut out = Vec::with_capacity(5 + input.len());
             out.push(0u8); out.push(0u8); out.push(0u8);
             out.push(filters::FILTER_NONE);
+            out.push(0u8); // dict_flag: no dictionary on a passthrough
             out.extend_from_slice(input);
             return Ok(out);
         }
@@ -96,8 +107,12 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     // ── Fold passes ───────────────────────────────────────────────────────────
     let (compressed, folds_done, used_pairing,
          offset_bits_per_fold, length_bits_per_fold,
-         fold1_tokens_opt, ring_was_used) =
+         fold1_tokens_opt, ring_was_used, dict_id_used) =
         fold::fold(to_fold, max_folds, filter_flag)?;
+
+    // Belt-and-suspenders (fold.rs already guarantees this): a dictionary
+    // can only have been used if fold 1 actually happened.
+    let dict_flag: u8 = if folds_done == 0 { 0 } else { dict_id_used as u8 };
 
     let ob1 = offset_bits_per_fold.first().copied()
         .unwrap_or(opcode::OFFSET_BITS_MIN);
@@ -267,12 +282,13 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     let pair_flag_byte  = (out_pair_flag as u8) | ((final_ring_flag as u8) << 1);
 
     let mut output = Vec::with_capacity(
-        4 + 2 * out_folds as usize + final_payload.len()
+        5 + 2 * out_folds as usize + final_payload.len()
     );
     output.push(out_folds);
     output.push(pair_flag_byte);
     output.push(entropy_flag);
     output.push(filter_flag);
+    output.push(dict_flag);
     for &ob in &out_ob { output.push(ob as u8); }
     for &lb in &out_lb { output.push(lb as u8); }
     output.extend_from_slice(&final_payload);
@@ -741,4 +757,4 @@ mod v8_tests {
         let decompressed = decompress(&compressed).expect("decompress should succeed");
         assert_eq!(decompressed, data, "full pipeline roundtrip mismatch");
     }
-    }
+            }

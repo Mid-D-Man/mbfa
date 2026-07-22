@@ -48,16 +48,17 @@ fn sample_entropy(data: &[u8]) -> f64 {
 ///              bit 1 -- fold 1 LZ bitstream uses ring-active opcodes (P6)
 ///   Byte 2: entropy_flag (0=none, 1-7=variant)
 ///   Byte 3: filter_flag  (0=none, 1-4=delta, 7=STL, 8=PLY, 9=BCJ, 10-15=BCJ variants)
-///   Byte 4: dict_flag    (0=none, 1=DixScript, 2=Unity, 3=Unreal, 4=Config --
+///   Byte 4: dict_flag    (0=none, 1=DixScript, 2=Unity, 3=Unreal, 4=Config,
+///                         5=DixScriptBinary --
 ///                         see dictionary/mod.rs::DictId. Only ever non-zero
 ///                         when fold_count>=1; identifies which per-format
 ///                         dictionary fold 1's LZ pass was seeded with, so
 ///                         the decompressor knows which bytes to prepend
 ///                         when undoing fold 1. Added when dictionary.rs
-///                         split into dictionary/{dixscript,unity,unreal,
-///                         config}.rs -- with only one possible dictionary
-///                         this byte wasn't needed; with four differently-
-///                         sized ones, it is.)
+///                         split into dictionary/{dixscript,dixscript_binary,
+///                         unity,unreal,config}.rs -- with only one possible
+///                         dictionary this byte wasn't needed; with five
+///                         differently-sized ones, it is.)
 ///   Bytes 5..5+N:    offset_bits[0..N]  N = fold_count
 ///   Bytes 5+N..5+2N: length_bits[0..N]
 ///   Remaining: compressed payload
@@ -757,4 +758,4 @@ mod v8_tests {
         let decompressed = decompress(&compressed).expect("decompress should succeed");
         assert_eq!(decompressed, data, "full pipeline roundtrip mismatch");
     }
-            }
+        }

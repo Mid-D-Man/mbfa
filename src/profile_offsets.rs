@@ -37,7 +37,7 @@ fn main() {
             .and_then(|n| n.to_str())
             .unwrap_or(path.as_str());
 
-        let (compressed, _folds, _paired, ob_per_fold, lb_per_fold, _fold1_tokens, _ring) =
+        let (compressed, _folds, _paired, ob_per_fold, lb_per_fold, _fold1_tokens, _ring, _dict_id) =
             match mbfa::fold::fold(&data, 1, 0) {
                 Ok(r)  => r,
                 Err(e) => { eprintln!("{}: fold error: {}", name, e); continue; }
@@ -154,4 +154,4 @@ fn profile_tokens(tokens: &[mbfa::opcode::Token])
     }
 
     (total, hit1, hit2, hit3, hit4)
-            }
+    }

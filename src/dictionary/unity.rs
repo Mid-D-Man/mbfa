@@ -32,4 +32,4 @@ mod tests {
         assert!(s.windows(9).any(|w| w == b"Transform"));
         assert!(s.windows(12).any(|w| w == b"MeshRenderer"));
     }
-  }
+}

@@ -271,56 +271,94 @@ def gen_minimal_dll():
 
 
 # ── Real DixScript binary format (.mdix compiled) ─────────────────────────────
+#
+# Rewritten July 2026 alongside the DixScript dictionary split (see
+# mbfa/src/dictionary/dixscript_binary.rs's doc comment). The previous
+# version of this function wrapped every section in a generic Object tag
+# (0x09, [Count:4][Key-Value pairs...]) with made-up keys like
+# "max_folds"/"offset_bits_min" that don't exist anywhere in real DixScript
+# -- those are MBFA's own config names, not DixScript's. The real writers
+# (DixScript-Rust's BinarySerialization/SectionWriters/*.rs) never use the
+# generic Object wrapper for @CONFIG/@DATA/@SECURITY at the section level;
+# each section has its own dedicated layout, checked directly against:
+#   - config_section_writer.rs   (@CONFIG: real ConfigKey vocabulary)
+#   - data_section_writer.rs     (@DATA: DataEntryType::SimpleProperty)
+#   - security_section_writer.rs (@SECURITY: block-key -> field list)
+#   - value_encoder.rs           (tag bytes: 0x01 Int32 … 0x09 Object)
+#   - binary_format.rs           (SectionId, 16-byte header layout)
+#   - checksum_validator.rs      (trailing 32-byte SHA-256, no marker)
+
+TAG_INT32  = 0x01
+TAG_FLOAT32 = 0x03
+TAG_STRING = 0x05
+TAG_BOOL   = 0x06
+
+def _enc_int32(v):
+    return bytes([TAG_INT32]) + struct.pack('<i', int(v))
+
+def _enc_float32(v):
+    return bytes([TAG_FLOAT32]) + struct.pack('<f', float(v))
+
+def _enc_string(s):
+    b = s.encode('utf-8')
+    return bytes([TAG_STRING]) + struct.pack('<i', len(b)) + b
+
+def _enc_bool(v):
+    return bytes([TAG_BOOL, 0x01 if v else 0x00])
+
+def _enc_field_name(s):
+    # Bare length-prefixed UTF-8, no type tag -- used for keys (ConfigEntry,
+    # DataEntry name, SecurityEntry block key, SecurityField key), which are
+    # never typed values themselves.
+    b = s.encode('utf-8')
+    return struct.pack('<i', len(b)) + b
+
+def _section(section_id, entry_count, body):
+    # [Section ID: 4][Section Length: 4][Entry Count: 4][Entries...]
+    # section_length = end_pos - start_pos, i.e. it includes the id field,
+    # the length field itself, the entry count, AND the entry bytes --
+    # matches config_section_writer.rs's start_pos-before-id /
+    # end_pos-after-entries measurement exactly.
+    section_length = 4 + 4 + 4 + len(body)
+    return (struct.pack('<I', section_id) + struct.pack('<i', section_length)
+            + struct.pack('<i', entry_count) + body)
+
 
 def gen_binary_dixscript(num_data_entries=400, seed=42):
     rng = random.Random(seed)
 
-    def enc_int32(v):
-        return bytes([0x01]) + struct.pack('<i', int(v))
-
-    def enc_float32(v):
-        return bytes([0x03]) + struct.pack('<f', float(v))
-
-    def enc_string(s):
-        b = s.encode('utf-8')
-        return bytes([0x05]) + struct.pack('<i', len(b)) + b
-
-    def enc_bool(v):
-        return bytes([0x06, 0x01 if v else 0x00])
-
-    def enc_object(props):
-        d = bytes([0x09]) + struct.pack('<i', len(props))
-        for k, v in props:
-            kb = k.encode('utf-8')
-            d += struct.pack('<i', len(kb)) + kb + v
-        return d
-
-    config_props = [
-        ("max_folds",          enc_int32(8)),
-        ("min_improvement",    enc_float32(0.985)),
-        ("offset_bits_min",    enc_int32(7)),
-        ("offset_bits_max",    enc_int32(24)),
-        ("length_bits_min",    enc_int32(8)),
-        ("length_bits_max",    enc_int32(24)),
-        ("hash_size",          enc_int32(65536)),
-        ("chain_limit",        enc_int32(256)),
-        ("entropy_threshold",  enc_float32(7.8)),
-        ("entropy_min_bytes",  enc_int32(400)),
-        ("filter_bcj",         enc_bool(True)),
-        ("filter_delta",       enc_bool(True)),
-        ("filter_stl",         enc_bool(True)),
-        ("filter_ply",         enc_bool(True)),
-        ("parallel_folds",     enc_bool(True)),
-        ("ring_slots",         enc_int32(4)),
-        ("max_string_length",  enc_int32(1048576)),
-        ("max_array_length",   enc_int32(1048576)),
-        ("max_nesting_depth",  enc_int32(5)),
-        ("version_major",      enc_int32(1)),
-        ("version_minor",      enc_int32(0)),
-        ("version_patch",      enc_int32(0)),
+    # ── @CONFIG: real ConfigKey vocabulary (others/midx.ebnf), real
+    # per-entry format [KeyLen:4][Key][ValueTag:1][ValueData] ────────────────
+    config_entries = [
+        ("version",             _enc_string("1.0.0")),
+        ("encoding",            _enc_string("UTF-8")),
+        ("author",              _enc_string("MBFA-CI")),
+        ("features",            _enc_string("advanced")),
+        ("debug_mode",          _enc_string("regular")),
+        ("error_handling",      _enc_string("halt")),
+        ("compatibility_mode",  _enc_string("strict")),
     ]
-    config_section = enc_object(config_props)
+    config_body = b''.join(_enc_field_name(k) + v for k, v in config_entries)
+    config_section = _section(1, len(config_entries), config_body)
 
+    # ── @SECURITY: real block-key -> field-list format
+    # [BlockKeyLen:4][BlockKey][FieldCount:4][Fields: [KeyLen:4][Key][Value]] ─
+    security_blocks = [
+        ("encryption", [("mode", _enc_string("keyfile")), ("algorithm", _enc_string("aes256-gcm"))]),
+        ("validation", [("level", _enc_string("strict")), ("enabled", _enc_bool(True))]),
+        ("keystore",   [("provider", _enc_string("local")), ("rotate_days", _enc_int32(90))]),
+    ]
+    sec_body = bytearray()
+    for block_key, fields in security_blocks:
+        sec_body += _enc_field_name(block_key)
+        sec_body += struct.pack('<i', len(fields))
+        for fk, fv in fields:
+            sec_body += _enc_field_name(fk) + fv
+    security_section = _section(4, len(security_blocks), bytes(sec_body))
+
+    # ── @DATA: real DataEntryType::SimpleProperty format
+    # [Type:1=0x01][NameLen:4][Name][Value] per entry, entries share the
+    # section's flat entry list (no per-entry Object wrapper) ───────────────
     ENTRY_NAMES = [
         "Platform", "Encoder", "Decoder", "Archive", "Entropy",
         "Filter", "Compress", "Decompress", "Fold", "Unfold",
@@ -335,40 +373,46 @@ def gen_binary_dixscript(num_data_entries=400, seed=42):
         "required", "optional", "deprecated",
     ]
 
-    data_entries_buf = bytearray()
+    data_body = bytearray()
     for i in range(num_data_entries):
-        props = [
-            ("id",       enc_int32(i)),
-            ("name",     enc_string(ENTRY_NAMES[i % len(ENTRY_NAMES)])),
-            ("value",    enc_int32(rng.randint(0, 1024))),
-            ("enabled",  enc_bool(rng.random() > 0.25)),
-            ("type",     enc_string(ENTRY_TYPES[i % len(ENTRY_TYPES)])),
-            ("count",    enc_int32(rng.randint(1, 256))),
-            ("priority", enc_int32(i % 8)),
-            ("tag",      enc_string(TAG_NAMES[i % len(TAG_NAMES)])),
-            ("ratio",    enc_float32(rng.uniform(0.0, 1.0))),
-            ("active",   enc_bool(True)),
-        ]
-        data_entries_buf += enc_object(props)
+        # Each SimpleProperty entry's "value" here is itself the only
+        # payload after [Type][NameLen][Name] -- real DixScript data entries
+        # are single name=value pairs, not a props-list per entry (that
+        # shape was this function's other main fabrication). To still
+        # exercise realistic entry diversity we emit num_data_entries
+        # separate SimpleProperty entries cycling through plausible
+        # name/value pairs, which is what a real @DATA block with many
+        # scalar assignments actually looks like on the wire.
+        name = f"{ENTRY_NAMES[i % len(ENTRY_NAMES)]}_{i}"
+        choice = i % 4
+        if choice == 0:
+            value = _enc_int32(rng.randint(0, 1024))
+        elif choice == 1:
+            value = _enc_string(ENTRY_TYPES[i % len(ENTRY_TYPES)])
+        elif choice == 2:
+            value = _enc_bool(rng.random() > 0.25)
+        else:
+            value = _enc_float32(rng.uniform(0.0, 1.0))
+        data_body += bytes([0x01]) + _enc_field_name(name) + value
 
-    data_section = bytes(data_entries_buf)
+    data_section = _section(3, num_data_entries, bytes(data_body))
 
     MAGIC_U32    = 0x4D444958
     HEADER_SIZE  = 16
-    OFFSET_ENTRY = 12
 
     sections = [
         (1, config_section),
         (3, data_section),
+        (4, security_section),
     ]
 
     layout  = []
     payload = bytearray()
     cur_off = HEADER_SIZE
-    for sec_id, sec_data in sections:
-        layout.append((sec_id, cur_off, len(sec_data)))
-        payload += sec_data
-        cur_off += len(sec_data)
+    for sec_id, sec_bytes in sections:
+        layout.append((sec_id, cur_off, len(sec_bytes)))
+        payload += sec_bytes
+        cur_off += len(sec_bytes)
 
     offset_table_pos = HEADER_SIZE + len(payload)
 

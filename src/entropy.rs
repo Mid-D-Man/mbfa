@@ -1617,7 +1617,7 @@ fn rc_init() -> Vec<u16> { vec![RC_PROB_INIT; PROB_TOTAL] }
 
 // ── Encoder ───────────────────────────────────────────────────────────────────
 
-struct Rc7Enc {
+pub(crate) struct Rc7Enc {
     out:      Vec<u8>,
     low:      u64,
     range:    u32,
@@ -1626,12 +1626,12 @@ struct Rc7Enc {
 }
 
 impl Rc7Enc {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { out: Vec::new(), low: 0, range: 0xFFFF_FFFF, cache: 0, cache_ff: 0 }
     }
 
     #[inline]
-    fn encode_bit(&mut self, prob: &mut u16, sym: u32) {
+    pub(crate) fn encode_bit(&mut self, prob: &mut u16, sym: u32) {
         let p     = *prob as u64;
         let bound = ((self.range as u64) >> RC_PROB_BITS) * p;
         let bound = bound as u32;
@@ -1677,13 +1677,13 @@ impl Rc7Enc {
         self.range <<= 8;
     }
 
-    fn finish(mut self) -> Vec<u8> {
+    pub(crate) fn finish(mut self) -> Vec<u8> {
         // Flush 5 bytes to drain the low register
         for _ in 0..5 { self.flush_byte(); }
         self.out
     }
 
-    fn encode_bittree(&mut self, probs: &mut [u16], base: usize, bits: u32, sym: u32) {
+    pub(crate) fn encode_bittree(&mut self, probs: &mut [u16], base: usize, bits: u32, sym: u32) {
         let mut ctx = 1u32;
         for i in (0..bits).rev() {
             let bit = (sym >> i) & 1;
@@ -1692,7 +1692,7 @@ impl Rc7Enc {
         }
     }
 
-    fn encode_direct(&mut self, probs: &mut [u16], base: usize, bits: u32, val: u32) {
+    pub(crate) fn encode_direct(&mut self, probs: &mut [u16], base: usize, bits: u32, val: u32) {
         // Direct bits: sent MSB-first with per-position (not per-value) context
         for i in (0..bits).rev() {
             self.encode_bit(&mut probs[base + i as usize], (val >> i) & 1);
@@ -1702,7 +1702,7 @@ impl Rc7Enc {
 
 // ── Decoder ───────────────────────────────────────────────────────────────────
 
-struct Rc7Dec<'a> {
+pub(crate) struct Rc7Dec<'a> {
     input: &'a [u8],
     pos:   usize,
     code:  u32,
@@ -1710,7 +1710,7 @@ struct Rc7Dec<'a> {
 }
 
 impl<'a> Rc7Dec<'a> {
-    fn new(input: &'a [u8]) -> std::io::Result<Self> {
+    pub(crate) fn new(input: &'a [u8]) -> std::io::Result<Self> {
         if input.len() < 5 {
             return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof,
                 "v7: stream too short to initialise range coder (need >= 5 bytes)"));
@@ -1732,7 +1732,7 @@ impl<'a> Rc7Dec<'a> {
     }
 
     #[inline]
-    fn decode_bit(&mut self, prob: &mut u16) -> std::io::Result<u32> {
+    pub(crate) fn decode_bit(&mut self, prob: &mut u16) -> std::io::Result<u32> {
         let p     = *prob as u32;
         let bound = (self.range >> RC_PROB_BITS) * p;
         let sym;
@@ -1754,7 +1754,7 @@ impl<'a> Rc7Dec<'a> {
         Ok(sym)
     }
 
-    fn decode_bittree(&mut self, probs: &mut [u16], base: usize, bits: u32) -> std::io::Result<u32> {
+    pub(crate) fn decode_bittree(&mut self, probs: &mut [u16], base: usize, bits: u32) -> std::io::Result<u32> {
         let mut ctx = 1u32;
         for _ in 0..bits {
             let bit = self.decode_bit(&mut probs[base + ctx as usize - 1])?;
@@ -1763,7 +1763,7 @@ impl<'a> Rc7Dec<'a> {
         Ok(ctx - (1 << bits))
     }
 
-    fn decode_direct(&mut self, probs: &mut [u16], base: usize, bits: u32) -> std::io::Result<u32> {
+    pub(crate) fn decode_direct(&mut self, probs: &mut [u16], base: usize, bits: u32) -> std::io::Result<u32> {
         let mut val = 0u32;
         for i in (0..bits).rev() {
             let bit = self.decode_bit(&mut probs[base + i as usize])?;

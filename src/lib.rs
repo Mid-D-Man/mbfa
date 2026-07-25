@@ -6,6 +6,13 @@
 //   its own probability model during encoding.
 //   v7 competes in the same rayon tournament as v1-v6; it wins on
 //   near-degenerate distributions where Huffman's integer-bit floor is visible.
+// v8 addition: block-split entropy (path-2 cheap first cut) -- see build_v8_candidate.
+// v9 addition: entropy_v9 -- v7's range coder plus rep-awareness (is_rep/is_rep0/
+//   is_rep1/is_rep2 cascade, mirrors LZMA's REPS=4 shape). Only meaningfully
+//   different from v7 when the token stream still has Token::RepRef in it, so
+//   v9's gate/encode use the *unresolved* ring-active token stream, not the
+//   resolve_ring()-flattened one v1-v8/v7 use -- see the tokens_raw split in
+//   compress() and pair_vs_entropy() below.
 
 pub mod opcode;
 pub mod encoder;
@@ -17,6 +24,9 @@ pub mod pairing;
 pub mod fold;
 pub mod unfold;
 pub mod entropy;
+pub mod entropy_v9;
+pub mod price_table;
+pub mod optimal_parse;
 pub mod filters;
 pub mod archive;
 pub mod archive_io;
@@ -46,7 +56,7 @@ fn sample_entropy(data: &[u8]) -> f64 {
 ///   Byte 1: pair_flag byte
 ///              bit 0 -- fold 2 used pair encoding (bool)
 ///              bit 1 -- fold 1 LZ bitstream uses ring-active opcodes (P6)
-///   Byte 2: entropy_flag (0=none, 1-7=variant)
+///   Byte 2: entropy_flag (0=none, 1-9=variant; see below for 7/8/9)
 ///   Byte 3: filter_flag  (0=none, 1-4=delta, 7=STL, 8=PLY, 9=BCJ, 10-15=BCJ variants)
 ///   Byte 4: dict_flag    (0=none, 1=DixScript, 2=Unity, 3=Unreal, 4=Config,
 ///                         5=DixScriptBinary --
@@ -69,6 +79,10 @@ fn sample_entropy(data: &[u8]) -> f64 {
 ///   Payload is the raw range-coder byte stream.
 ///   No Huffman tables are stored -- the decoder reconstructs the
 ///   probability model from the same initial state (all probs = 1024).
+/// entropy_flag=9: v9 range coder (v7 + rep-awareness).
+///   Payload is the raw range-coder byte stream, same no-tables approach
+///   as v7. Unlike v7, the encoded token stream may contain Token::RepRef
+///   (cheap ring-slot reuse) alongside Token::Backref -- see entropy_v9.rs.
 pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     // ── Pre-filter ────────────────────────────────────────────────────────────
     let filter_flag = filters::detect_filter(input);
@@ -136,10 +150,10 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let read_ring_active = ring_was_used && folds_done == 1;
             let tokens_raw =
                 bitreader::read_tokens(&compressed, final_ob, final_lb, read_ring_active)?;
-            let tokens = if read_ring_active {
+            let tokens: Vec<opcode::Token> = if read_ring_active {
                 opcode::resolve_ring(&tokens_raw)
             } else {
-                tokens_raw
+                tokens_raw.clone()
             };
 
             let raw_size   = compressed.len();
@@ -147,6 +161,10 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let v2_ok      = entropy_ok && raw_size >= entropy::ENTROPY_V2_MIN_BYTES;
             // v7 gate: all Backref lengths must be <= RC_MAX_BACKREF_LEN (272)
             let v7_ok      = tokens_safe_for_v7(&tokens);
+            // v9 gate: checked against tokens_raw (RepRef-preserving), not the
+            // resolve_ring()-flattened `tokens` -- tokens_safe_for_v9 checks
+            // RepRef lengths too, which only exist pre-flattening.
+            let v9_ok      = entropy_v9::tokens_safe_for_v9(&tokens_raw);
 
             let lit_arc: Option<Arc<entropy::EncodeTable>> = if entropy_ok {
                 entropy::build_encode_table(&tokens).map(Arc::new)
@@ -178,8 +196,11 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             // v7 shares the token vec via Arc -- no table building needed
             let tokens_arc = Arc::new(tokens);
             let ta = Arc::clone(&tokens_arc);
+            // v9 needs the separate RepRef-preserving stream -- own Arc.
+            let raw_arc = Arc::new(tokens_raw);
+            let ra = Arc::clone(&raw_arc);
 
-            let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7, 8]
+            let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9]
                 .into_par_iter()
                 .map(|flag| {
                     let tokens = &*ta;
@@ -222,6 +243,16 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                             })
                         } else { None },
                         8 => if entropy_ok { try_entropy_v8(tokens) } else { None },
+                        9 => if v9_ok {
+                            // Same defense-in-depth roundtrip check as v7, but
+                            // against the RepRef-preserving stream.
+                            let raw = &*ra;
+                            try_entropy_v9(raw).filter(|payload| {
+                                entropy_v9::read_tokens_v9(payload)
+                                    .map(|decoded| decoded == *raw)
+                                    .unwrap_or(false)
+                            })
+                        } else { None },
                         _ => None,
                     };
                     (flag, payload)
@@ -245,12 +276,14 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
 
             if best_size >= raw_size {
                 println!("Joint entropy skipped (no gain vs raw={}B)", raw_size);
-                // Drop Arc before returning compressed
+                // Drop Arcs before returning compressed
                 drop(tokens_arc);
+                drop(raw_arc);
                 (compressed, 0u8, false, folds_done,
                  offset_bits_per_fold, length_bits_per_fold)
             } else {
                 drop(tokens_arc);
+                drop(raw_arc);
                 let (flag, payload) = results.into_iter()
                     .filter_map(|(f, opt)| opt.map(|p| (f, p)))
                     .min_by_key(|(_, p)| p.len())
@@ -263,14 +296,14 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let f1t = fold1_tokens_opt
                 .expect("fold1_tokens must be Some when used_pairing is true");
 
-            let f1t_resolved = if ring_was_used {
+            let f1t_resolved: Vec<opcode::Token> = if ring_was_used {
                 opcode::resolve_ring(&f1t)
             } else {
-                f1t
+                f1t.clone()
             };
 
             pair_vs_entropy(
-                f1t_resolved, ob1, lb1, &compressed,
+                f1t, f1t_resolved, ob1, lb1, &compressed,
                 folds_done, &offset_bits_per_fold, &length_bits_per_fold,
             )?
         } else {
@@ -395,6 +428,13 @@ fn try_entropy_v7(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     entropy::write_tokens_v7(tokens).ok()
 }
 
+/// v9: like v7, no pre-built tables. Unlike v7, `tokens` here is expected to
+/// still contain Token::RepRef (the RepRef-preserving stream) -- that's the
+/// whole point of v9 over v7. See tokens_raw in compress()/pair_vs_entropy().
+fn try_entropy_v9(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
+    entropy_v9::write_tokens_v9(tokens).ok()
+}
+
 // ── v8: block-split (path-2 cheap first cut) ─────────────────────────────────
 //
 // Unlike v1-v6 (one table for the whole file, chosen by a fixed rule) or v7
@@ -498,6 +538,7 @@ fn try_entropy_v8(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
 // ── pair_vs_entropy ───────────────────────────────────────────────────────────
 
 fn pair_vs_entropy(
+    fold1_tokens_raw: Vec<opcode::Token>,
     fold1_tokens:     Vec<opcode::Token>,
     ob1:              u32,
     lb1:              u32,
@@ -529,6 +570,9 @@ fn pair_vs_entropy(
     let entropy_ok = tokens_safe_for_entropy(&fold1_tokens);
     let v2_ok      = entropy_ok && fold1_bytes_est >= entropy::ENTROPY_V2_MIN_BYTES;
     let v7_ok      = tokens_safe_for_v7(&fold1_tokens);
+    // v9 gate: checked against the RepRef-preserving fold1_tokens_raw, not
+    // the resolved fold1_tokens -- same reasoning as compress()'s v9_ok.
+    let v9_ok      = entropy_v9::tokens_safe_for_v9(&fold1_tokens_raw);
 
     let lit_arc: Option<Arc<entropy::EncodeTable>> = if entropy_ok {
         entropy::build_encode_table(&fold1_tokens).map(Arc::new)
@@ -558,8 +602,10 @@ fn pair_vs_entropy(
 
     let tokens_arc = Arc::new(fold1_tokens);
     let ta = Arc::clone(&tokens_arc);
+    let raw_arc = Arc::new(fold1_tokens_raw);
+    let ra = Arc::clone(&raw_arc);
 
-    let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7, 8]
+    let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9]
         .into_par_iter()
         .map(|flag| {
             let tokens = &*ta;
@@ -598,6 +644,15 @@ fn pair_vs_entropy(
                     })
                 } else { None },
                 8 => if entropy_ok { try_entropy_v8(tokens) } else { None },
+                9 => if v9_ok {
+                    // Same defense-in-depth check as the other tournament call site.
+                    let raw = &*ra;
+                    try_entropy_v9(raw).filter(|payload| {
+                        entropy_v9::read_tokens_v9(payload)
+                            .map(|decoded| &decoded == raw)
+                            .unwrap_or(false)
+                    })
+                } else { None },
                 _ => None,
             };
             (flag, payload)
@@ -618,6 +673,7 @@ fn pair_vs_entropy(
     }
 
     drop(tokens_arc);
+    drop(raw_arc);
 
     let best_entropy = results.into_iter()
         .filter_map(|(f, opt)| opt.map(|p| (f, p)))
@@ -758,4 +814,4 @@ mod v8_tests {
         let decompressed = decompress(&compressed).expect("decompress should succeed");
         assert_eq!(decompressed, data, "full pipeline roundtrip mismatch");
     }
-        }
+                }

@@ -2,10 +2,13 @@
 //
 // P6 changes: ring_flag parsed from bit 1 of pair_flag byte.
 // P10 changes: entropy_flag=7 decoded via read_tokens_v7 (no tables needed).
+// v9 addition: entropy_flag=9 decoded via entropy_v9::read_tokens_v9 -- same
+//   no-tables approach as v7, but the token stream may include Token::RepRef.
 
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
 use crate::entropy;
+use crate::entropy_v9;
 use crate::filters;
 use crate::opcode::{
     LENGTH_BITS_DEFAULT, LENGTH_BITS_MAX, LENGTH_BITS_MIN,
@@ -232,9 +235,24 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
+        // ── v9: v7's range coder + rep-awareness ───────────────────────────────
+        // Same no-tables approach as v7, but the token stream may contain
+        // Token::RepRef (cheap ring-slot reuse) alongside Token::Backref --
+        // see entropy_v9.rs. reconstruct() already handles RepRef generically
+        // regardless of which entropy variant produced the tokens.
+        9 => {
+            let payload = &input[payload_start..];
+            let tokens  = entropy_v9::read_tokens_v9(payload)
+                .map_err(|e| std::io::Error::new(e.kind(),
+                    format!("v9 unfold: range coder decode failed: {}", e)))?;
+            let rec = reconstruct(&tokens, dict);
+            println!("Entropy v9 (rep-aware range coder) unfold: {} bytes", rec.len());
+            (rec, fold_count.saturating_sub(1))
+        }
+
         _ => {
             // entropy_flag=0: raw LZ bitstream, no entropy coding
-            // entropy_flag=9+: unknown/future, treat as raw
+            // entropy_flag=10+: unknown/future, treat as raw
             (input[payload_start..].to_vec(), fold_count)
         }
     };

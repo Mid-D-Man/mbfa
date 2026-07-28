@@ -87,6 +87,7 @@
 
 use crate::opcode::{Token, MAX_RING_SLOTS};
 use crate::entropy::{Rc7Enc, Rc7Dec, offset_to_bucket, bucket_to_offset, bucket_extra_bits};
+use crate::optimal_parse::{MatchFinder, optimal_step};
 
 // ── Probability model constants (must match entropy.rs's RC_* exactly --
 //    verified identical: RC_PROB_BITS=11, RC_PROB_SCALE=2048, RC_SHIFT=5,
@@ -271,6 +272,52 @@ fn decode_rep_slot(dec: &mut Rc7Dec, probs: &mut [u16]) -> std::io::Result<u8> {
 
 // ── Public encode / decode ────────────────────────────────────────────────────
 
+/// One token's worth of encoding, shared by both `write_tokens_v9` (encodes
+/// a pre-built token stream) and `write_tokens_v9_optimal` (builds tokens
+/// on the fly via the DP parser) -- factored out so the two encode paths
+/// can never drift apart on the actual bit-level format. `prev` follows the
+/// SAME convention as the original inline loop: only `Token::Lit` advances
+/// it. Fresh/rep matches leave it unchanged until the next literal, which
+/// is why `optimal_step`'s own `prev_byte` (used only for DP pricing, a
+/// heuristic estimate of literal cost) is tracked separately in
+/// `write_tokens_v9_optimal` rather than reusing this `prev`.
+fn encode_token(enc: &mut Rc7Enc, probs: &mut [u16], prev: &mut u8, token: &Token) -> std::io::Result<()> {
+    match token {
+        Token::Lit { byte } => {
+            enc.encode_bit(&mut probs[PROB_MATCH], 0);
+            let ctx = PROB_LIT + (((*prev as usize) >> 5) & 7) * 255;
+            enc.encode_bittree(probs, ctx, 8, *byte as u32);
+            *prev = *byte;
+        }
+        Token::RepRef { slot, length } => {
+            if *slot as usize >= MAX_RING_SLOTS {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                    format!("v9: RepRef.slot {} >= MAX_RING_SLOTS {}", slot, MAX_RING_SLOTS)));
+            }
+            enc.encode_bit(&mut probs[PROB_MATCH], 1);
+            enc.encode_bit(&mut probs[PROB_IS_REP], 1);
+            encode_rep_slot(enc, probs, *slot);
+            rc_encode_rep_length(enc, probs, *length);
+        }
+        Token::Backref { offset, length } => {
+            enc.encode_bit(&mut probs[PROB_MATCH], 1);
+            enc.encode_bit(&mut probs[PROB_IS_REP], 0);
+            rc_encode_fresh_length(enc, probs, *length);
+            rc_encode_distance(enc, probs, *offset, *length);
+        }
+        Token::End => {
+            // End rides the fresh-match branch's length sentinel, exactly
+            // like v7: is_match=1, is_rep=0, then fresh-length HI=255.
+            enc.encode_bit(&mut probs[PROB_MATCH], 1);
+            enc.encode_bit(&mut probs[PROB_IS_REP], 0);
+            enc.encode_bit(&mut probs[PROB_LEN_CHOICE],     1);
+            enc.encode_bit(&mut probs[PROB_LEN_CHOICE + 1], 1);
+            enc.encode_bittree(probs, PROB_LEN_HI, 8, 255);
+        }
+    }
+    Ok(())
+}
+
 /// Encode a token stream with v9's rep-aware adaptive binary range coder.
 ///
 /// Unlike write_tokens_v7, `Token::RepRef` is a first-class input here --
@@ -281,43 +328,86 @@ pub fn write_tokens_v9(tokens: &[Token]) -> std::io::Result<Vec<u8>> {
     let mut prev: u8 = 0;
 
     for token in tokens {
-        match token {
-            Token::Lit { byte } => {
-                enc.encode_bit(&mut probs[PROB_MATCH], 0);
-                let ctx = PROB_LIT + (((prev as usize) >> 5) & 7) * 255;
-                enc.encode_bittree(&mut probs, ctx, 8, *byte as u32);
-                prev = *byte;
-            }
-            Token::RepRef { slot, length } => {
-                if *slot as usize >= MAX_RING_SLOTS {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
-                        format!("v9: RepRef.slot {} >= MAX_RING_SLOTS {}", slot, MAX_RING_SLOTS)));
-                }
-                enc.encode_bit(&mut probs[PROB_MATCH], 1);
-                enc.encode_bit(&mut probs[PROB_IS_REP], 1);
-                encode_rep_slot(&mut enc, &mut probs, *slot);
-                rc_encode_rep_length(&mut enc, &mut probs, *length);
-            }
-            Token::Backref { offset, length } => {
-                enc.encode_bit(&mut probs[PROB_MATCH], 1);
-                enc.encode_bit(&mut probs[PROB_IS_REP], 0);
-                rc_encode_fresh_length(&mut enc, &mut probs, *length);
-                rc_encode_distance(&mut enc, &mut probs, *offset, *length);
-            }
-            Token::End => {
-                // End rides the fresh-match branch's length sentinel, exactly
-                // like v7: is_match=1, is_rep=0, then fresh-length HI=255.
-                enc.encode_bit(&mut probs[PROB_MATCH], 1);
-                enc.encode_bit(&mut probs[PROB_IS_REP], 0);
-                enc.encode_bit(&mut probs[PROB_LEN_CHOICE],     1);
-                enc.encode_bit(&mut probs[PROB_LEN_CHOICE + 1], 1);
-                enc.encode_bittree(&mut probs, PROB_LEN_HI, 8, 255);
-            }
-        }
+        encode_token(&mut enc, &mut probs, &mut prev, token)?;
     }
 
     Ok(enc.finish())
 }
+
+// ── entropy_flag=10: DP-optimal-parsed v9 ("v9-optimal") ───────────────────
+//
+// Unlike write_tokens_v9, this does NOT take a pre-built token stream: it
+// builds one on the fly from raw bytes by repeatedly calling
+// optimal_parse::optimal_step, interleaved with real encoding so the DP
+// prices every candidate against the model's ACTUAL current adaptive state
+// (not a static snapshot) -- matching the module doc's stated design.
+//
+// This bypasses fold.rs's own LZ pass entirely: it is an alternative to
+// {fold.rs's tokenization + whichever entropy variant wins}, not an
+// alternative entropy coding of fold.rs's OWN tokens. Two consequences
+// callers (lib.rs) must respect:
+//   1. `data` should be the pre-fold bytes (`to_fold`), not `compressed`.
+//   2. The result already represents the COMPLETE original content -- it
+//      does NOT need further fold-unwinding at decode time, regardless of
+//      how many folds fold.rs itself would have used. unfold.rs's
+//      entropy_flag=10 arm must signal zero remaining fold layers
+//      unconditionally, not `fold_count.saturating_sub(1)`.
+//
+// Also unlike write_tokens_v9, decode never needs to know this used DP --
+// the byte format is identical to a hand-built token stream, so
+// `read_tokens_v9` decodes it unchanged. Only the ENCODE side is new.
+//
+// No dictionary priming: the match-finder only ever sees `data` itself, so
+// verification/decode must always reconstruct against an EMPTY dict, never
+// whatever dictionary fold 1's own (separate) trial chose.
+pub fn write_tokens_v9_optimal(data: &[u8], offset_bits: u32, length_bits: u32) -> std::io::Result<Vec<u8>> {
+    let mut probs = rc_init_v9();
+    let mut enc = Rc7Enc::new();
+    let mut prev: u8 = 0; // real encode-context, only advances on Token::Lit
+
+    if data.is_empty() {
+        encode_token(&mut enc, &mut probs, &mut prev, &Token::End)?;
+        return Ok(enc.finish());
+    }
+
+    let mut finder = MatchFinder::new(data.len(), offset_bits, length_bits);
+    let mut reps = [0u32; MAX_RING_SLOTS];
+    let mut pos = 0usize;
+    let mut prev_for_pricing: u8 = 0; // DP heuristic only -- see doc above
+
+    while pos < data.len() {
+        let (token, advance) = optimal_step(data, pos, &probs, reps, &finder, prev_for_pricing);
+        let advance = advance.max(1); // safety: never spin on advance=0
+
+        match &token {
+            Token::Backref { offset, .. } => {
+                reps[3] = reps[2]; reps[2] = reps[1]; reps[1] = reps[0]; reps[0] = *offset;
+            }
+            Token::RepRef { slot, .. } if *slot != 0 => {
+                let used = reps[*slot as usize];
+                for j in (1..=*slot as usize).rev() { reps[j] = reps[j - 1]; }
+                reps[0] = used;
+            }
+            _ => {}
+        }
+
+        for i in 0..advance { finder.insert(data, pos + i); }
+        encode_token(&mut enc, &mut probs, &mut prev, &token)?;
+        prev_for_pricing = data[pos + advance - 1];
+        pos += advance;
+    }
+
+    encode_token(&mut enc, &mut probs, &mut prev, &Token::End)?;
+    Ok(enc.finish())
+}
+
+/// Above this input size, `write_tokens_v9_optimal`'s O(n * HORIZON) DP scan
+/// gets too slow to run unconditionally inside the entropy tournament --
+/// callers must gate on this (see lib.rs's v10_ok). Calibrated against real
+/// measured throughput on the actual dev machine, not the original
+/// standalone-prototype estimate; see mbfa.md for the number and how it was
+/// measured.
+pub const V9_OPTIMAL_MAX_BYTES: usize = 65536;
 
 /// Decode a v9 range-coded token stream. Output is directly usable by
 /// `decoder::reconstruct` -- same contract as `read_tokens_v7`'s output,
@@ -450,6 +540,60 @@ mod v9_tests {
     fn rejects_out_of_range_rep_slot() {
         let tokens = vec![Token::RepRef { slot: 4, length: 5 }, Token::End];
         assert!(write_tokens_v9(&tokens).is_err());
+    }
+
+    #[test]
+    fn optimal_empty_input_roundtrips() {
+        let enc = write_tokens_v9_optimal(&[], 12, 8).expect("encode failed");
+        let tokens = read_tokens_v9(&enc).expect("decode failed");
+        assert_eq!(tokens, vec![Token::End]);
+    }
+
+    #[test]
+    fn optimal_literals_only_roundtrips() {
+        let data = b"hello world, no repeats here at all abcdefg";
+        let enc = write_tokens_v9_optimal(data, 12, 8).expect("encode failed");
+        let tokens = read_tokens_v9(&enc).expect("decode failed");
+        let rec = crate::decoder::reconstruct(&tokens, &[]);
+        assert_eq!(rec, data);
+    }
+
+    #[test]
+    fn optimal_repetitive_data_roundtrips() {
+        let data = b"the quick brown fox jumps over the quick brown fox again and again and again";
+        let enc = write_tokens_v9_optimal(data, 18, 10).expect("encode failed");
+        let tokens = read_tokens_v9(&enc).expect("decode failed");
+        let rec = crate::decoder::reconstruct(&tokens, &[]);
+        assert_eq!(rec, data);
+    }
+
+    #[test]
+    fn optimal_short_period_repeat_roundtrips_and_uses_reps() {
+        // A short-period repeat guarantees the SAME offset recurs well within
+        // one HORIZON window, which is exactly the case RepRef exists for --
+        // unlike prose, where two occurrences of a phrase can land at
+        // different relative distances and legitimately never rep.
+        let data = b"abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc";
+        let enc = write_tokens_v9_optimal(data, 12, 8).expect("encode failed");
+        let tokens = read_tokens_v9(&enc).expect("decode failed");
+        let rec = crate::decoder::reconstruct(&tokens, &[]);
+        assert_eq!(rec, data);
+        assert!(tokens.iter().any(|t| matches!(t, Token::RepRef { .. })),
+            "expected at least one RepRef on a tight short-period repeat");
+    }
+
+    #[test]
+    fn optimal_matches_manual_roundtrip_on_binary_data() {
+        // Non-text bytes, including 0x00 and 0xFF, to catch any assumption
+        // that snuck in around printable-ASCII-only data.
+        let mut data = Vec::new();
+        for i in 0..500u32 { data.push((i % 251) as u8); }
+        data.extend_from_slice(&[0u8, 255, 0, 255, 0, 255]);
+        data.extend_from_slice(&data.clone()[0..200]); // force some real repetition
+        let enc = write_tokens_v9_optimal(&data, 16, 10).expect("encode failed");
+        let tokens = read_tokens_v9(&enc).expect("decode failed");
+        let rec = crate::decoder::reconstruct(&tokens, &[]);
+        assert_eq!(rec, data);
     }
 
     #[test]

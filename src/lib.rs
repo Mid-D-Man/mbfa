@@ -56,7 +56,7 @@ fn sample_entropy(data: &[u8]) -> f64 {
 ///   Byte 1: pair_flag byte
 ///              bit 0 -- fold 2 used pair encoding (bool)
 ///              bit 1 -- fold 1 LZ bitstream uses ring-active opcodes (P6)
-///   Byte 2: entropy_flag (0=none, 1-9=variant; see below for 7/8/9)
+///   Byte 2: entropy_flag (0=none, 1-10=variant; see below for 7/8/9/10)
 ///   Byte 3: filter_flag  (0=none, 1-4=delta, 7=STL, 8=PLY, 9=BCJ, 10-15=BCJ variants)
 ///   Byte 4: dict_flag    (0=none, 1=DixScript, 2=Unity, 3=Unreal, 4=Config,
 ///                         5=DixScriptBinary --
@@ -83,6 +83,14 @@ fn sample_entropy(data: &[u8]) -> f64 {
 ///   Payload is the raw range-coder byte stream, same no-tables approach
 ///   as v7. Unlike v7, the encoded token stream may contain Token::RepRef
 ///   (cheap ring-slot reuse) alongside Token::Backref -- see entropy_v9.rs.
+/// entropy_flag=10: v9-optimal (DP-driven v9, see optimal_parse.rs).
+///   Same byte format as v9 (decodes via the same read_tokens_v9), but
+///   built from `to_fold` directly via a bounded-horizon price-DP instead
+///   of fold.rs's own greedy/lazy tokenization -- bypasses fold.rs and the
+///   normal fold-unwind chain entirely, so unlike every other flag here it
+///   always decodes with zero fold-unwind passes and an empty dict. Only
+///   attempted when to_fold.len() <= entropy_v9::V9_OPTIMAL_MAX_BYTES (the
+///   DP's O(n*HORIZON) cost isn't worth trying unconditionally).
 pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     // ── Pre-filter ────────────────────────────────────────────────────────────
     let filter_flag = filters::detect_filter(input);
@@ -165,6 +173,13 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             // resolve_ring()-flattened `tokens` -- tokens_safe_for_v9 checks
             // RepRef lengths too, which only exist pre-flattening.
             let v9_ok      = entropy_v9::tokens_safe_for_v9(&tokens_raw);
+            // v10 ("v9-optimal", DP-driven): operates on to_fold directly, not
+            // on fold.rs's own tokens -- no length gate needed (DP tokens are
+            // capped at HORIZON=32 by construction, well under
+            // RC_MAX_BACKREF_LEN=272), only a size gate for the O(n*HORIZON)
+            // DP cost. See entropy_v9::V9_OPTIMAL_MAX_BYTES's doc for the real
+            // measured throughput this threshold is based on.
+            let v10_ok     = to_fold.len() <= entropy_v9::V9_OPTIMAL_MAX_BYTES;
 
             let lit_arc: Option<Arc<entropy::EncodeTable>> = if entropy_ok {
                 entropy::build_encode_table(&tokens).map(Arc::new)
@@ -200,7 +215,7 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             let raw_arc = Arc::new(tokens_raw);
             let ra = Arc::clone(&raw_arc);
 
-            let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9]
+            let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10]
                 .into_par_iter()
                 .map(|flag| {
                     let tokens = &*ta;
@@ -250,6 +265,19 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                             try_entropy_v9(raw).filter(|payload| {
                                 entropy_v9::read_tokens_v9(payload)
                                     .map(|decoded| decoded == *raw)
+                                    .unwrap_or(false)
+                            })
+                        } else { None },
+                        10 => if v10_ok {
+                            // Independent DP-optimal parse of to_fold itself
+                            // (not fold.rs's tokens) -- verify by full
+                            // reconstruct against to_fold, not token equality,
+                            // since there's no pre-built token list to compare
+                            // against here. No dictionary priming, so decode
+                            // must always use an empty dict.
+                            try_entropy_v10(to_fold, ob1, lb1).filter(|payload| {
+                                entropy_v9::read_tokens_v9(payload)
+                                    .map(|toks| decoder::reconstruct(&toks, &[]).as_slice() == to_fold)
                                     .unwrap_or(false)
                             })
                         } else { None },
@@ -303,7 +331,7 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
             };
 
             pair_vs_entropy(
-                f1t, f1t_resolved, ob1, lb1, &compressed,
+                f1t, f1t_resolved, to_fold, ob1, lb1, &compressed,
                 folds_done, &offset_bits_per_fold, &length_bits_per_fold,
             )?
         } else {
@@ -435,6 +463,13 @@ fn try_entropy_v9(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
     entropy_v9::write_tokens_v9(tokens).ok()
 }
 
+/// v10 ("v9-optimal"): DP-driven, operates on raw bytes directly (see
+/// entropy_v9::write_tokens_v9_optimal's doc for why this can't be a
+/// pre-built-token-stream API like the others).
+fn try_entropy_v10(data: &[u8], ob: u32, lb: u32) -> Option<Vec<u8>> {
+    entropy_v9::write_tokens_v9_optimal(data, ob, lb).ok()
+}
+
 // ── v8: block-split (path-2 cheap first cut) ─────────────────────────────────
 //
 // Unlike v1-v6 (one table for the whole file, chosen by a fixed rule) or v7
@@ -540,6 +575,7 @@ fn try_entropy_v8(tokens: &[opcode::Token]) -> Option<Vec<u8>> {
 fn pair_vs_entropy(
     fold1_tokens_raw: Vec<opcode::Token>,
     fold1_tokens:     Vec<opcode::Token>,
+    raw_data:         &[u8],
     ob1:              u32,
     lb1:              u32,
     pair_output:      &[u8],
@@ -573,6 +609,9 @@ fn pair_vs_entropy(
     // v9 gate: checked against the RepRef-preserving fold1_tokens_raw, not
     // the resolved fold1_tokens -- same reasoning as compress()'s v9_ok.
     let v9_ok      = entropy_v9::tokens_safe_for_v9(&fold1_tokens_raw);
+    // v10 ("v9-optimal"): same reasoning as compress()'s v10_ok -- size gate
+    // only, no length gate needed.
+    let v10_ok     = raw_data.len() <= entropy_v9::V9_OPTIMAL_MAX_BYTES;
 
     let lit_arc: Option<Arc<entropy::EncodeTable>> = if entropy_ok {
         entropy::build_encode_table(&fold1_tokens).map(Arc::new)
@@ -605,7 +644,7 @@ fn pair_vs_entropy(
     let raw_arc = Arc::new(fold1_tokens_raw);
     let ra = Arc::clone(&raw_arc);
 
-    let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9]
+    let results: Vec<(u8, Option<Vec<u8>>)> = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         .into_par_iter()
         .map(|flag| {
             let tokens = &*ta;
@@ -650,6 +689,13 @@ fn pair_vs_entropy(
                     try_entropy_v9(raw).filter(|payload| {
                         entropy_v9::read_tokens_v9(payload)
                             .map(|decoded| &decoded == raw)
+                            .unwrap_or(false)
+                    })
+                } else { None },
+                10 => if v10_ok {
+                    try_entropy_v10(raw_data, ob1, lb1).filter(|payload| {
+                        entropy_v9::read_tokens_v9(payload)
+                            .map(|toks| decoder::reconstruct(&toks, &[]).as_slice() == raw_data)
                             .unwrap_or(false)
                     })
                 } else { None },
@@ -814,4 +860,4 @@ mod v8_tests {
         let decompressed = decompress(&compressed).expect("decompress should succeed");
         assert_eq!(decompressed, data, "full pipeline roundtrip mismatch");
     }
-                }
+        }

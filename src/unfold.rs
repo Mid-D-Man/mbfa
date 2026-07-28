@@ -4,6 +4,9 @@
 // P10 changes: entropy_flag=7 decoded via read_tokens_v7 (no tables needed).
 // v9 addition: entropy_flag=9 decoded via entropy_v9::read_tokens_v9 -- same
 //   no-tables approach as v7, but the token stream may include Token::RepRef.
+// v10 addition: entropy_flag=10 ("v9-optimal") decoded the same way as v9
+//   (identical byte format) but always with an empty dict and zero fold-
+//   unwind passes, since it bypasses fold.rs's own tokenization entirely.
 
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
@@ -250,9 +253,32 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             (rec, fold_count.saturating_sub(1))
         }
 
+        // ── v10 ("v9-optimal"): DP-driven, bypasses fold.rs entirely ──────────
+        // Byte format is identical to v9 (write_tokens_v9_optimal reuses the
+        // same encode_token as write_tokens_v9), so read_tokens_v9 decodes it
+        // unchanged. Two things differ from every other flag here though:
+        //   1. No dictionary priming (the DP match-finder never saw one) --
+        //      MUST reconstruct against an empty dict, never `dict` (which
+        //      reflects fold 1's own separate dictionary trial, irrelevant
+        //      here and possibly non-empty).
+        //   2. This payload already IS the complete post-filter content --
+        //      it was built from `to_fold` directly, not from fold.rs's
+        //      token stream -- so it needs ZERO fold-unwind passes
+        //      regardless of what fold_count says, not fold_count-1. The
+        //      post-filter step below still applies normally.
+        10 => {
+            let payload = &input[payload_start..];
+            let tokens  = entropy_v9::read_tokens_v9(payload)
+                .map_err(|e| std::io::Error::new(e.kind(),
+                    format!("v10 unfold: range coder decode failed: {}", e)))?;
+            let rec = reconstruct(&tokens, &[]);
+            println!("Entropy v10 (DP-optimal range coder) unfold: {} bytes", rec.len());
+            (rec, 0usize)
+        }
+
         _ => {
             // entropy_flag=0: raw LZ bitstream, no entropy coding
-            // entropy_flag=10+: unknown/future, treat as raw
+            // entropy_flag=11+: unknown/future, treat as raw
             (input[payload_start..].to_vec(), fold_count)
         }
     };

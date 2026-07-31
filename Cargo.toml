@@ -9,6 +9,7 @@ license = "MIT"
 [[bin]]
 name = "mbfa"
 path = "src/main.rs"
+required-features = ["archive"]
 
 [[bin]]
 name = "profile_offsets"
@@ -20,9 +21,28 @@ path = "src/lib.rs"
 
 [dependencies]
 bitstream-io = "2.4"
-sysinfo       = "0.32"
-walkdir       = "2"
-rayon         = "1"
+sysinfo       = { version = "0.32", optional = true }
+walkdir       = { version = "2",    optional = true }
+rayon         = { version = "1",    optional = true }
+
+[features]
+default = ["parallel", "archive"]
+# Multi-threaded entropy tournament (lib.rs) + dual-scan (encoder.rs), via
+# rayon. Disable for single-threaded targets -- e.g. wasm32-unknown-unknown,
+# which has no threads at all without the separate Web Worker +
+# SharedArrayBuffer plumbing wasm-bindgen-rayon needs. compress()/
+# decompress() work identically either way, just serially when off --
+# verified byte-identical output between the two on real files, not just
+# "both happen to roundtrip".
+parallel = ["dep:rayon"]
+# Directory <-> archive-file packing (walkdir + std::fs::File-based I/O),
+# and its sysinfo-based auto chunk sizing. Needs a real filesystem, so it's
+# meaningless on wasm32-unknown-unknown -- disable for web/library-only
+# builds that just call compress()/decompress() on in-memory buffers.
+# Implies "parallel": archive's own block processing is unconditionally
+# parallel (no serial fallback needed -- nothing archive-shaped runs on a
+# single-threaded wasm target anyway).
+archive = ["dep:walkdir", "dep:sysinfo", "parallel"]
 
 [dev-dependencies]
 # NOTE: html_reports pulls in `plotters` which adds 30-60s to a clean build.

@@ -44,7 +44,7 @@ use crate::opcode::{
     compute_optimal_offset_bits, compute_optimal_length_bits,
 };
 use crate::entropy::offset_to_bucket;
-use rayon;
+use crate::par;
 
 const BASELINE_OFFSET_BITS:       u32   = 17;
 const BASELINE_LENGTH_BITS:       u32   = LENGTH_BITS_MIN; // 8
@@ -821,7 +821,7 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
     // Parallel Phase C path (files <= 1MB or Phase C fallthrough)
     // All scans here: emit_repref=false (comparison mode)
     let (baseline, wide_discovery) = if input.len() <= PARALLEL_SCAN_THRESHOLD {
-        let ((bt_tokens, bt_bailed), disc) = rayon::join(
+        let ((bt_tokens, bt_bailed), disc) = par::join(
             || scan(input, BASELINE_OFFSET_BITS, BASELINE_LENGTH_BITS, skip_incompressible_bail, false),
             || scan_discover(input, OFFSET_BITS_MAX, LENGTH_BITS_MAX),
         );

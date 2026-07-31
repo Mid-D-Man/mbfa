@@ -28,13 +28,19 @@ pub mod entropy_v9;
 pub mod price_table;
 pub mod optimal_parse;
 pub mod filters;
+#[cfg(feature = "archive")]
 pub mod archive;
+#[cfg(feature = "archive")]
 pub mod archive_io;
+#[cfg(feature = "archive")]
 pub mod platform;
+pub(crate) mod par;
 
 use std::io;
 use std::sync::Arc;
-use rayon::prelude::*;
+use crate::par::IntoParallelIterator;
+#[cfg(feature = "parallel")]
+use crate::par::ParallelIterator;
 
 const INCOMPRESSIBLE_ENTROPY_THRESHOLD: f64 = 7.8;
 const INCOMPRESSIBLE_MIN_BYTES:         usize = 50_000;

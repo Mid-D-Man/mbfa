@@ -137,20 +137,33 @@ impl MatchFinder {
     /// distance frontier (ascending by length). Does NOT insert `i` itself
     /// -- call `insert` separately once the parser has decided how many
     /// positions to advance past this one.
-    pub fn find_matches_tiered(&self, data: &[u8], i: usize) -> Vec<MatchCandidate> {
+    ///
+    /// `max_search_len` bounds how far each candidate's length is confirmed
+    /// -- callers that only need lengths up to some horizon (like
+    /// `optimal_step`'s DP, which can never use more than the positions
+    /// left in its lookahead window) should pass that horizon remainder
+    /// rather than `self.max_len`. On repetitive data this is the real
+    /// cost driver: without it, every chain candidate confirms its FULL
+    /// match length (up to `self.max_len`, which can be tens of thousands
+    /// of bytes) even though the DP immediately clamps to the horizon
+    /// anyway -- see `optimal_step`'s `cand.length.min((horizon - k) as
+    /// u32)`. Passing the tight bound here means that clamp never has to
+    /// throw away confirmed-but-unusable length.
+    pub fn find_matches_tiered(&self, data: &[u8], i: usize, max_search_len: u32) -> Vec<MatchCandidate> {
         let n = data.len();
         let h = hash3(data, i);
         let mut out = Vec::new();
         let mut best_len = 0u32;
         let mut steps = 0usize;
         let mut cur = self.head[h];
+        let cap = max_search_len.min(self.max_len);
 
         while cur != NONE_MARK && steps < self.chain_limit {
             let j = cur as usize;
             if i <= j || (i - j) as u32 > self.max_off { break; }
             let span = (i - j) as u32;
             let mut length = 0u32;
-            while length < self.max_len
+            while length < cap
                 && (i + length as usize) < n
                 && data[j + (length as usize % span as usize)] == data[i + length as usize]
             {
@@ -159,7 +172,7 @@ impl MatchFinder {
             if length > best_len {
                 best_len = length;
                 out.push(MatchCandidate { length, offset: span });
-                if best_len == self.max_len { break; }
+                if best_len == cap { break; }
             }
             cur = self.prev[j & self.window_mask];
             steps += 1;
@@ -393,9 +406,9 @@ pub fn optimal_step(
         }
 
         // Candidate 3: fresh matches, from the tiered frontier.
-        let frontier = finder.find_matches_tiered(data, pos);
+        let frontier = finder.find_matches_tiered(data, pos, (horizon - k) as u32);
         for cand in &frontier {
-            let len = cand.length.min((horizon - k) as u32);
+            let len = cand.length; // already <= horizon-k, see find_matches_tiered's doc
             if len < MIN_MATCH_LEN { continue; }
             for l in MIN_MATCH_LEN..=len {
                 let cost = cur.price + price_fresh_match(probs, cand.offset, l);
@@ -549,4 +562,4 @@ mod tests {
         }
         assert_eq!(out, data, "optimal_step-produced token stream failed to reconstruct original data");
     }
-}
+    }

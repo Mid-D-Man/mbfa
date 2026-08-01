@@ -1,0 +1,18 @@
+Original size: 25154240 bits (3144280 bytes)
+  fingerprint: entropy=4.14 size=3144280
+  fingerprint Rule 3: default -> ob=17 lb=8
+  Phase B scan: ob=17 lb=8 chain_limit=64 raw_cost=2111248
+  ceiling check: length peak clear (lb=8 lb_ceil=229)
+  Step 2: early exit ratio=8.3932% < 15% threshold -- lb confirmed ok at step 1, skipping Phase C
+Dictionary candidate Config (262B) wins: 256311 B < 257572 B (raw, offset_bits 17 -> 22)
+Window diagnostics: 55247/91731 tokens BACKREF/REPREF (60.2%) | offset: 0.0% at max (4194303) | 2.0% upper half | length: 0.0% at max (255) | offset_bits=22 length_bits=8 — OK
+  DIAG phase_c_gain: ob=22 lb=8 actual_ratio=8.1516% baseline_hyp_ratio=7.0833% gain_pp=-1.0683pp input_bytes=3144280
+Fold 1 adaptive: offset_bits=22 (window=4194303 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 2050488 bits (256311 bytes)
+Fold 2 (PAIR/EG): 2909896 bits (363737 bytes)
+Fold 2 PAIR not worth it (ratio 1.419) — checking LZ fallback
+  Parallel path post-scan: baseline expanding (1.161) — incompressible, skipping Phase C re-scan
+Fold 2: LZ scan incompressible signal — stopping at fold 1
+Entropy variant sizes (raw=256311B): v1=198560B v2=197071B v3=196847B v4=196497B v5=195008B v6=198761B v7=193338B v8=197613B v9=191583B v10=skip
+Joint entropy flag=9: 256311 -> 191583 B
+Done. 3144280 bytes → 191590 bytes

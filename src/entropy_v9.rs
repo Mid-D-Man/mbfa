@@ -403,11 +403,34 @@ pub fn write_tokens_v9_optimal(data: &[u8], offset_bits: u32, length_bits: u32) 
 
 /// Above this input size, `write_tokens_v9_optimal`'s O(n * HORIZON) DP scan
 /// gets too slow to run unconditionally inside the entropy tournament --
-/// callers must gate on this (see lib.rs's v10_ok). Calibrated against real
-/// measured throughput on the actual dev machine, not the original
-/// standalone-prototype estimate; see mbfa.md for the number and how it was
-/// measured.
-pub const V9_OPTIMAL_MAX_BYTES: usize = 65536;
+/// callers must gate on this (see lib.rs's v10_ok).
+///
+/// find_matches_tiered used to confirm each candidate's FULL match length
+/// (up to the format's max_len, which can be tens of thousands of bytes)
+/// even though the DP can only ever use the first `horizon - k` bytes of
+/// it -- fixed to search only that far, which was the real cost driver on
+/// repetitive content specifically (a 12KB highly-repetitive file dropped
+/// from would-be seconds to 8ms). Roughly 2-3x faster everywhere as a
+/// result: 9KB 37.8ms->21.3ms, 32KB 240ms->121ms, 64KB 627ms->315ms.
+///
+/// Real measured cost is NOT uniform by size alone, though -- it depends on
+/// how much genuine redundancy the match-finder finds to exploit. Tested
+/// directly on the three actual Showcase fixtures (not a proxy) at their
+/// real post-filter bytes and real ob/lb:
+///   Showcase_Repetitive (262144B, DELTA1):  993ms, DP loses to the
+///     tournament's existing winner (1312B vs v5's 1172B)
+///   Showcase_Sparse     (262144B, DELTA4): 4090ms, DP WINS by ~19%
+///     (20516B vs v9's 25254B)
+///   Showcase_GameMap    (131072B, no filter): 266ms, DP loses (1060B vs
+///     v4's 952B)
+/// So raising this gate to reach them is a genuine latency-for-sometimes-
+/// ratio trade, not a clean win across the board -- two of three showcase
+/// files pay real tournament time for no gain. Set to 262144 (256KB) to
+/// reach all three anyway (worst case ~4.1s measured, bounded, not
+/// runaway); lower this back toward 65536 if that latency isn't
+/// acceptable for your use case -- nothing else depends on the exact
+/// value.
+pub const V9_OPTIMAL_MAX_BYTES: usize = 262_144;
 
 /// Decode a v9 range-coded token stream. Output is directly usable by
 /// `decoder::reconstruct` -- same contract as `read_tokens_v7`'s output,
@@ -668,4 +691,4 @@ mod v9_fuzz_tests {
             assert_eq!(dec, tokens, "trial {trial} roundtrip mismatch");
         }
     }
-  }
+    }

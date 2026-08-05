@@ -92,43 +92,62 @@ pub fn detect_macho(
 /// Returns `Some(filter_flag)` when `data` looks like a Unix a.out executable
 /// for an architecture with a supported BCJ filter.
 ///
-/// Targets the SunOS 4.x exec header layout used by SPARC/68k workstations
-/// of the early 1990s (the era of the Canterbury benchmark corpus):
+/// Targets the BSD-heritage `struct exec` header used by SunOS 4.x
+/// SPARC/68k workstations of the early 1990s (the era of the Canterbury
+/// benchmark corpus). Per the real header (4.3BSD-Reno's sys/exec.h, which
+/// SunOS's own a.out.h shares this layout with -- `a_machtype` is literally
+/// `#define`d as an alias for `a_mid`, tagged "SUN compatibility"):
 ///
-///   byte 0:    flags  (bit 7 = dynamic; bits 6:0 = toolversion)
-///   byte 1:    machtype
-///                1 = Sun 68000    2 = Sun 68020    3 = SPARC
-///                4 = Sun 386i     5 = 68030        6 = 68040
-///                7 = SPARC V8+    8 = SPARC 64-bit
-///   bytes 2-3: magic (big-endian)
+///   struct exec {
+///       unsigned short a_mid;    /* machine ID, network byte order */
+///       unsigned short a_magic;  /* magic number, network byte order */
+///       ...
+///   };
+///
+/// i.e. TWO adjacent 16-bit big-endian fields -- not a byte of flags
+/// followed by a byte of machine type, which an earlier version of this
+/// function assumed (and which is why it never fired on the real `sum`
+/// fixture: that byte-split model has no basis in the real struct; it
+/// happened to accidentally validate against this file's own synthetic
+/// test fixtures only because those fixtures were built to match the same
+/// wrong model, not against real bytes).
+///
+///   bytes 0-1: a_mid (big-endian) -- known SunOS values:
+///                0 = unspecified   1 = Sun 68010/68020   2 = Sun 68020-only
+///                3 = SPARC         4 = Sun 386i
+///              (higher values exist for non-Sun BSD ports like HP; SunOS
+///              binaries stay in this small range)
+///   bytes 2-3: a_magic (big-endian)
 ///                0x0107 = OMAGIC (writable text)
 ///                0x0108 = NMAGIC (read-only text)
 ///                0x010B = ZMAGIC (demand-paged)
 ///
-/// Guards:
-///   • byte 0 must be < 0x80 — the flags field is 7-bit toolversion + 1-bit
-///     dynamic; real executables have this well under 0x80.
-///   • machtype must be 1–9 — covers all known SunOS machine types.
-///   • Both guards together make accidental matches on binary/text data
-///     negligibly unlikely.
+/// Guard: a_mid must be 0-9 (covers all known small Sun/BSD machine IDs;
+/// large a_mid values like HP's 200/300/0x20C never collide with this
+/// range) AND a_magic must be one of the three real values above. Both
+/// together make accidental matches on arbitrary binary/text data
+/// negligibly unlikely.
 ///
 /// The Canterbury corpus `sum` file is a SunOS 4.1.3 SPARC a.out (ZMAGIC)
-/// binary.  It is NOT ELF (Solaris 2.x introduced ELF; SunOS 4.x uses a.out),
+/// binary. It is NOT ELF (Solaris 2.x introduced ELF; SunOS 4.x uses a.out),
 /// which is why detect_elf correctly returns None for it.
+///
+/// NOTE: this correction is based on cross-checked primary-source BSD
+/// exec.h documentation, not a byte-level diff against the real Canterbury
+/// `sum` file -- fetching it directly wasn't possible in the environment
+/// this fix was written in (network access restricted to a fixed allow-
+/// list that doesn't include the corpus host). If this still doesn't fire
+/// on the real file, the next step is checking its actual first 8 bytes.
 pub fn detect_aout(data: &[u8], flag_x86: u8, flag_sparc: u8) -> Option<u8> {
     if data.len() < 8 { return None; }
 
-    let flags    = data[0];
-    let machtype = data[1];
-    let magic    = u16::from_be_bytes([data[2], data[3]]);
+    let mid   = u16::from_be_bytes([data[0], data[1]]);
+    let magic = u16::from_be_bytes([data[2], data[3]]);
 
-    if flags < 0x80
-        && machtype >= 1 && machtype <= 9
-        && matches!(magic, 0x0107 | 0x0108 | 0x010B)
-    {
-        return match machtype {
+    if mid <= 9 && matches!(magic, 0x0107 | 0x0108 | 0x010B) {
+        return match mid {
             4 => Some(flag_x86),   // Sun 386i — x86 BCJ
-            _ => Some(flag_sparc), // SPARC (3), 68k (1/2/5/6), SPARC64 (7/8)
+            _ => Some(flag_sparc), // SPARC (3), 68k (1/2), unspecified (0)
         };
     }
 
@@ -699,12 +718,10 @@ mod tests {
 
     // ── a.out detection tests ─────────────────────────────────────────────────
 
-    fn make_sunos_aout(machtype: u8, magic: u16) -> Vec<u8> {
+    fn make_sunos_aout(mid: u16, magic: u16) -> Vec<u8> {
         let mut data = vec![0u8; 32];
-        data[0] = 0x01; // flags: toolversion=1, not dynamic
-        data[1] = machtype;
-        data[2] = (magic >> 8) as u8;
-        data[3] = magic as u8;
+        data[0..2].copy_from_slice(&mid.to_be_bytes());
+        data[2..4].copy_from_slice(&magic.to_be_bytes());
         // a_text size (some non-zero value)
         data[4..8].copy_from_slice(&0x0000_4000u32.to_be_bytes());
         data
@@ -712,7 +729,7 @@ mod tests {
 
     #[test]
     fn detect_aout_sparc_zmagic() {
-        // SunOS SPARC ZMAGIC: machtype=3, magic=0x010B
+        // SunOS SPARC ZMAGIC: mid=3, magic=0x010B
         let data = make_sunos_aout(3, 0x010B);
         assert_eq!(detect_aout(&data, 9, 14), Some(14),
             "SunOS SPARC ZMAGIC should return FILTER_BCJ_SPARC (14)");
@@ -732,7 +749,7 @@ mod tests {
 
     #[test]
     fn detect_aout_68k_returns_sparc_flag() {
-        // SunOS 68020 binary: machtype=2, magic=0x010B
+        // SunOS 68020 binary: mid=2, magic=0x010B
         // 68k doesn't have a BCJ filter; we fall back to SPARC flag which
         // applies SPARC BCJ (best available for big-endian RISC-like code).
         let data = make_sunos_aout(2, 0x010B);
@@ -741,40 +758,46 @@ mod tests {
 
     #[test]
     fn detect_aout_sun386i_returns_x86_flag() {
-        // Sun 386i (x86): machtype=4
+        // Sun 386i (x86): mid=4
         let data = make_sunos_aout(4, 0x010B);
         assert_eq!(detect_aout(&data, 9, 14), Some(9),
             "Sun386i a.out should return x86 BCJ flag");
     }
 
     #[test]
-    fn detect_aout_rejects_high_flags_byte() {
-        // byte 0 >= 0x80 → not a valid a.out flags byte
-        let mut data = make_sunos_aout(3, 0x010B);
-        data[0] = 0xFF;
-        assert_eq!(detect_aout(&data, 9, 14), None,
-            "High flags byte should not match a.out");
+    fn detect_aout_accepts_unspecified_mid_zero() {
+        // mid=0 ("unknown - implementation dependent" per the real header)
+        // still falls back to the SPARC flag, same as any other non-386i mid.
+        let data = make_sunos_aout(0, 0x010B);
+        assert_eq!(detect_aout(&data, 9, 14), Some(14));
     }
 
     #[test]
-    fn detect_aout_rejects_bad_machtype() {
-        // machtype=0 and machtype=10 are outside the valid range
-        let mut data = make_sunos_aout(0, 0x010B);
-        assert_eq!(detect_aout(&data, 9, 14), None);
-        data[1] = 10;
+    fn detect_aout_rejects_large_mid() {
+        // Large mid values (e.g. HP's 200/300/0x20C) fall outside the small
+        // range real SunOS binaries use and must not match.
+        let data = make_sunos_aout(200, 0x010B);
+        assert_eq!(detect_aout(&data, 9, 14), None,
+            "Large mid value (e.g. HP-style) should not match SunOS a.out");
+    }
+
+    #[test]
+    fn detect_aout_rejects_bad_mid() {
+        // mid=10 is just past the accepted small range
+        let data = make_sunos_aout(10, 0x010B);
         assert_eq!(detect_aout(&data, 9, 14), None);
     }
 
     #[test]
     fn detect_aout_rejects_wrong_magic() {
-        let mut data = make_sunos_aout(3, 0x0200);
+        let data = make_sunos_aout(3, 0x0200);
         assert_eq!(detect_aout(&data, 9, 14), None,
             "Non-a.out magic should not match");
     }
 
     #[test]
     fn detect_aout_too_short_returns_none() {
-        let data = vec![0x01u8, 0x03, 0x01, 0x0B]; // only 4 bytes
+        let data = vec![0x00u8, 0x03, 0x01, 0x0B]; // only 4 bytes
         assert_eq!(detect_aout(&data, 9, 14), None);
     }
 
@@ -784,9 +807,7 @@ mod tests {
         let mut data = vec![0u8; 32];
         data[0..4].copy_from_slice(b"\x7fELF");
         data[5] = 1; data[18] = 0x03;
-        // \x7f >= 0x80? No, 0x7F < 0x80 so the flags guard passes.
-        // But byte 2 of ELF = 0x01 (EI_CLASS) and byte 3 = EI_DATA = 1 or 2.
-        // 0x0101 and 0x0102 are not valid a.out magic values (0x0107/0x0108/0x010B).
+        // mid = u16::from_be_bytes([0x7F, 0x45]) = 0x7F45, way outside 0-9.
         assert_eq!(detect_aout(&data, 9, 14), None,
             "ELF magic should not match a.out detection");
     }
@@ -794,8 +815,9 @@ mod tests {
     #[test]
     fn detect_aout_does_not_match_pe() {
         let mut data = make_minimal_pe();
-        // PE starts MZ: byte 0=0x4D, byte 1=0x5A — 0x4D < 0x80 and
-        // machtype=0x5A=90 is outside 1-9, so detection fails correctly.
+        // PE starts MZ: mid = u16::from_be_bytes([0x4D, 0x5A]) = 0x4D5A,
+        // way outside 0-9, so detection fails correctly regardless of the
+        // remaining bytes.
         assert_eq!(detect_aout(&data, 9, 14), None,
             "PE/COFF header should not match a.out detection");
     }

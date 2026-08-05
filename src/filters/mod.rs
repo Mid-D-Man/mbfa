@@ -374,12 +374,10 @@ mod tests {
 
     // ── a.out detection via detect_filter ─────────────────────────────────────
 
-    fn make_sunos_aout_input(machtype: u8, magic: u16) -> Vec<u8> {
+    fn make_sunos_aout_input(mid: u16, magic: u16) -> Vec<u8> {
         let mut data = vec![0u8; 32];
-        data[0] = 0x01;           // flags
-        data[1] = machtype;
-        data[2] = (magic >> 8) as u8;
-        data[3] = magic as u8;
+        data[0..2].copy_from_slice(&mid.to_be_bytes());
+        data[2..4].copy_from_slice(&magic.to_be_bytes());
         data[4..8].copy_from_slice(&0x0000_4000u32.to_be_bytes()); // a_text
         data
     }
@@ -407,9 +405,9 @@ mod tests {
 
     #[test]
     fn detect_filter_aout_does_not_fire_for_text() {
-        // English text: byte 0 will be an ASCII letter (< 0x80 ✓),
-        // but machtype (byte 1) will be ASCII and likely > 9, and
-        // magic (bytes 2-3) extremely unlikely to be 0x010B/0x0108/0x0107.
+        // English text: bytes 0-1 as a big-endian mid will almost certainly
+        // exceed 9 (e.g. "th" = 0x7468), so the mid guard alone rejects it
+        // regardless of what bytes 2-3 hold.
         let data = b"the quick brown fox jumps over the lazy dog ".to_vec();
         // If it somehow returns a BCJ flag, that's a false positive.
         // With real text this should be FILTER_NONE (no probe at < 512 bytes).

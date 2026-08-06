@@ -7,6 +7,7 @@
 //!   ply    — PLY byte-plane shuffle + per-vertex-stride delta (flag 8)
 //!   bcj    — x86/ARM/ARM64/PPC/SPARC/RISC-V BCJ normalisation (flags 9, 11-15)
 //!   probe  — multi-stride entropy probe + WAV/BMP stride detection helpers
+//!   cfbf   — CFBF (OLE2, legacy .xls/.doc/.ppt) sector defragmentation (flag 16)
 //!
 //! Filter flags (header byte 3):
 //!    0 = none
@@ -23,24 +24,27 @@
 //!   13 = PowerPC BCJ (big-endian)
 //!   14 = SPARC BCJ (big-endian)
 //!   15 = RISC-V BCJ
+//!   16 = CFBF sector defragmentation (legacy .xls/.doc/.ppt)
 //!
 //! Detection order:
 //!    1. Binary STL  — exact size equation               → flag 10
 //!    2. WAV/RIFF    — "RIFF....WAVE" magic              → flag 1–4
 //!    3. BMP         — "BM" magic                        → flag 1–4
 //!    4. Binary PLY  — "ply\n" + binary_little_endian    → flag 8
-//!    5. DixScript   — magic 0x4D444958 LE               → flag 0 (skip probe)
-//!    6. PE/COFF     — "MZ" + PE offset + "PE\0\0"       → flag 9
-//!    7. ELF         — "\x7fELF" magic + e_machine       → flag 9/11–15
-//!    8. Mach-O      — Mach-O magic + cpu_type           → flag 9/11–13
-//!    9. Unix a.out  — SunOS 4.x exec header             → flag 9/14
-//!   10. Stride probe — 8 KB entropy, threshold 0.45     → best of 1–4
+//!    5. CFBF        — OLE2 signature + FAT/dir round-trip → flag 16
+//!    6. DixScript   — magic 0x4D444958 LE               → flag 0 (skip probe)
+//!    7. PE/COFF     — "MZ" + PE offset + "PE\0\0"       → flag 9
+//!    8. ELF         — "\x7fELF" magic + e_machine       → flag 9/11–15
+//!    9. Mach-O      — Mach-O magic + cpu_type           → flag 9/11–13
+//!   10. Unix a.out  — SunOS 4.x exec header             → flag 9/14
+//!   11. Stride probe — 8 KB entropy, threshold 0.45     → best of 1–4
 
 pub mod delta;
 pub mod stl;
 pub mod ply;
 pub mod bcj;
 pub mod probe;
+pub mod cfbf;
 
 pub use delta::{delta_encode, delta_decode};
 pub use stl::{
@@ -63,6 +67,7 @@ pub use probe::{
     detect_wav_stride, detect_bmp_stride,
     PROBE_MIN_BYTES, PROBE_DELTA_THRESHOLD,
 };
+pub use cfbf::{detect_cfbf, cfbf_defrag_encode, cfbf_defrag_decode};
 
 // ── Filter flag constants ─────────────────────────────────────────────────────
 
@@ -81,6 +86,7 @@ pub const FILTER_BCJ_ARM64:       u8 = 12;
 pub const FILTER_BCJ_PPC:         u8 = 13;
 pub const FILTER_BCJ_SPARC:       u8 = 14;
 pub const FILTER_BCJ_RISCV:       u8 = 15;
+pub const FILTER_CFBF_DEFRAG:     u8 = 16;
 
 /// DixScript binary magic: 0x4D444958 LE = bytes [0x58, 0x49, 0x44, 0x4D].
 const DIXSCRIPT_MAGIC_BYTES: [u8; 4] = [0x58, 0x49, 0x44, 0x4D];
@@ -114,19 +120,28 @@ pub fn detect_filter(input: &[u8]) -> u8 {
         }
     }
 
-    // 5. DixScript binary — LZ+entropy handles it directly, no BCJ
+    // 5. CFBF (OLE2) — legacy .xls/.doc/.ppt. Round-trip self-verified inside
+    //    detect_cfbf itself (see cfbf.rs's module doc for why); only ever
+    //    returns Some if re-encoding+decoding these exact bytes reproduces
+    //    them exactly, so a parse edge case degrades to "skip", never wrong.
+    if let Some(flag) = detect_cfbf(input) {
+        println!("CFBF (OLE2) compound file detected → flag {}", flag);
+        return flag;
+    }
+
+    // 6. DixScript — LZ+entropy handles it directly, no BCJ
     if input.len() >= 16 && input[0..4] == DIXSCRIPT_MAGIC_BYTES {
         println!("DixScript binary (.mdix compiled) detected — MDIX magic → FILTER_NONE");
         return FILTER_NONE;
     }
 
-    // 6. PE/COFF → flag 9
+    // 7. PE/COFF → flag 9
     if detect_pe_coff(input) {
         println!("PE/COFF binary detected → FILTER_BCJ (flag 9)");
         return FILTER_BCJ;
     }
 
-    // 7. ELF — arch-specific BCJ
+    // 8. ELF — arch-specific BCJ
     if let Some(flag) = detect_elf(
         input,
         FILTER_BCJ,
@@ -140,7 +155,7 @@ pub fn detect_filter(input: &[u8]) -> u8 {
         return flag;
     }
 
-    // 8. Mach-O — arch-specific BCJ
+    // 9. Mach-O — arch-specific BCJ
     if let Some(flag) = detect_macho(
         input,
         FILTER_BCJ,
@@ -152,10 +167,10 @@ pub fn detect_filter(input: &[u8]) -> u8 {
         return flag;
     }
 
-    // 9. Unix a.out — covers SunOS 4.x SPARC/68k/386i executables.
+    // 10. Unix a.out — covers SunOS 4.x SPARC/68k/386i executables.
     //    The Canterbury corpus `sum` file is a SunOS 4.1.3 SPARC a.out (ZMAGIC).
     //    It is NOT ELF (SunOS 4.x pre-dates ELF; Solaris 2.x introduced ELF),
-    //    so it falls through steps 6-8 and is caught here.
+    //    so it falls through steps 7-9 and is caught here.
     if let Some(flag) = detect_aout(input, FILTER_BCJ, FILTER_BCJ_SPARC) {
         println!(
             "Unix a.out binary detected (SunOS exec header) → flag {}",
@@ -164,7 +179,7 @@ pub fn detect_filter(input: &[u8]) -> u8 {
         return flag;
     }
 
-    // 10. Multi-stride entropy probe (generic numeric streams)
+    // 11. Multi-stride entropy probe (generic numeric streams)
     if input.len() >= PROBE_MIN_BYTES {
         let (best_filter, improvement) = probe_best_stride(input);
         if improvement >= PROBE_DELTA_THRESHOLD {
@@ -201,6 +216,7 @@ pub fn apply_filter(input: &[u8], filter: u8) -> Vec<u8> {
         FILTER_BCJ_PPC         => bcj_ppc_encode(input),
         FILTER_BCJ_SPARC       => bcj_sparc_encode(input),
         FILTER_BCJ_RISCV       => bcj_riscv_encode(input),
+        FILTER_CFBF_DEFRAG     => cfbf_defrag_encode(input),
         _                      => input.to_vec(),
     }
 }
@@ -219,6 +235,7 @@ pub fn undo_filter(input: &[u8], filter: u8) -> Vec<u8> {
         FILTER_BCJ_PPC         => bcj_ppc_decode(input),
         FILTER_BCJ_SPARC       => bcj_sparc_decode(input),
         FILTER_BCJ_RISCV       => bcj_riscv_decode(input),
+        FILTER_CFBF_DEFRAG     => cfbf_defrag_decode(input),
         _                      => input.to_vec(),
     }
 }

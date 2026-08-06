@@ -1,0 +1,16 @@
+Original size: 160000 bits (20000 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=99834
+  chain_limit (baseline ob=17): 512  raw_cost=99834
+  discovery (capped 2MB/chain=256): discovered ob=15 lb=8
+  chain_limit (constrained ob=15): 256  raw_cost=94050
+  constrained wins: ob=15 lb=8 raw_cost=94050 vs baseline raw_cost=99834
+Dictionary candidate Config (262B) wins: 11693 B < 11714 B (raw, offset_bits 15 -> 15)
+Window diagnostics: 2911/5311 tokens BACKREF/REPREF (54.8%) | offset: 0.0% at max (32767) | 0.7% upper half | length: 0.0% at max (255) | offset_bits=15 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=15 (window=32767 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 93544 bits (11693 bytes)
+Fold 2 (PAIR/EG): 102784 bits (12848 bytes)
+Fold 2 PAIR not worth it (ratio 1.099) — checking LZ fallback
+Fold 2 PAIR failed and LZ not applicable (ratio 0.585 >= threshold 0.10) — stopping at fold 1
+Entropy variant sizes (raw=11693B): v1=8316B v2=8359B v3=8614B v4=8320B v5=8363B v6=8348B v7=8226B v8=8359B v9=8226B v10=7989B
+Joint entropy flag=10: 11693 -> 7989 B
+Done. 20000 bytes → 7996 bytes

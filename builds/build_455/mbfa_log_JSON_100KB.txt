@@ -1,0 +1,16 @@
+Original size: 852728 bits (106591 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=69872
+  chain_limit (baseline ob=17): 512  raw_cost=69872
+  discovery (capped 2MB/chain=256): discovered ob=17 lb=8
+  wide agrees with baseline -- no re-scan needed
+Dictionary candidate Config (262B) wins: 8567 B < 8574 B (raw, offset_bits 17 -> 17)
+Window diagnostics: 1890/3956 tokens BACKREF/REPREF (47.8%) | offset: 0.0% at max (131071) | 4.4% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 68536 bits (8567 bytes)
+Fold 2 (PAIR/EG): 91072 bits (11384 bytes)
+Fold 2 PAIR not worth it (ratio 1.329) — checking LZ fallback
+  Parallel path post-scan: baseline expanding (1.236) — incompressible, skipping Phase C re-scan
+Fold 2: LZ scan incompressible signal — stopping at fold 1
+Entropy variant sizes (raw=8567B): v1=6428B v2=6397B v3=6494B v4=6357B v5=6327B v6=6459B v7=6257B v8=6435B v9=6211B v10=7205B
+Joint entropy flag=9: 8567 -> 6211 B
+Done. 106591 bytes → 6218 bytes

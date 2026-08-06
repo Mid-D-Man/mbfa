@@ -1,0 +1,16 @@
+Original size: 727360 bits (90920 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=489882
+  chain_limit (baseline ob=17): 512  raw_cost=489882
+  discovery (capped 2MB/chain=256): discovered ob=16 lb=8
+  chain_limit (constrained ob=16): 256  raw_cost=478577
+  entropy tiebreaker: constrained est=297344b vs baseline est=297316b -> baseline wins
+  baseline wins: ob=17 lb=8 raw_cost=489882 vs constrained raw_cost=478577
+Window diagnostics: 11325/30868 tokens BACKREF/REPREF (36.7%) | offset: 0.0% at max (131071) | 0.0% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 394912 bits (49364 bytes)
+Fold 2 (PAIR/EG): 404608 bits (50576 bytes)
+Fold 2 PAIR not worth it (ratio 1.025) — checking LZ fallback
+Fold 2 PAIR failed and LZ not applicable (ratio 0.543 >= threshold 0.10) — stopping at fold 1
+Entropy variant sizes (raw=49364B): v1=37780B v2=36655B v3=36467B v4=34286B v5=33161B v6=38013B v7=28497B v8=35759B v9=27571B v10=skip
+Joint entropy flag=9: 49364 -> 27571 B
+Done. 90920 bytes → 27578 bytes

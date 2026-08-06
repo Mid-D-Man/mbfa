@@ -1,0 +1,18 @@
+Original size: 283008 bits (35376 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=101904
+  chain_limit (baseline ob=17): 512  raw_cost=101904
+  discovery (capped 2MB/chain=256): discovered ob=16 lb=9
+  chain_limit (constrained ob=16): 256  raw_cost=102068
+  entropy tiebreaker: constrained est=70974b vs baseline est=70989b -> constrained wins
+  constrained wins: ob=16 lb=9 raw_cost=102068 vs baseline raw_cost=101904
+Dictionary candidate Config (262B) wins: 12590 B < 12632 B (raw, offset_bits 16 -> 16)
+Window diagnostics: 2938/5469 tokens BACKREF/REPREF (53.7%) | offset: 0.0% at max (65535) | 0.1% upper half | length: 0.0% at max (511) | offset_bits=16 length_bits=9 — OK
+  DIAG phase_c_gain: ob=16 lb=9 actual_ratio=35.5877% baseline_hyp_ratio=35.5587% gain_pp=-0.0290pp input_bytes=35376
+Fold 1 adaptive: offset_bits=16 (window=65535 bytes) length_bits=9 (max_len=511)
+Fold 1 (LZ): 100720 bits (12590 bytes)
+Fold 2 (PAIR/EG): 104400 bits (13050 bytes)
+Fold 2 PAIR not worth it (ratio 1.037) — checking LZ fallback
+Fold 2 PAIR failed and LZ not applicable (ratio 0.356 >= threshold 0.10) — stopping at fold 1
+Entropy variant sizes (raw=12590B): v1=9053B v2=9096B v3=9389B v4=9037B v5=9080B v6=9089B v7=skip v8=9045B v9=skip v10=8606B
+Joint entropy flag=10: 12590 -> 8606 B
+Done. 35376 bytes → 8613 bytes

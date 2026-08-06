@@ -1,0 +1,20 @@
+Original size: 8587440 bits (1073430 bytes)
+  fingerprint: entropy=4.97 size=1073430
+  fingerprint Rule 3: default -> ob=17 lb=8
+  Phase B scan: ob=17 lb=8 chain_limit=64 raw_cost=2403898
+  ceiling check: length peak hit 255 >= lb_ceil=229 (max_len=255 lb=8)
+  Step 1: length peak -- Phase C required
+  chain_limit (baseline ob=17): 64  raw_cost=2403898
+  discovery (capped 2MB/chain=256): discovered ob=19 lb=20
+  chain_limit (constrained ob=19): 256  raw_cost=1019742
+  lb cap: constrained lb=20 output=127468B >= threshold 400B -- capped raw_cost=919007 chain_limit=256
+  capped wins over baseline
+Window diagnostics: 21740/37515 tokens BACKREF/REPREF (58.0%) | offset: 0.0% at max (524287) | 0.6% upper half | length: 0.1% at max (32767) | offset_bits=19 length_bits=15 — OK
+  DIAG phase_c_gain: ob=19 lb=15 actual_ratio=10.5740% baseline_hyp_ratio=8.3120% gain_pp=-2.2620pp input_bytes=1073430
+Fold 1 adaptive: offset_bits=19 (window=524287 bytes) length_bits=15 (max_len=32767)
+Fold 1 (LZ): 908040 bits (113505 bytes)
+Fold 2 (PAIR/EG): 859856 bits (107482 bytes)
+Fold 3 skipped — LZ on packed bytes not beneficial (current ratio 0.100, threshold 0.10)
+Entropy variant sizes (fold1 est=114832B): v1=71479B v2=71332B v3=71226B v4=71084B v5=70937B v6=71641B v7=skip v8=71407B v9=skip v10=skip
+Entropy flag=5 beats PAIR: 70937 B < 107482 B
+Done. 1073430 bytes → 70944 bytes

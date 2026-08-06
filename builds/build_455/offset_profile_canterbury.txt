@@ -1,0 +1,128 @@
+File                       BACKREFs     Hit@1     Hit@2     Hit@3     Hit@4      Pct@1      Pct@2      Pct@3      Pct@4
+----------------------------------------------------------------------------------------------------------------------
+Original size: 1216712 bits (152089 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=550976
+  chain_limit (baseline ob=17): 512  raw_cost=550976
+  discovery (capped 2MB/chain=256): discovered ob=18 lb=8
+  chain_limit (constrained ob=18): 512  raw_cost=568302
+  entropy tiebreaker: constrained est=416926b vs baseline est=416702b -> baseline wins
+  baseline wins: ob=17 lb=8 raw_cost=550976 vs constrained raw_cost=568302
+Window diagnostics: 17784/26643 tokens BACKREF/REPREF (66.7%) | offset: 0.0% at max (131071) | 8.9% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 550392 bits (68799 bytes)
+alice29.txt                       3         0         0         0         0      0.00%      0.00%      0.00%      0.00%   est P6 saving ~0.0% of offset bits
+Original size: 1001432 bits (125179 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=516462
+  chain_limit (baseline ob=17): 512  raw_cost=516462
+  discovery (capped 2MB/chain=256): discovered ob=17 lb=8
+  wide agrees with baseline -- no re-scan needed
+Dictionary candidate Config (262B) wins: 64476 B < 64513 B (raw, offset_bits 17 -> 17)
+Window diagnostics: 16537/25157 tokens BACKREF/REPREF (65.7%) | offset: 0.0% at max (131071) | 6.6% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 515808 bits (64476 bytes)
+asyoulik.txt                     79         0         0         0         0      0.00%      0.00%      0.00%      0.00%   est P6 saving ~0.0% of offset bits
+Original size: 196824 bits (24603 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=91902
+  chain_limit (baseline ob=17): 512  raw_cost=91902
+  discovery (capped 2MB/chain=256): discovered ob=15 lb=8
+  chain_limit (constrained ob=15): 256  raw_cost=87362
+  constrained wins: ob=15 lb=8 raw_cost=87362 vs baseline raw_cost=91902
+Dictionary candidate Config (262B) wins: 10827 B < 10875 B (raw, offset_bits 15 -> 15)
+Window diagnostics: 2290/5490 tokens BACKREF/REPREF (41.7%) | offset: 0.0% at max (32767) | 2.1% upper half | length: 0.0% at max (255) | offset_bits=15 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=15 (window=32767 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 86616 bits (10827 bytes)
+cp.html                          46         0         0         0         0      0.00%      0.00%      0.00%      0.00%   est P6 saving ~0.0% of offset bits
+Original size: 89200 bits (11150 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=37338
+  chain_limit (baseline ob=17): 512  raw_cost=37338
+  discovery (capped 2MB/chain=256): discovered ob=14 lb=8
+  chain_limit (constrained ob=14): 256  raw_cost=34380
+  constrained wins: ob=14 lb=8 raw_cost=34380 vs baseline raw_cost=37338
+Dictionary candidate Config (262B) wins: 4199 B < 4226 B (raw, offset_bits 14 -> 14)
+Window diagnostics: 1004/2109 tokens BACKREF/REPREF (47.6%) | offset: 0.0% at max (16383) | 0.9% upper half | length: 0.0% at max (255) | offset_bits=14 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=14 (window=16383 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 33592 bits (4199 bytes)
+fields.c                         17         0         0         0         0      0.00%      0.00%      0.00%      0.00%   est P6 saving ~0.0% of offset bits
+Original size: 29768 bits (3721 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=15530
+  chain_limit (baseline ob=17): 512  raw_cost=15530
+  discovery (capped 2MB/chain=256): discovered ob=12 lb=8
+  chain_limit (constrained ob=12): 256  raw_cost=13790
+  constrained wins: ob=12 lb=8 raw_cost=13790 vs baseline raw_cost=15530
+Dictionary candidate Config (262B) wins: 1689 B < 1708 B (raw, offset_bits 12 -> 12)
+Window diagnostics: 359/968 tokens BACKREF/REPREF (37.1%) | offset: 0.0% at max (4095) | 1.4% upper half | length: 0.0% at max (255) | offset_bits=12 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 13512 bits (1689 bytes)
+grammar.lsp                      21         0         0         0         0      0.00%      0.00%      0.00%      0.00%   est P6 saving ~0.0% of offset bits
+Original size: 8237952 bits (1029744 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=2909506
+  chain_limit (baseline ob=17): 512  raw_cost=2909506
+  discovery (capped 2MB/chain=256): discovered ob=20 lb=8
+  chain_limit (constrained ob=20): 256  raw_cost=3141014
+  baseline wins: ob=17 lb=8 raw_cost=2909506 vs constrained raw_cost=3141014
+Window diagnostics: 80634/161903 tokens BACKREF/REPREF (49.8%) | offset: 0.0% at max (131071) | 1.1% upper half | length: 0.0% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 1996008 bits (249501 bytes)
+kennedy.xls                       1         0         0         0         0      0.00%      0.00%      0.00%      0.00%   est P6 saving ~0.0% of offset bits
+Original size: 3414032 bits (426754 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=1381150
+  chain_limit (baseline ob=17): 512  raw_cost=1381150
+  discovery (capped 2MB/chain=256): discovered ob=19 lb=8
+  chain_limit (constrained ob=19): 256  raw_cost=1402384
+  entropy tiebreaker: constrained est=1055738b vs baseline est=1074362b -> constrained wins
+  constrained wins: ob=19 lb=8 raw_cost=1402384 vs baseline raw_cost=1381150
+Dictionary candidate Config (262B) wins: 174980 B < 175034 B (raw, offset_bits 19 -> 19)
+Window diagnostics: 43509/61880 tokens BACKREF/REPREF (70.3%) | offset: 0.0% at max (524287) | 2.8% upper half | length: 0.0% at max (255) | offset_bits=19 length_bits=8 — OK
+  DIAG phase_c_gain: ob=19 lb=8 actual_ratio=41.0024% baseline_hyp_ratio=38.4619% gain_pp=-2.5405pp input_bytes=426754
+Fold 1 adaptive: offset_bits=19 (window=524287 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 1399840 bits (174980 bytes)
+lcet10.txt                        2         0         0         0         0      0.00%      0.00%      0.00%      0.00%   est P6 saving ~0.0% of offset bits
+Original size: 3854888 bits (481861 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=1917102
+  chain_limit (baseline ob=17): 512  raw_cost=1917102
+  discovery (capped 2MB/chain=256): discovered ob=19 lb=8
+  chain_limit (constrained ob=19): 256  raw_cost=1960456
+  entropy tiebreaker: constrained est=1459827b vs baseline est=1465914b -> constrained wins
+  constrained wins: ob=19 lb=8 raw_cost=1960456 vs baseline raw_cost=1917102
+Dictionary candidate Config (262B) wins: 244944 B < 244971 B (raw, offset_bits 19 -> 19)
+Window diagnostics: 60169/87716 tokens BACKREF/REPREF (68.6%) | offset: 0.0% at max (524287) | 4.2% upper half | length: 0.0% at max (255) | offset_bits=19 length_bits=8 — OK
+  DIAG phase_c_gain: ob=19 lb=8 actual_ratio=50.8327% baseline_hyp_ratio=47.7133% gain_pp=-3.1194pp input_bytes=481861
+Fold 1 adaptive: offset_bits=19 (window=524287 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 1959552 bits (244944 bytes)
+plrabn12.txt                      2         0         0         0         0      0.00%      0.00%      0.00%      0.00%   est P6 saving ~0.0% of offset bits
+Original size: 4105728 bits (513216 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=590636
+  chain_limit (baseline ob=17): 512  raw_cost=590636
+  discovery (capped 2MB/chain=256): discovered ob=19 lb=16
+  chain_limit (constrained ob=19): 256  raw_cost=711510
+  lb cap: constrained lb=16 output=88939B >= threshold 400B -- capped raw_cost=699082 chain_limit=256
+  baseline wins over capped
+Window diagnostics: 16057/33327 tokens BACKREF/REPREF (48.2%) | offset: 0.0% at max (131071) | 13.0% upper half | length: 3.1% at max (255) | offset_bits=17 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=17 (window=131071 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 545952 bits (68244 bytes)
+ptt5                              1         0         0         0         0      0.00%      0.00%      0.00%      0.00%   est P6 saving ~0.0% of offset bits
+Original size: 305920 bits (38240 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=148528
+  chain_limit (baseline ob=17): 512  raw_cost=148528
+  discovery (capped 2MB/chain=256): discovered ob=16 lb=10
+  chain_limit (constrained ob=16): 256  raw_cost=152168
+  entropy tiebreaker: constrained est=101349b vs baseline est=101576b -> constrained wins
+  constrained wins: ob=16 lb=10 raw_cost=152168 vs baseline raw_cost=148528
+Dictionary candidate Config (262B) wins: 17449 B < 17471 B (raw, offset_bits 16 -> 16)
+Window diagnostics: 3664/8957 tokens BACKREF/REPREF (40.9%) | offset: 0.0% at max (65535) | 0.0% upper half | length: 0.0% at max (1023) | offset_bits=16 length_bits=10 — OK
+  DIAG phase_c_gain: ob=16 lb=10 actual_ratio=45.6276% baseline_hyp_ratio=44.0955% gain_pp=-1.5321pp input_bytes=38240
+Fold 1 adaptive: offset_bits=16 (window=65535 bytes) length_bits=10 (max_len=1023)
+Fold 1 (LZ): 139592 bits (17449 bytes)
+sum                               4         0         0         0         0      0.00%      0.00%      0.00%      0.00%   est P6 saving ~0.0% of offset bits
+Original size: 33816 bits (4227 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=21932
+  chain_limit (baseline ob=17): 512  raw_cost=21932
+  discovery (capped 2MB/chain=256): discovered ob=12 lb=8
+  chain_limit (constrained ob=12): 256  raw_cost=19482
+  constrained wins: ob=12 lb=8 raw_cost=19482 vs baseline raw_cost=21932
+Window diagnostics: 490/1409 tokens BACKREF/REPREF (34.8%) | offset: 0.0% at max (4095) | 8.2% upper half | length: 0.0% at max (255) | offset_bits=12 length_bits=8 — OK
+Fold 1 adaptive: offset_bits=12 (window=4095 bytes) length_bits=8 (max_len=255)
+Fold 1 (LZ): 19328 bits (2416 bytes)
+xargs.1                          15         0         0         0         0      0.00%      0.00%      0.00%      0.00%   est P6 saving ~0.0% of offset bits
+----------------------------------------------------------------------------------------------------------------------
+TOTAL                           191         0         0         0         0      0.00%      0.00%      0.00%      0.00%

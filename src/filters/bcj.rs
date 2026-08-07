@@ -92,62 +92,54 @@ pub fn detect_macho(
 /// Returns `Some(filter_flag)` when `data` looks like a Unix a.out executable
 /// for an architecture with a supported BCJ filter.
 ///
-/// Targets the BSD-heritage `struct exec` header used by SunOS 4.x
-/// SPARC/68k workstations of the early 1990s (the era of the Canterbury
-/// benchmark corpus). Per the real header (4.3BSD-Reno's sys/exec.h, which
-/// SunOS's own a.out.h shares this layout with -- `a_machtype` is literally
-/// `#define`d as an alias for `a_mid`, tagged "SUN compatibility"):
+/// Targets the SunOS 4.x exec header used by SPARC/68k workstations of the
+/// early 1990s (the era of the Canterbury benchmark corpus).
 ///
-///   struct exec {
-///       unsigned short a_mid;    /* machine ID, network byte order */
-///       unsigned short a_magic;  /* magic number, network byte order */
-///       ...
-///   };
+/// SECOND correction to this function. The first correction (treating
+/// bytes 0-1 as one 16-bit big-endian `a_mid` field, per the generic
+/// 4.3BSD-Reno/NetBSD "midmag" struct) was itself wrong -- it still didn't
+/// fire on the real `sum` fixture, and turned out to not match real SunOS
+/// output either. Verified this time against `file(1)`'s own magic
+/// database (magic/Magdir/sun + Magdir/bsdi from file/file upstream, e.g.
+/// `0 belong&077777777 0600407 a.out SunOS SPARC` for OMAGIC) by decoding
+/// the octal mask/pattern arithmetic directly -- that tool has correctly
+/// identified real SunOS binaries for decades, which secondary/tertiary
+/// BSD header documentation apparently doesn't quite capture. Decoded
+/// `0600407` (OMAGIC/SPARC) = 0x00030107 under mask 0x00FFFFFF -> bytes
+/// [_, 0x03, 0x01, 0x07]. So the real layout is:
 ///
-/// i.e. TWO adjacent 16-bit big-endian fields -- not a byte of flags
-/// followed by a byte of machine type, which an earlier version of this
-/// function assumed (and which is why it never fired on the real `sum`
-/// fixture: that byte-split model has no basis in the real struct; it
-/// happened to accidentally validate against this file's own synthetic
-/// test fixtures only because those fixtures were built to match the same
-/// wrong model, not against real bytes).
-///
-///   bytes 0-1: a_mid (big-endian) -- known SunOS values:
-///                0 = unspecified   1 = Sun 68010/68020   2 = Sun 68020-only
-///                3 = SPARC         4 = Sun 386i
-///              (higher values exist for non-Sun BSD ports like HP; SunOS
-///              binaries stay in this small range)
-///   bytes 2-3: a_magic (big-endian)
+///   byte 0:    flags -- UNCONSTRAINED. The mask discards this byte
+///              entirely; real files can have any value here (e.g. bit
+///              0x80 signals dynamically-linked in the same source).
+///              This is the opposite of the ORIGINAL version of this
+///              function, which required flags < 0x80 and (it turns out)
+///              was likely the actual reason it never fired on the real
+///              file to begin with.
+///   byte 1:    mid/machtype, a plain 8-bit value (NOT part of a 16-bit
+///              field with byte 0, which is what the first "fix" broke):
+///                1 = Sun 68010   2 = Sun 68020   3 = SPARC   4 = Sun 386i
+///   bytes 2-3: magic (big-endian)
 ///                0x0107 = OMAGIC (writable text)
 ///                0x0108 = NMAGIC (read-only text)
 ///                0x010B = ZMAGIC (demand-paged)
 ///
-/// Guard: a_mid must be 0-9 (covers all known small Sun/BSD machine IDs;
-/// large a_mid values like HP's 200/300/0x20C never collide with this
-/// range) AND a_magic must be one of the three real values above. Both
-/// together make accidental matches on arbitrary binary/text data
-/// negligibly unlikely.
+/// Guard: magic must be one of the three real values, and mid must be a
+/// known small value -- that alone makes accidental matches on arbitrary
+/// binary/text data negligibly unlikely, same as before.
 ///
 /// The Canterbury corpus `sum` file is a SunOS 4.1.3 SPARC a.out (ZMAGIC)
 /// binary. It is NOT ELF (Solaris 2.x introduced ELF; SunOS 4.x uses a.out),
 /// which is why detect_elf correctly returns None for it.
-///
-/// NOTE: this correction is based on cross-checked primary-source BSD
-/// exec.h documentation, not a byte-level diff against the real Canterbury
-/// `sum` file -- fetching it directly wasn't possible in the environment
-/// this fix was written in (network access restricted to a fixed allow-
-/// list that doesn't include the corpus host). If this still doesn't fire
-/// on the real file, the next step is checking its actual first 8 bytes.
 pub fn detect_aout(data: &[u8], flag_x86: u8, flag_sparc: u8) -> Option<u8> {
     if data.len() < 8 { return None; }
 
-    let mid   = u16::from_be_bytes([data[0], data[1]]);
+    let mid   = data[1];
     let magic = u16::from_be_bytes([data[2], data[3]]);
 
-    if mid <= 9 && matches!(magic, 0x0107 | 0x0108 | 0x010B) {
+    if (1..=9).contains(&mid) && matches!(magic, 0x0107 | 0x0108 | 0x010B) {
         return match mid {
             4 => Some(flag_x86),   // Sun 386i — x86 BCJ
-            _ => Some(flag_sparc), // SPARC (3), 68k (1/2), unspecified (0)
+            _ => Some(flag_sparc), // SPARC (3), 68k (1/2), unspecified (0 not matched here)
         };
     }
 
@@ -718,9 +710,10 @@ mod tests {
 
     // ── a.out detection tests ─────────────────────────────────────────────────
 
-    fn make_sunos_aout(mid: u16, magic: u16) -> Vec<u8> {
+    fn make_sunos_aout(mid: u8, magic: u16) -> Vec<u8> {
         let mut data = vec![0u8; 32];
-        data[0..2].copy_from_slice(&mid.to_be_bytes());
+        data[0] = 0x00; // flags — unconstrained; 0x00 here is just one valid value among many
+        data[1] = mid;
         data[2..4].copy_from_slice(&magic.to_be_bytes());
         // a_text size (some non-zero value)
         data[4..8].copy_from_slice(&0x0000_4000u32.to_be_bytes());
@@ -765,20 +758,32 @@ mod tests {
     }
 
     #[test]
-    fn detect_aout_accepts_unspecified_mid_zero() {
-        // mid=0 ("unknown - implementation dependent" per the real header)
-        // still falls back to the SPARC flag, same as any other non-386i mid.
+    fn detect_aout_flags_byte_is_unconstrained() {
+        // Real file(1) magic (Magdir/sun, Magdir/bsdi) masks the flags byte
+        // out ENTIRELY before comparing -- e.g. bit 0x80 legitimately means
+        // "dynamically linked" on a real SunOS binary. A prior version of
+        // this function required flags < 0x80, which was likely the actual
+        // reason it never fired on the real `sum` fixture.
+        let mut data = make_sunos_aout(3, 0x010B);
+        data[0] = 0xFF;
+        assert_eq!(detect_aout(&data, 9, 14), Some(14),
+            "flags byte must not gate detection at all");
+    }
+
+    #[test]
+    fn detect_aout_rejects_mid_zero() {
+        // mid=0 never appears in any real SunOS/68k/Sun386i pattern (see
+        // file(1)'s Magdir/sun: SPARC=3, 68020=2, 68010=1, Sun386i=4) --
+        // treat it as "not a recognized a.out", not as SPARC.
         let data = make_sunos_aout(0, 0x010B);
-        assert_eq!(detect_aout(&data, 9, 14), Some(14));
+        assert_eq!(detect_aout(&data, 9, 14), None);
     }
 
     #[test]
     fn detect_aout_rejects_large_mid() {
-        // Large mid values (e.g. HP's 200/300/0x20C) fall outside the small
-        // range real SunOS binaries use and must not match.
         let data = make_sunos_aout(200, 0x010B);
         assert_eq!(detect_aout(&data, 9, 14), None,
-            "Large mid value (e.g. HP-style) should not match SunOS a.out");
+            "Large mid value should not match SunOS a.out");
     }
 
     #[test]
@@ -807,7 +812,7 @@ mod tests {
         let mut data = vec![0u8; 32];
         data[0..4].copy_from_slice(b"\x7fELF");
         data[5] = 1; data[18] = 0x03;
-        // mid = u16::from_be_bytes([0x7F, 0x45]) = 0x7F45, way outside 0-9.
+        // data[1] = 'E' = 0x45 = 69, way outside the accepted 1-9 mid range.
         assert_eq!(detect_aout(&data, 9, 14), None,
             "ELF magic should not match a.out detection");
     }
@@ -815,9 +820,8 @@ mod tests {
     #[test]
     fn detect_aout_does_not_match_pe() {
         let mut data = make_minimal_pe();
-        // PE starts MZ: mid = u16::from_be_bytes([0x4D, 0x5A]) = 0x4D5A,
-        // way outside 0-9, so detection fails correctly regardless of the
-        // remaining bytes.
+        // PE starts "MZ": data[1] = 'Z' = 0x5A = 90, way outside 1-9, so
+        // detection fails correctly regardless of the remaining bytes.
         assert_eq!(detect_aout(&data, 9, 14), None,
             "PE/COFF header should not match a.out detection");
     }
@@ -845,4 +849,4 @@ mod tests {
     fn detect_macho_x86_64_returns_bcj() {
         assert_eq!(detect_macho(&make_macho_le(0x0100_0007), 9, 11, 12, 13), Some(9));
     }
-        }
+            }

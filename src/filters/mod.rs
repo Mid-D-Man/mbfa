@@ -391,9 +391,10 @@ mod tests {
 
     // ── a.out detection via detect_filter ─────────────────────────────────────
 
-    fn make_sunos_aout_input(mid: u16, magic: u16) -> Vec<u8> {
+    fn make_sunos_aout_input(mid: u8, magic: u16) -> Vec<u8> {
         let mut data = vec![0u8; 32];
-        data[0..2].copy_from_slice(&mid.to_be_bytes());
+        data[0] = 0x00; // flags — unconstrained
+        data[1] = mid;
         data[2..4].copy_from_slice(&magic.to_be_bytes());
         data[4..8].copy_from_slice(&0x0000_4000u32.to_be_bytes()); // a_text
         data
@@ -422,9 +423,9 @@ mod tests {
 
     #[test]
     fn detect_filter_aout_does_not_fire_for_text() {
-        // English text: bytes 0-1 as a big-endian mid will almost certainly
-        // exceed 9 (e.g. "th" = 0x7468), so the mid guard alone rejects it
-        // regardless of what bytes 2-3 hold.
+        // English text: data[1] (the mid byte) will be an ASCII letter,
+        // almost certainly outside 1-9 (e.g. "th" -> data[1]='h'=0x68=104),
+        // so the mid guard alone rejects it regardless of what bytes 2-3 hold.
         let data = b"the quick brown fox jumps over the lazy dog ".to_vec();
         // If it somehow returns a BCJ flag, that's a false positive.
         // With real text this should be FILTER_NONE (no probe at < 512 bytes).
@@ -498,4 +499,4 @@ mod tests {
         let dec = undo_filter(&enc, FILTER_BCJ_RISCV);
         assert_eq!(dec, data);
     }
-    }
+}

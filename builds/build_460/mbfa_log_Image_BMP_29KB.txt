@@ -1,0 +1,20 @@
+BMP: 24 bpp → delta stride 3
+Filter flag=3: 30054 bytes in, 30054 bytes filtered
+Original size: 240432 bits (30054 bytes)
+  chain_limit (baseline ob=17): 512  raw_cost=7586
+  chain_limit (baseline ob=17): 512  raw_cost=7586
+  discovery (capped 2MB/chain=256): discovered ob=14 lb=15
+  chain_limit (constrained ob=14): 256  raw_cost=5462
+  constrained wins: ob=14 lb=15 raw_cost=5462 vs baseline raw_cost=7586
+Dictionary candidate Config (262B) wins: 529 B < 683 B (raw, offset_bits 14 -> 15)
+Window diagnostics: 147/227 tokens BACKREF/REPREF (64.8%) | offset: 0.0% at max (32767) | 0.0% upper half | length: 0.0% at max (32767) | offset_bits=15 length_bits=15 — OK
+  DIAG phase_c_gain: ob=15 lb=15 actual_ratio=1.7577% baseline_hyp_ratio=1.3663% gain_pp=-0.3914pp input_bytes=30054
+Fold 1 adaptive: offset_bits=15 (window=32767 bytes) length_bits=15 (max_len=32767)
+Fold 1 (LZ): 4232 bits (529 bytes)
+Fold 2 (PAIR/EG): 5640 bits (705 bytes)
+Fold 2 PAIR not worth it (ratio 1.333) — checking LZ fallback
+  Parallel path post-scan: baseline expanding (1.232) — incompressible, skipping Phase C re-scan
+Fold 2: LZ scan incompressible signal — stopping at fold 1
+Entropy variant sizes (raw=529B): v1=608B v2=skip v3=skip v4=502B v5=skip v6=651B v7=skip v8=640B v9=skip v10=495B
+Joint entropy flag=10: 529 -> 495 B
+Done. 30054 bytes → 502 bytes

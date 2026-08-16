@@ -1,0 +1,21 @@
+Original size: 26875240 bits (3359405 bytes)
+  fingerprint: entropy=4.03 size=3359405
+  fingerprint Rule 3: default -> ob=17 lb=8
+  Phase B scan: ob=17 lb=8 chain_limit=64 raw_cost=12234056
+  ceiling check: length peak hit 255 >= lb_ceil=229 (max_len=255 lb=8)
+  Step 1: length peak -- Phase C required
+  chain_limit (baseline ob=17): 64  raw_cost=12234056
+  discovery (capped 2MB/chain=256): discovered ob=21 lb=10
+  chain_limit (constrained ob=21): 128  raw_cost=12734560
+  entropy tiebreaker: constrained est=8883621b vs baseline est=9312145b -> constrained wins
+  constrained wins: ob=21 lb=10 raw_cost=12734560 vs baseline raw_cost=12234056
+Window diagnostics: 352747/497392 tokens BACKREF/REPREF (70.9%) | offset: 0.0% at max (2097151) | 3.2% upper half | length: 0.0% at max (1023) | offset_bits=21 length_bits=10 — OK
+  DIAG phase_c_gain: ob=21 lb=10 actual_ratio=47.3641% baseline_hyp_ratio=39.4934% gain_pp=-7.8707pp input_bytes=3359405
+Fold 1 adaptive: offset_bits=21 (window=2097151 bytes) length_bits=10 (max_len=1023)
+Fold 1 (LZ): 12729208 bits (1591151 bytes)
+Fold 2 (PAIR/EG): 14815440 bits (1851930 bytes)
+Fold 2 PAIR not worth it (ratio 1.164) — checking LZ fallback
+Fold 2 PAIR failed and LZ not applicable (ratio 0.474 >= threshold 0.10) — stopping at fold 1
+Entropy variant sizes (raw=1591151B): v1=1114267B v2=1111711B v3=1107704B v4=1114174B v5=1111618B v6=1114733B v7=skip v8=1113757B v9=skip v10=skip
+Joint entropy flag=3: 1591151 -> 1107704 B
+Done. 3359405 bytes → 1107711 bytes

@@ -8,6 +8,8 @@
 //!   bcj    — x86/ARM/ARM64/PPC/SPARC/RISC-V BCJ normalisation (flags 9, 11-15)
 //!   probe  — multi-stride entropy probe + WAV/BMP stride detection helpers
 //!   cfbf   — CFBF (OLE2, legacy .xls/.doc/.ppt) sector defragmentation (flag 16)
+//!   fbx    — binary FBX raw numeric array delta (flag 17)
+//!   gltf   — binary glTF (GLB) buffer array delta (flag 18)
 //!
 //! Filter flags (header byte 3):
 //!    0 = none
@@ -25,6 +27,8 @@
 //!   14 = SPARC BCJ (big-endian)
 //!   15 = RISC-V BCJ
 //!   16 = CFBF sector defragmentation (legacy .xls/.doc/.ppt)
+//!   17 = FBX raw numeric array delta (binary FBX, per-array element width)
+//!   18 = glTF/GLB buffer array delta (non-interleaved bufferViews only)
 //!
 //! Detection order:
 //!    1. Binary STL  — exact size equation               → flag 10
@@ -32,12 +36,14 @@
 //!    3. BMP         — "BM" magic                        → flag 1–4
 //!    4. Binary PLY  — "ply\n" + binary_little_endian    → flag 8
 //!    5. CFBF        — OLE2 signature + FAT/dir round-trip → flag 16
-//!    6. DixScript   — magic 0x4D444958 LE               → flag 0 (skip probe)
-//!    7. PE/COFF     — "MZ" + PE offset + "PE\0\0"       → flag 9
-//!    8. ELF         — "\x7fELF" magic + e_machine       → flag 9/11–15
-//!    9. Mach-O      — Mach-O magic + cpu_type           → flag 9/11–13
-//!   10. Unix a.out  — SunOS 4.x exec header             → flag 9/14
-//!   11. Stride probe — 8 KB entropy, threshold 0.45     → best of 1–4
+//!    6. FBX         — "Kaydara FBX Binary" + tree round-trip → flag 17
+//!    7. glTF/GLB    — "glTF" magic + JSON/BIN round-trip → flag 18
+//!    8. DixScript   — magic 0x4D444958 LE               → flag 0 (skip probe)
+//!    9. PE/COFF     — "MZ" + PE offset + "PE\0\0"       → flag 9
+//!   10. ELF         — "\x7fELF" magic + e_machine       → flag 9/11–15
+//!   11. Mach-O      — Mach-O magic + cpu_type           → flag 9/11–13
+//!   12. Unix a.out  — SunOS 4.x exec header             → flag 9/14
+//!   13. Stride probe — 8 KB entropy, threshold 0.45     → best of 1–4
 
 pub mod delta;
 pub mod stl;
@@ -45,6 +51,8 @@ pub mod ply;
 pub mod bcj;
 pub mod probe;
 pub mod cfbf;
+pub mod fbx;
+pub mod gltf;
 
 pub use delta::{delta_encode, delta_decode};
 pub use stl::{
@@ -68,6 +76,8 @@ pub use probe::{
     PROBE_MIN_BYTES, PROBE_DELTA_THRESHOLD,
 };
 pub use cfbf::{detect_cfbf, cfbf_defrag_encode, cfbf_defrag_decode};
+pub use fbx::{detect_fbx, fbx_delta_encode, fbx_delta_decode};
+pub use gltf::{detect_gltf, gltf_delta_encode, gltf_delta_decode};
 
 // ── Filter flag constants ─────────────────────────────────────────────────────
 
@@ -87,6 +97,8 @@ pub const FILTER_BCJ_PPC:         u8 = 13;
 pub const FILTER_BCJ_SPARC:       u8 = 14;
 pub const FILTER_BCJ_RISCV:       u8 = 15;
 pub const FILTER_CFBF_DEFRAG:     u8 = 16;
+pub const FILTER_FBX_ARRAY_DELTA: u8 = 17;
+pub const FILTER_GLTF_BUFFER_DELTA: u8 = 18;
 
 /// DixScript binary magic: 0x4D444958 LE = bytes [0x58, 0x49, 0x44, 0x4D].
 const DIXSCRIPT_MAGIC_BYTES: [u8; 4] = [0x58, 0x49, 0x44, 0x4D];
@@ -129,19 +141,36 @@ pub fn detect_filter(input: &[u8]) -> u8 {
         return flag;
     }
 
-    // 6. DixScript — LZ+entropy handles it directly, no BCJ
+    // 6. Binary FBX — same round-trip-self-verified discipline as CFBF
+    //    (see fbx.rs's module doc). Only fires if there's at least one raw
+    //    numeric array to delta AND re-encoding+decoding reproduces the
+    //    input exactly.
+    if let Some(flag) = detect_fbx(input) {
+        println!("Binary FBX detected → flag {}", flag);
+        return flag;
+    }
+
+    // 7. glTF/GLB — same round-trip-self-verified discipline (see gltf.rs's
+    //    module doc). Only fires for a non-Draco/Meshopt GLB with at least
+    //    one eligible raw, non-interleaved bufferView.
+    if let Some(flag) = detect_gltf(input) {
+        println!("Binary glTF (GLB) detected → flag {}", flag);
+        return flag;
+    }
+
+    // 8. DixScript — LZ+entropy handles it directly, no BCJ
     if input.len() >= 16 && input[0..4] == DIXSCRIPT_MAGIC_BYTES {
         println!("DixScript binary (.mdix compiled) detected — MDIX magic → FILTER_NONE");
         return FILTER_NONE;
     }
 
-    // 7. PE/COFF → flag 9
+    // 9. PE/COFF → flag 9
     if detect_pe_coff(input) {
         println!("PE/COFF binary detected → FILTER_BCJ (flag 9)");
         return FILTER_BCJ;
     }
 
-    // 8. ELF — arch-specific BCJ
+    // 10. ELF — arch-specific BCJ
     if let Some(flag) = detect_elf(
         input,
         FILTER_BCJ,
@@ -155,7 +184,7 @@ pub fn detect_filter(input: &[u8]) -> u8 {
         return flag;
     }
 
-    // 9. Mach-O — arch-specific BCJ
+    // 11. Mach-O — arch-specific BCJ
     if let Some(flag) = detect_macho(
         input,
         FILTER_BCJ,
@@ -167,10 +196,10 @@ pub fn detect_filter(input: &[u8]) -> u8 {
         return flag;
     }
 
-    // 10. Unix a.out — covers SunOS 4.x SPARC/68k/386i executables.
+    // 12. Unix a.out — covers SunOS 4.x SPARC/68k/386i executables.
     //    The Canterbury corpus `sum` file is a SunOS 4.1.3 SPARC a.out (ZMAGIC).
     //    It is NOT ELF (SunOS 4.x pre-dates ELF; Solaris 2.x introduced ELF),
-    //    so it falls through steps 7-9 and is caught here.
+    //    so it falls through steps 9-11 and is caught here.
     if let Some(flag) = detect_aout(input, FILTER_BCJ, FILTER_BCJ_SPARC) {
         println!(
             "Unix a.out binary detected (SunOS exec header) → flag {}",
@@ -179,7 +208,7 @@ pub fn detect_filter(input: &[u8]) -> u8 {
         return flag;
     }
 
-    // 11. Multi-stride entropy probe (generic numeric streams)
+    // 13. Multi-stride entropy probe (generic numeric streams)
     if input.len() >= PROBE_MIN_BYTES {
         let (best_filter, improvement) = probe_best_stride(input);
         if improvement >= PROBE_DELTA_THRESHOLD {
@@ -217,6 +246,8 @@ pub fn apply_filter(input: &[u8], filter: u8) -> Vec<u8> {
         FILTER_BCJ_SPARC       => bcj_sparc_encode(input),
         FILTER_BCJ_RISCV       => bcj_riscv_encode(input),
         FILTER_CFBF_DEFRAG     => cfbf_defrag_encode(input),
+        FILTER_FBX_ARRAY_DELTA => fbx_delta_encode(input),
+        FILTER_GLTF_BUFFER_DELTA => gltf_delta_encode(input),
         _                      => input.to_vec(),
     }
 }
@@ -236,6 +267,8 @@ pub fn undo_filter(input: &[u8], filter: u8) -> Vec<u8> {
         FILTER_BCJ_SPARC       => bcj_sparc_decode(input),
         FILTER_BCJ_RISCV       => bcj_riscv_decode(input),
         FILTER_CFBF_DEFRAG     => cfbf_defrag_decode(input),
+        FILTER_FBX_ARRAY_DELTA => fbx_delta_decode(input),
+        FILTER_GLTF_BUFFER_DELTA => gltf_delta_decode(input),
         _                      => input.to_vec(),
     }
 }
@@ -499,4 +532,4 @@ mod tests {
         let dec = undo_filter(&enc, FILTER_BCJ_RISCV);
         assert_eq!(dec, data);
     }
-}
+        }

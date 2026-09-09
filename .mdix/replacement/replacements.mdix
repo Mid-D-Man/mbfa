@@ -1,0 +1,18 @@
+// .mdix/replacements/replacements.mdix
+@CONFIG(
+  version    -> "1.0.0"
+  
+  debug_mode -> "off"
+)
+
+@QUICKFUNCS(
+  ~target<object>(name, path) { return { name = name, path = path } }
+)
+
+@DATA(
+  target_root = "."
+
+  overrides::
+    target("README.md", "README.md")
+    target("CONTRIBUTING.md", "CONTRIBUTING.md")
+)

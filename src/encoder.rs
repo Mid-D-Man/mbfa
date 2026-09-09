@@ -1,41 +1,25 @@
-// src/encoder.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/core.md, section "encoder.rs"
+// ============================================================================
 // LZ-style scanner with rolling-window hash chain.
 // O(n) time, O(window) memory -- safe for large files.
 //
-// P6: scan() emits Token::RepRef for ring-buffer hits when emit_repref=true.
-//
-// P6 DEFINITIVE FIX: scan() gains emit_repref: bool parameter.
+// scan() takes an emit_repref: bool parameter:
 //
 //   emit_repref=false (comparison mode):
-//     RepSlots probing completely skipped. All worthwhile matches emit
-//     Token::Backref. IDENTICAL to pre-P6 behavior. Used for ALL Phase B
-//     and Phase C comparison/decision scans inside scan_adaptive.
-//     Ensures offset_or_upper_half_saturated() sees the correct Backref-only
-//     token stream so Phase C triggers correctly (e.g. ob=17→ob=19 for terrain).
+//     RepSlots probing is skipped entirely. All worthwhile matches emit
+//     Token::Backref. Used for ALL Phase B and Phase C comparison/decision
+//     scans inside scan_adaptive, so offset_or_upper_half_saturated() sees
+//     the correct Backref-only token stream and Phase C triggers correctly
+//     (e.g. ob=17->ob=19 for terrain).
 //
 //   emit_repref=true (output mode):
-//     Full P6 ring buffer. Used only for the FINAL output scan after winning
-//     ob/lb has been determined via comparison scans. Only active for
+//     Full ring-buffer mode. Used only for the FINAL output scan after the
+//     winning ob/lb has been determined via comparison scans, and only for
 //     unfiltered data (!skip_incompressible_bail). Filtered binary data
-//     (terrain, STL, PLY, DLL) uses emit_repref=false for output too,
-//     reverting to pre-P6 behavior (ring buffer doesn't benefit filtered data).
-//
-//   Why all previous fixes failed:
-//     Fixes 1-3 operated on emission thresholds and comparison costs.
-//     None prevented RepRef tokens from appearing in the Phase B scan.
-//     With RepRef present, large-offset Backrefs silently become RepRef
-//     (no offset field), so offset_or_upper_half_saturated() under-counts
-//     upper-half matches, the fraction falls below 20%, Phase C never
-//     triggers, ob=17 stays instead of upgrading to ob=19, terrain LZ
-//     output exceeds input size, passthrough.
-//
-//   Fix 1 (ref_worthwhile): use backref_bits for BOTH Backref and RepRef.
-//     Still needed: prevents spurious short-match emissions in output mode.
-//   Fix 3 (prefer): rlen >= best_len only (no ob_beats_lit -1 advantage).
-//     Still needed: clean equal-or-longer ring replacement in output mode.
-//   Fix 2 (stream_bit_cost): RepRef counted at backref_bits.
-//     No longer strictly needed (comparison scans are pure Backref) but
-//     kept as safe fallback.
+//     (terrain, STL, PLY, DLL) uses emit_repref=false for output too --
+//     the ring buffer doesn't benefit filtered binary data.
 
 use crate::opcode::{
     Token, LIT_TOTAL_BITS, END_TOTAL_BITS, backref_total_bits, repref_total_bits,
@@ -150,15 +134,15 @@ fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
 
 /// Core LZ scanner.
 ///
-/// emit_repref=false: pure Backref mode, identical to pre-P6.
+/// emit_repref=false: pure Backref mode.
 ///   RepSlots is allocated but never probed or updated.
 ///   All worthwhile matches → Token::Backref.
 ///   Use for ALL Phase B/C comparison and decision scans.
 ///
-/// emit_repref=true: P6 ring-buffer mode.
-///   Probes RepSlots for equal-or-longer matches (fix 3).
+/// emit_repref=true: ring-buffer mode.
+///   Probes RepSlots for equal-or-longer matches.
 ///   Emits Token::RepRef on ring hit (saving ob-4 bits vs Backref).
-///   Uses backref_bits threshold for ref_worthwhile (fix 1).
+///   Uses backref_bits threshold for ref_worthwhile.
 ///   Use only for final output scan after ob/lb determined.
 pub fn scan(input: &[u8], offset_bits: u32, length_bits: u32, skip_bail: bool, emit_repref: bool) -> (Vec<Token>, bool) {
     scan_from(input, 0, offset_bits, length_bits, skip_bail, emit_repref)
@@ -248,16 +232,15 @@ pub fn scan_from(input: &[u8], start_at: usize, offset_bits: u32, length_bits: u
         let (mut best_offset, mut best_len) =
             find_match(input, i, h, &head, &prev, max_off, max_len, window_mask, chain_limit);
 
-        // P6 ring probing: ONLY when emit_repref=true.
-        // When emit_repref=false, this entire block is skipped. All matches
-        // remain Token::Backref, identical to pre-P6 behavior.
+        // Ring probing: only when emit_repref=true. When false, this
+        // entire block is skipped and all matches remain Token::Backref.
         let mut best_slot: Option<usize> = None;
         if emit_repref {
             for (k, &slot_off) in rep_slots.valid().iter().enumerate() {
                 if slot_off as usize > max_off { continue; }
                 let rlen = rep_match_len(input, i, slot_off, max_len);
                 if rlen == 0 { continue; }
-                // Fix 3: RepRef only wins with equal-or-longer match.
+                // RepRef only wins with an equal-or-longer match.
                 if rlen >= best_len {
                     best_offset = slot_off as usize;
                     best_len    = rlen;
@@ -267,8 +250,8 @@ pub fn scan_from(input: &[u8], start_at: usize, offset_bits: u32, length_bits: u
             }
         }
 
-        // Fix 1: use backref_bits threshold for BOTH Backref and RepRef.
-        // Keeps minimum effective match length identical to pre-P6.
+        // Use backref_bits threshold for both Backref and RepRef, so the
+        // minimum effective match length is the same regardless of mode.
         let ref_worthwhile = best_len >= 2
             && backref_bits < (best_len as u32 * LIT_TOTAL_BITS);
 
@@ -324,8 +307,8 @@ pub fn scan_from(input: &[u8], start_at: usize, offset_bits: u32, length_bits: u
                         });
                     }
                 } else {
-                    // emit_repref=false: pure Backref, pre-P6 identical.
-                    // rep_slots is NOT updated — ring state irrelevant in this mode.
+                    // emit_repref=false: pure Backref mode. rep_slots is NOT
+                    // updated -- ring state is irrelevant here.
                     tokens.push(Token::Backref {
                         offset: best_offset as u32,
                         length: best_len as u32,
@@ -592,8 +575,8 @@ fn offset_or_upper_half_saturated(tokens: &[Token], ob: u32) -> bool {
     let mut upper_half: u64 = 0;
 
     // NOTE: Only Token::Backref is checked here — no Token::RepRef.
-    // With emit_repref=false comparison scans, all back-references are Backref,
-    // so this function sees the complete picture (pre-P6 identical behavior).
+    // With emit_repref=false comparison scans, all back-references are
+    // Backref, so this function sees the complete picture.
     for t in tokens {
         if let Token::Backref { offset, .. } = t {
             if *offset >= ob_ceil {
@@ -727,9 +710,9 @@ fn phase_c_from_baseline(
 }
 
 pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token>, u32, u32, bool) {
-    // Whether the final output scan should use RepRef.
-    // Only for unfiltered data — filtered binary (terrain, STL, PLY, DLL) reverts
-    // to pre-P6 behavior. Ring buffer doesn't benefit filtered binary data.
+    // Whether the final output scan should use RepRef. Only for unfiltered
+    // data — filtered binary (terrain, STL, PLY, DLL) skips it, since the
+    // ring buffer doesn't benefit filtered binary data.
     let final_emit_repref = !skip_incompressible_bail;
 
     if input.len() > PARALLEL_SCAN_THRESHOLD {
@@ -738,8 +721,8 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
                 // Rule 1: highly repetitive -- fall through to Phase C.
             }
             Some((pred_ob, pred_lb)) => {
-                // Phase B: comparison scan (emit_repref=false, pre-P6 identical).
-                // Ceiling checks on these tokens are accurate.
+                // Phase B: comparison scan (emit_repref=false). Ceiling
+                // checks on these tokens are accurate.
                 let (phase_b_tokens, phase_b_bailed) =
                     scan(input, pred_ob, pred_lb, skip_incompressible_bail, false);
                 if phase_b_bailed {
@@ -794,9 +777,9 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
                         return (out_tokens, result.ob, result.lb, false);
                     }
 
-                    // Step 3: Offset peak + upper-half
-                    // With emit_repref=false comparison scan, this sees pure Backref tokens.
-                    // Identical to pre-P6 — Phase C triggers correctly for terrain.
+                    // Step 3: Offset peak + upper-half. With emit_repref=false
+                    // comparison scan, this sees pure Backref tokens, so Phase C
+                    // triggers correctly for terrain.
                     if offset_or_upper_half_saturated(&result.tokens, pred_ob) {
                         println!("  Step 3: offset/upper-half -- Phase C needed");
                         if pred_ob == BASELINE_OFFSET_BITS && pred_lb == BASELINE_LENGTH_BITS {

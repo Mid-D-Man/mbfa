@@ -1,4 +1,7 @@
-// src/decoder.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/core.md, section "decoder.rs"
+// ============================================================================
 //! Reconstructs a byte slice from a Token stream.
 //!
 //! Maintains a 4-slot LRU ring buffer (`MAX_RING_SLOTS`) mirroring the
@@ -15,19 +18,14 @@
 //!
 //! Static dictionary support: the addressable "history" for any offset is
 //! conceptually `dict ++ output`, not just `output`. A normal backref
-//! (offset <= output.len()) resolves identically to before -- the virtual
-//! position is always >= dict.len() in that case, so this is a pure
-//! generalization, not a behavior change, for every existing token stream.
-//! Only offsets that deliberately reach further back (only ever produced by
-//! encoder::scan_with_dict) actually fall into the dictionary.
+//! (offset <= output.len()) resolves identically to a no-dictionary decode --
+//! the virtual position is always >= dict.len() in that case. Only offsets
+//! that deliberately reach further back (only ever produced by
+//! encoder::scan_with_dict) fall into the dictionary.
 //!
-//! `dict` is passed in by the caller (unfold.rs), resolved from the
-//! header's `dict_flag` byte via dictionary::DictId::bytes(). Before the
-//! dictionary/ subdirectory split there was exactly one possible
-//! dictionary, so this module could import it as a fixed const; now there
-//! are four (plus "none"), so reconstruct() takes it as a parameter and
-//! the caller is responsible for picking the right one. Passing `&[]`
-//! (dict.len()==0) reproduces the original no-dictionary behavior exactly.
+//! `dict` is passed in by the caller (unfold.rs), resolved from the header's
+//! `dict_flag` byte via dictionary::DictId::bytes(). Passing `&[]` reproduces
+//! plain no-dictionary decoding exactly.
 
 use crate::opcode::{Token, MAX_RING_SLOTS};
 
@@ -61,10 +59,10 @@ pub fn reconstruct(tokens: &[Token], dict: &[u8]) -> Vec<u8> {
                     eprintln!("Warning: Backref offset=0 — skipping corrupt token");
                     continue;
                 }
-                // Apply copy. virtual_start is relative to dict_len + output.len(),
-                // so this is exactly the old `output.len() - offset` when offset
-                // stays within the real window (virtual_start ends up >= dict_len),
-                // and falls into the dictionary when it doesn't.
+                // virtual_start is relative to dict_len + output.len(). When
+                // offset stays within the real window, virtual_start ends up
+                // >= dict_len and this behaves like plain `output.len() - offset`;
+                // larger offsets resolve into the dictionary instead.
                 let virtual_start = (dict_len + output.len()).saturating_sub(*offset as usize);
                 for k in 0..*length as usize {
                     let vpos = virtual_start + (k % *offset as usize);

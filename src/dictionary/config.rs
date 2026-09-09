@@ -1,12 +1,14 @@
-// src/dictionary/config.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/dictionary.md, section "config.rs"
+// ============================================================================
 //! Generic YAML/TOML config-file scaffolding dictionary (Kubernetes
 //! ConfigMap boilerplate + Cargo-style TOML section/key layout).
 //!
 //! This is the catch-all for structured config files that aren't Unity,
 //! Unreal, or DixScript specifically -- kept intentionally small and
-//! generic. Unchanged from the original single-file dictionary.rs; only
-//! relocated here. See ../dictionary/mod.rs for the per-format selection
-//! this enables.
+//! generic. See dictionary/mod.rs for the per-format selection this
+//! enables.
 
 pub const DICTIONARY: &[u8] = b"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: \n  namespace: default\n  labels:\n    app: \nspec:\n[package]\nname    = \"\"\nversion = \"\"\nedition = \"2021\"\n\n[services.\nhost            = \"0.0.0.0\"\nport            = \nenabled = true\nmax_connections = \ntimeout_sec     = \n";
 

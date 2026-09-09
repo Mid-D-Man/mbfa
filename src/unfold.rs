@@ -1,12 +1,7 @@
-// src/unfold.rs
-//
-// P6 changes: ring_flag parsed from bit 1 of pair_flag byte.
-// P10 changes: entropy_flag=7 decoded via read_tokens_v7 (no tables needed).
-// v9 addition: entropy_flag=9 decoded via entropy_v9::read_tokens_v9 -- same
-//   no-tables approach as v7, but the token stream may include Token::RepRef.
-// v10 addition: entropy_flag=10 ("v9-optimal") decoded the same way as v9
-//   (identical byte format) but always with an empty dict and zero fold-
-//   unwind passes, since it bypasses fold.rs's own tokenization entirely.
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/core.md, section "unfold.rs"
+// ============================================================================
 
 use crate::bitreader::read_tokens;
 use crate::decoder::reconstruct;
@@ -296,7 +291,7 @@ pub fn unfold(input: &[u8]) -> std::io::Result<Vec<u8>> {
             println!("Unfold pass 2 (PAIR/EG) + pass 1 (LZ): {} bytes", current.len());
             break;
         } else {
-            // P6: fold 1's bitstream uses ring-active opcodes when ring_flag=1.
+            // fold 1's bitstream uses ring-active opcodes when ring_flag=1.
             let ring_active = pass == 1 && ring_flag;
             let tokens = read_tokens(&current, ob, lb, ring_active)?;
             current = reconstruct(&tokens, dict);

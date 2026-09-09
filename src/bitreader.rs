@@ -1,4 +1,7 @@
-// src/bitreader.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/core.md, section "bitreader.rs"
+// ============================================================================
 //! Reads a compact bitstream back into a Token stream.
 //!
 //! Both `offset_bits` and `length_bits` must match the values used during

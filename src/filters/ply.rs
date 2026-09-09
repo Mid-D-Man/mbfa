@@ -1,39 +1,16 @@
-// src/filters/ply.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/filters.md, section "ply.rs"
+// ============================================================================
 //! PLY binary compound filter: byte-plane shuffle + per-vertex-stride delta (flag 8).
 //!
 //! Binary PLY vertex floats are reorganised into four byte-planes (one per
 //! IEEE 754 byte position: LSB → MSB) and then delta-encoded within each
-//! plane using **stride = floats_per_vertex**.
-//!
-//! ## Why stride = floats_per_vertex rather than stride-1?
-//!
-//! After the byte-plane shuffle, plane b contains all byte_b values in
-//! vertex-major, float-minor order:
-//!   plane_b[k * fpv + j] = byte_b(float j of vertex k)
-//!
-//! **stride-1 (old behaviour):**
-//!   plane_b[i] -= plane_b[i - 1]
-//!   = byte_b(float j of vertex k) - byte_b(float j-1 of vertex k)
-//! This crosses float-field boundaries — subtracting, say, byte-0 of the
-//! u-texture-coordinate from byte-0 of the nz-normal component.  For
-//! unrelated IEEE-754 fields the difference is essentially random. ✗
-//!
-//! **stride-fpv (new behaviour):**
-//!   plane_b[k*fpv + j] -= plane_b[(k-1)*fpv + j]
-//!   = byte_b(float j of vertex k) - byte_b(float j of vertex k-1)
-//! Only the SAME semantic field is differenced across consecutive vertices.
-//! For smooth geometry, neighbouring vertices have very similar values in
-//! each float field → small deltas → much higher LZ match rate. ✓
-//!
-//! ## Grid PLY periodicity
-//!
-//! For a heightmap grid (grid_w × grid_h vertices in row-major order), float
-//! fields that depend only on the column index (x-coordinate, u-texture) have
-//! *identical* delta sequences in every row.  This creates a strong LZ period
-//! of exactly `grid_w × fpv` bytes inside each plane — well within MBFA's
-//! Phase C window selection.  Fields that vary with the row (y, z, v, normals)
-//! still produce bounded, slowly-varying deltas that compress significantly
-//! better than the cross-boundary values produced by stride-1.
+//! plane using stride = floats_per_vertex, so each delta differences the
+//! same semantic float field across consecutive vertices rather than
+//! crossing field boundaries. For smooth geometry, neighbouring vertices
+//! have similar values in each field, so this produces much smaller deltas
+//! and a higher LZ match rate than a naive byte-adjacent delta would.
 //!
 //! Detection requires:
 //!   - "ply\n" magic

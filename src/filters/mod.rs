@@ -1,4 +1,7 @@
-// src/filters/mod.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/filters.md, section "mod.rs"
+// ============================================================================
 //! Pre/post-compression delta filters + byte-plane shuffle + BCJ transforms.
 //!
 //! Sub-modules:

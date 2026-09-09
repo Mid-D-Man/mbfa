@@ -1,3 +1,7 @@
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/archive.md, section "main.rs"
+// ============================================================================
 //! MBFA CLI
 //! Usage:
 //!   mbfa compress   <input_file> <output_file>

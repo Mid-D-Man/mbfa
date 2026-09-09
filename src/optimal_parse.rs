@@ -1,42 +1,20 @@
-// src/optimal_parse.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/entropy.md, section "optimal_parse.rs"
+// ============================================================================
 //! Bounded-horizon, price-aware optimal parser -- an alternative to
 //! encoder.rs's `scan_from` for fold 1, when the caller intends to encode
 //! the result with entropy_v9 (or v7). Where `scan_from` picks matches by
 //! raw length (greedy, plus one step of lazy lookahead), this prices every
 //! candidate -- literal, each of the 4 rep slots, and every point on the
-//! fresh-match length/distance frontier -- under v9's ACTUAL current
-//! adaptive model, and picks whichever sequence of tokens is cheapest
-//! over a lookahead window. This is what closes the gap `scan_from` can't:
-//! it has no visibility into entropy-coder cost at all when choosing
-//! matches, so a match that's merely long isn't necessarily the same as a
-//! match that's cheap to code (a nearby short match beats a distant long
-//! one when the distance's slot+extra-bits cost outweighs the length
-//! difference -- greedy longest-match can't see that trade-off; this can).
+//! fresh-match length/distance frontier -- under v9's actual current
+//! adaptive model, and picks whichever sequence of tokens is cheapest over
+//! a lookahead window. A nearby short match can beat a distant long one
+//! once distance-coding cost is priced in; greedy longest-match can't see
+//! that trade-off, this can.
 //!
-//! ## Relationship to lzma-rust2's `encoder_normal.rs` (real optimal parser)
-//!
-//! Same core idea (a forward price-DP over a lookahead window, backward
-//! traceback to emit the cheapest path), checked directly against that
-//! file's `get_optimum`/`Optimum`/`opts[]` design, with two deliberate,
-//! disclosed simplifications:
-//!
-//!  1. **Bounded horizon, not dynamic.** LZMA extends `opt_end` position by
-//!     position, stopping early via `nice_len` heuristics and complex
-//!     match-length-based termination. This uses a FIXED lookahead window
-//!     (`HORIZON`, default 32) and always fills the whole thing before
-//!     tracing back. Simpler to reason about and verify correctly; loses
-//!     LZMA's ability to extend the horizon further when a very long match
-//!     is found nearby. Real cost/benefit trade documented below.
-//!  2. **No LZMA `state` tracking.** LZMA's `PROB_MATCH`-equivalent
-//!     (`is_match`) is context-split by an 12-state machine tracking
-//!     "what kind of token came before" (literal-after-match vs.
-//!     literal-after-literal vs. after-rep, etc). MBFA's v9 `PROB_MATCH`
-//!     is a single unconditional probability (see entropy_v9.rs's prob
-//!     layout -- no state split exists in the format at all), so there is
-//!     nothing state-dependent to track here; this is not a simplification
-//!     relative to what v9 can actually represent, just a note that if v9
-//!     ever grows state-splitting, this parser's prices would need to
-//!     grow a `state` field to match, the way LZMA's own `Optimum` has one.
+//! A forward price-DP over a fixed lookahead window (`HORIZON`, default
+//! 32), with backward traceback to emit the cheapest path.
 //!
 //! ## Match-finder: length -> cheapest-distance frontier
 //!
@@ -46,16 +24,12 @@
 //! candidate length, whether some CLOSER (cheaper) offset already achieves
 //! it, since a short-cheap match can beat a long-expensive one once
 //! distance-coding cost is priced in. `find_matches_tiered` (below) walks
-//! the identical hash-chain structure (same `hash3`, same chain-limit
-//! logic, ported byte-for-byte from encoder.rs and cross-checked against a
-//! faithful Python replica earlier in this investigation) but records a
-//! new frontier point every time chain-walking reaches a NEW length
-//! record -- and because `prev[]` links strictly older (larger-offset)
-//! positions, offsets are non-decreasing as the chain is walked, so
-//! "first time we see length >= L" is automatically also "cheapest
-//! distance that achieves length >= L". This mirrors lzma-rust2's real
-//! `Matches { len: Vec<u32>, dist: Vec<i32> }` (bt4.rs) semantics exactly,
-//! built on MBFA's existing matcher instead of porting BT4.
+//! the same hash-chain structure as encoder.rs but records a new frontier
+//! point every time chain-walking reaches a NEW length record -- and
+//! because `prev[]` links strictly older (larger-offset) positions,
+//! offsets are non-decreasing as the chain is walked, so "first time we
+//! see length >= L" is automatically also "cheapest distance that
+//! achieves length >= L".
 
 use crate::opcode::{Token, MAX_RING_SLOTS};
 use crate::price_table::{get_bit_price, get_bittree_price, get_direct_price};

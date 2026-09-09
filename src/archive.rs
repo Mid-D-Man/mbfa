@@ -1,4 +1,7 @@
-// src/archive.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/archive.md, section "archive.rs"
+// ============================================================================
 //! MBFA archive — create, extract, list.
 //!
 //! Archive header layout (18 bytes):

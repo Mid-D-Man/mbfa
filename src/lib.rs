@@ -1,18 +1,13 @@
-// src/lib.rs
-//
-// P10 addition: v7 (adaptive binary range coder) added to entropy tournament.
-//   tokens_safe_for_v7() checks all Backref lengths <= RC_MAX_BACKREF_LEN (272).
-//   try_entropy_v7() requires no pre-built tables -- the range coder adapts
-//   its own probability model during encoding.
-//   v7 competes in the same rayon tournament as v1-v6; it wins on
-//   near-degenerate distributions where Huffman's integer-bit floor is visible.
-// v8 addition: block-split entropy (path-2 cheap first cut) -- see build_v8_candidate.
-// v9 addition: entropy_v9 -- v7's range coder plus rep-awareness (is_rep/is_rep0/
-//   is_rep1/is_rep2 cascade, mirrors LZMA's REPS=4 shape). Only meaningfully
-//   different from v7 when the token stream still has Token::RepRef in it, so
-//   v9's gate/encode use the *unresolved* ring-active token stream, not the
-//   resolve_ring()-flattened one v1-v8/v7 use -- see the tokens_raw split in
-//   compress() and pair_vs_entropy() below.
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/core.md, section "lib.rs"
+// ============================================================================
+// v9 (entropy_v9 -- v7's range coder plus rep-awareness, mirroring LZMA's
+// is_rep/is_rep0/is_rep1/is_rep2 REPS=4 shape) is only meaningfully different
+// from v7 when the token stream still has Token::RepRef in it, so v9's
+// gate/encode use the *unresolved* ring-active token stream, not the
+// resolve_ring()-flattened one v1-v8/v7 use -- see the tokens_raw split in
+// compress() and pair_vs_entropy() below.
 
 pub mod opcode;
 pub mod encoder;
@@ -61,20 +56,15 @@ fn sample_entropy(data: &[u8]) -> f64 {
 ///   Byte 0: fold_count
 ///   Byte 1: pair_flag byte
 ///              bit 0 -- fold 2 used pair encoding (bool)
-///              bit 1 -- fold 1 LZ bitstream uses ring-active opcodes (P6)
+///              bit 1 -- fold 1 LZ bitstream uses ring-active opcodes
 ///   Byte 2: entropy_flag (0=none, 1-10=variant; see below for 7/8/9/10)
 ///   Byte 3: filter_flag  (0=none, 1-4=delta, 7=STL, 8=PLY, 9=BCJ, 10-15=BCJ variants)
 ///   Byte 4: dict_flag    (0=none, 1=DixScript, 2=Unity, 3=Unreal, 4=Config,
-///                         5=DixScriptBinary --
-///                         see dictionary/mod.rs::DictId. Only ever non-zero
-///                         when fold_count>=1; identifies which per-format
-///                         dictionary fold 1's LZ pass was seeded with, so
-///                         the decompressor knows which bytes to prepend
-///                         when undoing fold 1. Added when dictionary.rs
-///                         split into dictionary/{dixscript,dixscript_binary,
-///                         unity,unreal,config}.rs -- with only one possible
-///                         dictionary this byte wasn't needed; with five
-///                         differently-sized ones, it is.)
+///                         5=DixScriptBinary -- see dictionary/mod.rs::DictId.
+///                         Only ever non-zero when fold_count>=1; identifies
+///                         which per-format dictionary fold 1's LZ pass was
+///                         seeded with, so the decompressor knows which bytes
+///                         to prepend when undoing fold 1.)
 ///   Bytes 5..5+N:    offset_bits[0..N]  N = fold_count
 ///   Bytes 5+N..5+2N: length_bits[0..N]
 ///   Remaining: compressed payload
@@ -158,8 +148,8 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
 
     let (final_payload, entropy_flag, out_pair_flag, out_folds, out_ob, out_lb) =
         if try_entropy_standard {
-            // P6: the stored bitstream may use ring-active encoding if fold 1
-            // is the final fold. Read with ring_active so RepRef tokens decode
+            // The stored bitstream may use ring-active encoding if fold 1 is
+            // the final fold. Read with ring_active so RepRef tokens decode
             // correctly, then resolve -> Backref before entropy functions.
             let read_ring_active = ring_was_used && folds_done == 1;
             let tokens_raw =
@@ -253,10 +243,8 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                         },
                         7 => if v7_ok {
                             // Defense in depth: verify v7's own roundtrip before ever
-                            // trusting it. The actual bug that motivated this (fold 2+
-                            // ring-encoding mismatch) is now fixed at its source in
-                            // fold.rs, but this check is cheap and catches any other
-                            // encode/decode desync before it could ship, not just this one.
+                            // trusting it. Cheap, and catches any encode/decode desync
+                            // before it could ship.
                             try_entropy_v7(tokens).filter(|payload| {
                                 entropy::read_tokens_v7(payload)
                                     .map(|decoded| decoded == *tokens)

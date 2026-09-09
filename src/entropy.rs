@@ -1,21 +1,21 @@
-// src/entropy.rs
-//
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/entropy.md, section "entropy.rs"
+// ============================================================================
 // Entropy coding variants -- all operate on the fold-1 token stream.
 //
-// P10 addition: v7 -- adaptive binary range coder.
-//   Architecture mirrors xz RcDecoder (P10 analysis, src/decoder.rs).
-//   Closes the Huffman integer-bit-floor gap on near-degenerate distributions.
-//   No tables transmitted -- decoder rebuilds probability model from same
-//   initial state (all probs = RC_PROB_INIT = 1024).
+// v7 (adaptive binary range coder): no tables transmitted -- decoder
+// rebuilds the probability model from the same initial state (all probs
+// = RC_PROB_INIT = 1024). Closes the Huffman integer-bit-floor gap on
+// near-degenerate distributions.
 //
-// P10 addition: fmt3 RLE serialization for Huffman tables.
-//   Reduces table overhead for small files (Unreal_uplugin, YAML/TOML/INI).
+// Table serialization has four formats (fmt0-fmt3 fixed/RLE encodings,
+// plus fmt4 below); serialize_table brute-force-compares all of them and
+// keeps whichever is smallest for the table at hand.
 //
-// P11 addition: fmt4 adaptive range-coded table serialization.
-//   Reuses the v7 Rc7Enc/Rc7Dec bit primitives (not a new coder) to code the
-//   length sequence with a "same as previous" bit + adaptive 8-bit bittree,
-//   instead of fmt3's raw-byte RLE. serialize_table brute-force-compares it
-//   against fmt0-fmt3, so it only wins when it's actually smaller.
+// fmt4 reuses the v7 Rc7Enc/Rc7Dec bit primitives (not a new coder) to
+// code the length sequence with a "same as previous" bit plus an adaptive
+// 8-bit bittree, instead of fmt3's raw-byte RLE.
 
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
@@ -424,7 +424,7 @@ pub fn build_v6_tables(tokens: &[Token]) -> Option<(EncodeTable, EncodeTable, En
 //   0x00  fmt0  explicit (sym u16, len u8) list
 //   0x01  fmt1  contiguous range, one len byte per symbol
 //   0x02  fmt2  two-range split (bytes + lengths)
-//   0x03  fmt3  RLE over contiguous range (P10)
+//   0x03  fmt3  RLE over contiguous range
 //
 // fmt3 RLE tokens within [min_sym..=max_sym]:
 //   0x00-0xFD : literal code length (0 = symbol absent)

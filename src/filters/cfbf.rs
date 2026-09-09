@@ -1,4 +1,7 @@
-// src/filters/cfbf.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/filters.md, section "cfbf.rs"
+// ============================================================================
 //! CFBF (Compound File Binary Format, a.k.a. OLE2/"Structured Storage" --
 //! the container format under legacy .xls/.doc/.ppt) sector defragmentation
 //! filter.

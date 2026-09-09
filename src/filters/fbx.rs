@@ -1,4 +1,7 @@
-// src/filters/fbx.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/filters.md, section "fbx.rs"
+// ============================================================================
 //! Binary FBX (Autodesk's 3D interchange format) array-delta filter.
 //!
 //! Real format, from the Blender Foundation's primary-source spec (Alexander

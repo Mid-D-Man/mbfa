@@ -1,4 +1,7 @@
-// src/filters/stl.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/filters.md, section "stl.rs"
+// ============================================================================
 //! STL binary compound filters (flag 7 and flag 10).
 //!
 //! Flag 7 — shuffle4 + stride-12 (legacy decode-only):

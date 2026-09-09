@@ -1,44 +1,19 @@
-// src/entropy_v9.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/entropy.md, section "entropy_v9.rs"
+// ============================================================================
 //! v9: v7 (adaptive binary range coder) + repeat-offset modeling.
 //!
-//! ## The gap this closes
-//!
-//! v7's `write_tokens_v7` requires `Token::RepRef` to already be flattened
-//! to `Token::Backref` via `resolve_ring()` before it's called (see that
-//! function's doc comment and its `Token::RepRef { .. } => unreachable!()`
-//! arm). That means every backref -- whether it reuses the exact offset
-//! from two tokens ago or has never been seen before -- pays the full
-//! `rc_encode_distance` cost: a 6-bit adaptive slot bittree plus up to 24
-//! adaptively-modeled extra bits. A genuinely-reused offset gets no
-//! discount at all at the entropy layer, even though fold.rs's P6 ring
-//! buffer (opcode.rs's `Token::RepRef`, `MAX_RING_SLOTS = 4`) already
-//! *identifies* reuse during matching -- v7 just throws that information
-//! away before coding.
-//!
-//! LZMA closes exactly this gap with `is_rep`/`is_rep0`/`is_rep1`/`is_rep2`:
-//! a genuinely-reused rep0 offset costs as little as 2-3 adaptively-modeled
-//! bits total, vs. the 15-46+ bits of a full fresh-distance re-encode.
-//! v9 mirrors that shape, adapted to what MBFA's `Token` type actually
-//! carries.
-//!
-//! ## Why this is simpler than LZMA's version, not harder
-//!
-//! LZMA's rep-index bits exist because its encoder/decoder need to know
-//! the ACTUAL byte distance to perform the copy -- so it tracks rep0-3 as
-//! real distances internally. MBFA's architecture splits that concern out
-//! already: `Token::RepRef { slot, length }` carries no offset at all: it's
-//! addressed purely by ring-slot index, and `decoder::reconstruct` (not
-//! this file) is what already resolves slot -> actual offset and performs
-//! the byte copy, using its own ring array. v9 therefore never needs to
-//! track ring state itself -- it just needs to cheaply encode "this token
-//! is `Token::RepRef` with slot N" vs. "this token is `Token::Backref`
-//! with a fresh offset", and hand the resulting `Token` stream to the
-//! SAME `decoder::reconstruct` that already handles both cases correctly
-//! (verified in decoder.rs's `dict_reconstruct_tests`). LZMA also
-//! distinguishes a "short rep" (single-byte rep0 match, no length coded)
-//! from "long rep" -- MBFA has no equivalent, since `ref_worthwhile =
-//! best_len >= 2` in encoder.rs means no reference of any kind is ever
-//! emitted for a 1-byte match, so v9 has one fewer case to handle.
+//! Adds cheap encoding for genuinely-reused ring offsets (Token::RepRef)
+//! on top of v7's plain range coder, mirroring LZMA's is_rep/is_rep0/
+//! is_rep1/is_rep2 shape but simplified for MBFA's architecture:
+//! `Token::RepRef { slot, length }` carries no offset at all, only a
+//! ring-slot index, and `decoder::reconstruct` (not this file) is what
+//! resolves slot -> actual offset and performs the copy. v9 therefore
+//! never tracks ring state itself -- it just encodes "this token is
+//! RepRef with slot N" vs "this token is Backref with a fresh offset",
+//! and hands the resulting stream to the same decoder::reconstruct that
+//! already handles both cases.
 //!
 //! ## Prob layout (v9 vs. v7, entropy.rs)
 //!
@@ -71,11 +46,7 @@
 //! no new signal needed, matching v7's approach of not needing a dedicated
 //! end opcode.
 //!
-//! ## Format byte
-//!
-//! This is entropy_flag = 9 in the header (see lib.rs's format doc comment
-//! -- add "9=v9 (rep-aware range coder)" alongside the existing 1-8 list
-//! when wiring this in).
+//! This is entropy_flag = 9 in the header (see lib.rs's format doc).
 //!
 //! ## Caller contract
 //!

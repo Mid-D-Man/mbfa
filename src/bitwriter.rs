@@ -1,4 +1,7 @@
-// src/bitwriter.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/core.md, section "bitwriter.rs"
+// ============================================================================
 //! Writes a Token stream to a compact bitstream.
 //!
 //! Both `offset_bits` and `length_bits` are passed at runtime.

@@ -6,6 +6,8 @@
 
 > ⚠️ **Development Status:** This algorithm is under active research and development. Benchmark results, file formats, and internal behaviour are subject to change between versions. The only component guaranteed stable is the core instruction-set folding logic — the fixed opcode vocabulary (BACKREF / LIT / END) and the multi-fold instruction-chain architecture that defines MBFA as a distinct algorithm.
 
+Full per-module design documentation lives in [docs/mbfa.md](docs/mbfa.md) (source-level "what/why", not duplicated here). See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
+
 ---
 
 ## What is MBFA?
@@ -22,8 +24,8 @@ Original bytes
     ↓  Pre-filter (optional): delta transform for structured binary (WAV, BMP)
     ↓  Fold 1: adaptive LZ scan → token stream → fixed-opcode bitstream
 Fold 1 output
-    ↓  Fold 2: token pair encoding with Cantor-paired operands (if large enough)
-               OR entropy coding (Huffman, 5 variants) — whichever is smaller
+    ↓  Fold 2: token pair encoding with Exp-Golomb-coded operands (if large enough)
+               OR entropy coding (10 variants — Huffman and adaptive range coder) — whichever is smaller
 Fold 2 output
     ↓  Fold 3+: LZ on whatever bytes came out of the previous fold
     ↓  ... until stopping condition fires
@@ -38,13 +40,16 @@ Final compressed seed + header
 
 The opcode vocabulary is fixed and shared between encoder and decoder. **Never transmitted.** This is a core design decision — no per-fold table overhead. This vocabulary is the stable foundation of MBFA and will not change.
 
-| Opcode | Bit Pattern | Total Bits | Meaning | Operands |
-|--------|-------------|------------|---------|----------|
-| BACKREF | `0` | 24 bits | Copy from output history | 15-bit offset + 8-bit length |
-| LIT | `10` | 10 bits | Emit one literal byte | 8-bit byte value |
-| END | `11` | 2 bits | End of stream | none |
+| Opcode | Bit Pattern | Meaning | Operands |
+|--------|-------------|---------|----------|
+| BACKREF | `0` | Copy from output history | adaptive-width offset + length |
+| LIT | `10` | Emit one literal byte | 8-bit byte value |
+| REPREF (ring-active mode only) | `110` | Copy from one of the 4 most-recently-used offsets | 2-bit slot index + length |
+| END | `11` (legacy) / `111` (ring-active) | End of stream | none |
 
 BACKREF gets the 1-bit code because it becomes the dominant token on any repetitive data after fold 1. Offset and length field widths are **adaptive at runtime** — the values in the table above are defaults, not hard limits.
+
+**Ring-active mode** (a per-header flag) lets the final output scan reuse one of the 4 most-recently-used backref offsets via REPREF instead of re-encoding a fresh offset, saving `offset_bits − 4` bits per hit. It's only used for the final compression pass — all internal comparison scans that pick offset/length field widths always use plain BACKREF, so those decisions aren't skewed by ring hits.
 
 ---
 
@@ -77,40 +82,50 @@ When fold 1 output exceeds 512 bytes and pairing is beneficial, fold 2 uses toke
 | SB | `101` | single BACKREF |
 | END | `110` | stream terminator |
 
-**BACKREF operands** are compressed using Cantor pairing — `(offset, length)` encoded as a single number `cantor(x,y) = (x+y)(x+y+1)/2 + y`. If the result fits in 16 bits it wins over raw encoding. Otherwise falls back to raw. No table, no transmission, fully reversible.
+**BACKREF operands** are compressed using order-0 Exp-Golomb coding — `offset − 1` and `length − 1` are each encoded independently as self-delimiting Exp-Golomb codes. No flag bit, no 16-bit ceiling, no table, no transmission, fully reversible. (An earlier version used Cantor pairing — `(offset, length)` encoded as a single number, falling back to raw encoding above a 16-bit ceiling; replaced with Exp-Golomb to remove that ceiling.)
 
 ---
 
 ## Entropy Coding
 
-When fold 1 output exceeds 400 bytes and pair encoding is not used, MBFA tries five Huffman entropy coding variants in parallel and picks the smallest result:
+When fold 1 output exceeds 400 bytes and pair encoding is not used, MBFA tries ten entropy coding variants in parallel (a mix of Huffman-family and adaptive range-coder designs) and picks the smallest result:
 
 | Flag | Variant | Description |
 |------|---------|-------------|
 | v1 | Joint | Single lit/length Huffman + offset bucket Huffman |
 | v2 | 2-context | Separate lit/length tables for after-literal vs after-backref positions |
 | v3 | 8-context | Eight lit/length tables split by character category and position context |
-| v4 | Slotted | v1 + recent-offset slot reuse (LRU cache of last 8 offsets) |
+| v4 | Slotted | v1 + recent-offset slot reuse (LRU cache of recent offsets) |
 | v5 | Slotted 2-ctx | v2 + recent-offset slot reuse |
+| v6 | Split-stream | Literal bytes and the token-type/length sequence coded as two separate Huffman streams |
+| v7 | Range coder | Adaptive binary range coder (LZMA-style) — no tables transmitted at all |
+| v8 | Block-split | Token stream split into segments, each with its own literal/length table, boundaries chosen by direct measurement |
+| v9 | Range coder + rep-aware | v7's range coder plus cheap encoding for genuinely-reused ring-buffer offsets |
+| v10 | DP-optimal | Bounded-horizon, price-aware optimal parse (bypasses the normal LZ scan), encoded with v9's format |
 
-Offsets are bucket-coded (similar to DEFLATE distance codes) with variable extra bits. All tables are serialised into the output header — no shared state required between encoder and decoder.
+Huffman variants (v1-v6) bucket-code offsets (similar to DEFLATE distance codes) with variable extra bits and serialise all tables into the output header. Range-coder variants (v7/v9/v10) transmit no tables at all — both sides rebuild the same adaptive probability model from a fixed initial state. See [docs/mbfa/entropy.md](docs/mbfa/entropy.md) for the full design rationale of each.
 
 If no entropy variant beats the raw token stream, entropy coding is skipped entirely.
 
 ---
 
-## Delta Filters
+## Filters
 
-Before folding, MBFA detects structured binary formats and applies a delta transform to convert smoothly-varying values into near-zero residuals that LZ can match at dramatically higher density:
+Before folding, MBFA detects known binary layouts and applies a reversible pre-filter that reorganizes bytes into a shape the LZ scanner and entropy coders can exploit better than the original interleaved layout:
 
-| Filter | Stride | Applied to |
-|--------|--------|------------|
-| delta1 | 1 byte | Generic 8-bit binary |
-| delta2 | 2 bytes | 16-bit mono PCM, 16-bit pixels |
-| delta3 | 3 bytes | 24-bit RGB |
-| delta4 | 4 bytes | 32-bit RGBA, stereo 16-bit PCM |
+| Filter | Applies to |
+|--------|------------|
+| Stride-delta (flags 1–4) | Generic fixed-stride binary — 8/16/24/32-bit PCM audio, pixel data |
+| STL (flags 7 legacy, 10 current) | Binary STL 3D meshes — byte-plane split + delta |
+| PLY (flag 8) | Binary PLY 3D meshes — byte-plane shuffle + per-vertex-stride delta |
+| BCJ (flags 9, 11–15) | x86 / ARM / ARM64 / PowerPC / SPARC / RISC-V executables — branch-target normalisation |
+| CFBF (flag 16) | Legacy `.xls` / `.doc` / `.ppt` (OLE2 container) — sector defragmentation |
+| FBX (flag 17) | Binary FBX 3D interchange files — numeric array delta |
+| glTF/GLB (flag 18) | Binary glTF buffers — numeric array delta |
 
-Format detection reads magic bytes and file headers (WAV `fmt ` chunk, BMP `bpp` field). The filter flag is stored in the header and reversed exactly on decompression.
+Format detection reads magic bytes and structural headers (WAV `fmt ` chunk, BMP `bpp` field, PLY/FBX/glTF/CFBF/executable magic numbers), falling back to a generic multi-stride entropy probe when nothing more specific matches. The filter flag is stored in the header and reversed exactly on decompression. See [docs/mbfa/filters.md](docs/mbfa/filters.md) for the full flag table and per-filter design notes.
+
+MBFA also carries small per-format static dictionaries (DixScript source and compiled binary, Unity, Unreal, generic config/YAML/TOML) that seed the LZ scanner with known format boilerplate as addressable history, for files too small to contain much repetition of their own — see [docs/mbfa/dictionary.md](docs/mbfa/dictionary.md).
 
 ---
 
@@ -139,11 +154,13 @@ The encoder stops folding when any of these are true:
 ## File Format
 ```
 Byte 0:          fold_count
-Byte 1:          pair_flag        (1 = fold 2 used pair encoding)
-Byte 2:          entropy_flag     (0 = none, 1–5 = entropy variant)
-Byte 3:          filter_flag      (0 = none, 1–4 = delta stride)
-Bytes 4..4+N:    offset_bits[0..N]   N = fold_count
-Bytes 4+N..4+2N: length_bits[0..N]
+Byte 1:          pair_flag        bit 0: fold 2 used pair encoding
+                                  bit 1: fold 1 LZ bitstream uses ring-active opcodes
+Byte 2:          entropy_flag     (0 = none, 1–10 = entropy variant)
+Byte 3:          filter_flag      (0 = none; see Filters above)
+Byte 4:          dict_flag        (0 = none, 1–5 = per-format static dictionary)
+Bytes 5..5+N:    offset_bits[0..N]   N = fold_count
+Bytes 5+N..5+2N: length_bits[0..N]
 Remaining:       compressed payload
 ```
 
@@ -209,26 +226,52 @@ Lower % = better. MBFA's strongest advantages are on highly repetitive data, str
 ```
 mbfa/
 ├── src/
-│   ├── main.rs          CLI — compress / decompress / archive / extract / list
-│   ├── lib.rs           Public API, incompressibility gate, entropy variant selection
-│   ├── opcode.rs        Token enum, fixed opcode constants, adaptive field helpers
-│   ├── encoder.rs       Adaptive LZ scanner — Phase A/B/C fingerprint pipeline
-│   ├── bitwriter.rs     Token stream → packed bitstream
-│   ├── bitreader.rs     Packed bitstream → token stream
-│   ├── decoder.rs       Token stream → reconstructed bytes
-│   ├── pairing.rs       Token pair encoding + Cantor operand compression
-│   ├── fold.rs          Orchestrates fold passes + stopping logic
-│   ├── unfold.rs        Reverses N fold passes using header
-│   ├── entropy.rs       Huffman entropy coding — 5 variants (v1–v5)
-│   ├── filters.rs       Delta pre/post filters for structured binary
-│   ├── archive.rs       Multi-file archive — create, extract, list
-│   ├── archive_io.rs    Archive index serialisation / deserialisation
-│   └── platform.rs      RAM-aware chunk size selection
+│   ├── main.rs               CLI — compress / decompress / archive / extract / list
+│   ├── lib.rs                Public API, header format, entropy variant tournament
+│   ├── opcode.rs              Token enum, fixed opcode constants, adaptive field helpers
+│   ├── encoder.rs             Adaptive LZ scanner — Phase A/B/C fingerprint pipeline
+│   ├── bitwriter.rs           Token stream → packed bitstream
+│   ├── bitreader.rs           Packed bitstream → token stream
+│   ├── decoder.rs             Token stream → reconstructed bytes
+│   ├── pairing.rs             Token pair encoding + Exp-Golomb operand compression
+│   ├── fold.rs                Orchestrates fold passes + stopping logic
+│   ├── unfold.rs              Reverses N fold passes using header
+│   ├── par.rs                 Parallel/serial iterator shim
+│   ├── entropy.rs             Entropy variants v1–v7 + table serialisation
+│   ├── entropy_v9.rs          v9 range coder (rep-aware) + v10 entry point
+│   ├── price_table.rs         Fractional-bit price tables for the DP parser
+│   ├── optimal_parse.rs       Bounded-horizon DP optimal parser (v10)
+│   ├── dictionary/            Per-format static dictionaries
+│   │   ├── mod.rs                DictId, format detection (candidates_for)
+│   │   ├── dixscript.rs          DixScript source-text dictionary
+│   │   ├── dixscript_binary.rs   Compiled DixScript binary dictionary
+│   │   ├── unity.rs              Unity serialized-YAML dictionary
+│   │   ├── unreal.rs             Unreal .uplugin dictionary
+│   │   └── config.rs             Generic YAML/TOML config dictionary
+│   ├── filters/               Format-aware pre/post-compression filters
+│   │   ├── mod.rs                Filter flag vocabulary + detection/dispatch
+│   │   ├── delta.rs              Generic stride-delta (flags 1–4)
+│   │   ├── probe.rs              Multi-stride entropy probe + WAV/BMP helpers
+│   │   ├── ply.rs                Binary PLY compound filter (flag 8)
+│   │   ├── stl.rs                Binary STL compound filters (flags 7, 10)
+│   │   ├── bcj.rs                x86/ARM/ARM64/PPC/SPARC/RISC-V BCJ (flags 9, 11–15)
+│   │   ├── cfbf.rs               CFBF/OLE2 sector defrag (flag 16)
+│   │   ├── fbx.rs                Binary FBX array delta (flag 17)
+│   │   └── gltf.rs               Binary glTF/GLB buffer delta (flag 18)
+│   ├── archive.rs             Multi-file archive — create, extract, list
+│   ├── archive_io.rs          Archive index serialisation / deserialisation
+│   ├── platform.rs            RAM-aware chunk size selection
+│   └── profile_offsets.rs     Ring-slot hit-rate profiling binary
 ├── benches/
-│   └── compare.rs       Criterion benchmarks vs gzip and zstd
+│   └── compare.rs         Criterion benchmarks vs gzip and zstd
+├── docs/
+│   ├── mbfa.md             Documentation index — overview, parts, CI/workflows
+│   └── mbfa/               Per-part docs (core, entropy, archive, dictionary, filters)
+├── scripts/
+│   └── gen_special_files.py    Generates the special benchmark suite's input files
+├── CONTRIBUTING.md         Contribution guide, incl. documentation/commenting conventions
 └── .github/
-    └── workflows/
-        └── mbfa-ci.yml  CI — build, test, benchmark, deploy
+    └── workflows/          CI — build/test, per-suite benchmarks, structure export
 ```
 
 ---
@@ -263,11 +306,21 @@ cargo run --release -- list output.mbfa
 
 Normal push runs build + tests on Ubuntu, macOS, Windows.
 
-Add `--publish` or `--deploy` to your commit message to run full benchmarks and deploy the HTML report to GitHub Pages:
+Add one or more flags to your commit message to trigger additional CI behaviour:
 ```bash
 git commit -m "your message --publish"
 git push
 ```
+
+| Flag | Effect |
+|------|--------|
+| `--publish` / `--deploy` | Run the main benchmark suite and deploy the HTML report to GitHub Pages |
+| `--special` | Run the special benchmark suite (`mbfa-special.yml`, files from `scripts/gen_special_files.py`) |
+| `--corp` | Run the Canterbury Corpus benchmark (`mbfa-corpus.yml`) |
+| `--archive` | Run the archive-specific benchmark (`mbfa-archive.yml`) |
+| `--all` | Run every benchmark suite above |
+
+`mbfa-expose.yml` additionally verifies the crate builds standalone on every push to `main`, and `mbfa-ci.yml` regenerates `others/ProjectStructure.txt` automatically when the file tree changes.
 
 Results published at: **https://mid-d-man.github.io/mbfa/**
 
@@ -302,9 +355,9 @@ The algorithm has been assessed as having genuine Masters/PhD research potential
 
 - [ ] Formal benchmark on Silesia corpus
 - [ ] Convergence analysis writeup
-- [ ] Replace Cantor pairing with Exp-Golomb for offset encoding — no quadratic blowup
+- [x] Replace Cantor pairing with Exp-Golomb for offset encoding — no quadratic blowup
 - [ ] Move-To-Front transform between fold 1 and fold 2
-- [ ] Entropy coding on large streams only — size-gated to avoid header overhead on small files
+- [x] Entropy coding on large streams only — size-gated to avoid header overhead on small files
 
 ---
 

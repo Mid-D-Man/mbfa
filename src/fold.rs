@@ -1,11 +1,7 @@
-// src/fold.rs
-//
-// P6 changes vs previous version:
-//   - write_tokens now returns (Vec<u8>, bool); destructure everywhere.
-//   - ring_was_used captured from fold 1's write_tokens result and propagated
-//     as the 7th element of fold()'s return tuple.
-//   - Before pair_encode: resolve RepRef → Backref (pair_encode doesn't handle RepRef).
-//   - diag_stream_bit_cost / log_window_diagnostics handle Token::RepRef.
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/core.md, section "fold.rs"
+// ============================================================================
 
 use crate::encoder::scan_adaptive;
 use crate::bitwriter::write_tokens;
@@ -132,7 +128,7 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
     let original_size          = input.len() * 8;
     let mut final_used_pairing = false;
     let mut fold1_tokens: Option<Vec<Token>> = None;
-    let mut ring_was_used      = false; // P6: set when fold 1 emits RepRef tokens
+    let mut ring_was_used      = false; // set when fold 1 emits RepRef tokens
     let mut dict_id_used       = crate::dictionary::DictId::None; // set when fold 1's dictionary trial wins
 
     let mut offset_bits_per_fold: Vec<u32> = Vec::with_capacity(max_folds as usize);
@@ -218,7 +214,6 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
                 ob, (1u32 << ob) - 1, lb, (1u32 << lb) - 1
             );
 
-            // P6: write_tokens returns (bytes, ring_active).
             let (folded, fold1_ring_active) = write_tokens(&tokens, ob, lb)?;
             let folded_bits = folded.len() * 8;
             println!("Fold 1 (LZ): {} bits ({} bytes)", folded_bits, folded.len());
@@ -234,7 +229,7 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
                 current_lb    = lb;
                 current       = folded;
                 folds_done    = 1;
-                ring_was_used = fold1_ring_active; // P6
+                ring_was_used = fold1_ring_active;
                 offset_bits_per_fold.push(ob);
                 length_bits_per_fold.push(lb);
                 fold1_tokens = Some(tokens);
@@ -246,7 +241,7 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
             current       = folded;
             folds_done    = 1;
             prev_size     = folded_bits;
-            ring_was_used = fold1_ring_active; // P6
+            ring_was_used = fold1_ring_active;
             fold1_tokens  = Some(tokens);
             offset_bits_per_fold.push(ob);
             length_bits_per_fold.push(lb);
@@ -265,8 +260,8 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
             let raw_tokens = fold1_tokens.as_ref()
                 .expect("fold1_tokens must be Some when folds_done == 1");
 
-            // P6: resolve RepRef → Backref before pair_encode, which doesn't
-            // handle RepRef tokens.
+            // pair_encode doesn't handle RepRef tokens, so resolve any ring
+            // references back to plain Backref first.
             let resolved;
             let tokens_for_pair: &[Token] = if ring_was_used {
                 resolved = opcode::resolve_ring(raw_tokens);
@@ -341,15 +336,13 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
             break;
         }
 
-        // P6: fold 2+ bitstream must never be ring-encoded (scanning packed
-        // bytes) -- but scan_adaptive's skip_incompressible_bail=false above
-        // also sets final_emit_repref=true internally, so it CAN legitimately
-        // emit RepRef tokens here. The decoder unconditionally assumes fold 2+
-        // is never ring-active (read_ring_active is gated to folds_done==1
-        // only), so any RepRef that slips through desyncs the opcode set on
-        // decode. resolve_ring() enforces the documented invariant directly:
-        // convert any RepRef back to its equivalent Backref before write_tokens
-        // ever sees it, so ring_active is guaranteed false for fold 2+, always.
+        // fold 2+ bitstream must never be ring-encoded (scanning packed bytes),
+        // but scan_adaptive can still legitimately emit RepRef tokens here. The
+        // decoder assumes fold 2+ is never ring-active (read_ring_active only
+        // applies to folds_done==1), so any RepRef that slipped through would
+        // desync the opcode set on decode. Convert any RepRef back to its
+        // equivalent Backref before write_tokens sees it, so ring_active is
+        // guaranteed false for fold 2+.
         let lz_tokens = opcode::resolve_ring(&lz_tokens);
         let (encoded, ring_used_fold2) = write_tokens(&lz_tokens, lz_ob, lz_lb)?;
         debug_assert!(!ring_used_fold2, "fold 2+ must never be ring-encoded");

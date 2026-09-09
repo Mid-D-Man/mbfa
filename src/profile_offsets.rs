@@ -1,6 +1,7 @@
-// src/profile_offsets.rs
-//
-// P6 change: profile top-4 ring slots (was top-3) to match MAX_RING_SLOTS = 4.
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/archive.md, section "profile_offsets.rs"
+// ============================================================================
 
 use std::collections::VecDeque;
 use std::env;
@@ -48,8 +49,8 @@ fn main() {
         let lb = lb_per_fold.first().copied()
             .unwrap_or(mbfa::opcode::LENGTH_BITS_DEFAULT);
 
-        // P6: read with ring_active=false for profiling (fold doesn't emit RepRef
-        // yet until encoder.rs is updated; safe to keep false here).
+        // ring_active=false: fold() doesn't emit RepRef tokens, so this is
+        // always safe here regardless of what the real compress path used.
         let tokens = match mbfa::bitreader::read_tokens(&compressed, ob, lb, false) {
             Ok(t)  => t,
             Err(e) => { eprintln!("{}: read_tokens error: {}", name, e); continue; }

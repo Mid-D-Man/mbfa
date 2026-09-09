@@ -1,4 +1,7 @@
-// src/filters/bcj.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/filters.md, section "bcj.rs"
+// ============================================================================
 //! x86 BCJ (Branch-Call-Jump) filter for PE/COFF executables (flag 9).
 //! ARM 32-bit BCJ filter (flag 11).
 //! ARM64 BCJ filter (flag 12).

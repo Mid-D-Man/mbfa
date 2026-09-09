@@ -1,4 +1,7 @@
-// src/opcode.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/core.md, section "opcode.rs"
+// ============================================================================
 //! Fixed opcode vocabulary — known to both encoder and decoder.
 //!
 //! ## Ring-encoding mode (ring_flag = bit 1 of pair_flag header byte)
@@ -127,8 +130,6 @@ pub fn resolve_ring(tokens: &[Token]) -> Vec<Token> {
 
     for token in tokens {
         match token {
-            // P6 fix: `..` instead of binding `length` — only `offset` is used
-            // for the ring update; `length` is implicitly preserved via token.clone().
             Token::Backref { offset, .. } => {
                 if ring_count == 0 || ring[0] != *offset {
                     if ring_count < MAX_RING_SLOTS { ring_count += 1; }

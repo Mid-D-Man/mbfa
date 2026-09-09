@@ -1,4 +1,7 @@
-// src/filters/probe.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/filters.md, section "probe.rs"
+// ============================================================================
 //! Multi-stride entropy probe + WAV / BMP stride-selection helpers.
 //!
 //! The entropy probe samples up to 8 KB of the file header, computes Shannon

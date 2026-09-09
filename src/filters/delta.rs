@@ -1,4 +1,7 @@
-// src/filters/delta.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/filters.md, section "delta.rs"
+// ============================================================================
 //! Stride-delta pre-filter (flags 1–4).
 //!
 //! For each byte at position i ≥ stride:

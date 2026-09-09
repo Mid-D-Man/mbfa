@@ -1,4 +1,7 @@
-// src/filters/gltf.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/filters.md, section "gltf.rs"
+// ============================================================================
 //! Binary glTF (GLB) buffer array-delta filter.
 //!
 //! GLB structure (Khronos glTF 2.0 spec, public/open, unlike FBX): a 12-byte

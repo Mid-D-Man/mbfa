@@ -1,4 +1,7 @@
-// src/archive_io.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/archive.md, section "archive_io.rs"
+// ============================================================================
 //! Index serialization and deserialization for MBFA archives.
 //! The index is written at the end of the archive file.
 //! Format per block:

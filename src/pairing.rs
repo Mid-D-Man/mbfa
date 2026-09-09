@@ -1,18 +1,18 @@
-// src/pairing.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/core.md, section "pairing.rs"
+// ============================================================================
 //! Token-level pair encoding with Exp-Golomb operand compression.
 //!
-//! Replaces the previous Cantor-pairing scheme. Key differences:
+//! Encodes offset-1 and length-1 independently using order-0 Exp-Golomb --
+//! self-delimiting, no flag bit, no 16-bit limit.
 //!
-//!   Old (Cantor): encode (offset, length) jointly as a single number.
-//!   New (Exp-Golomb): encode offset-1 and length-1 independently using
-//!     order-0 Exp-Golomb. Self-delimiting, no flag bit, no 16-bit limit.
+//! offset_bits and length_bits parameters are retained in the public API
+//! for forward compatibility but are not used internally.
 //!
-//!   offset_bits and length_bits parameters are retained in the public API
-//!   for forward compatibility but are not used internally.
-//!
-//! P6: pair_encode never sees Token::RepRef — resolve_ring() is called by
-//! fold.rs before pair_encode. The RepRef arm is marked unreachable to
-//! satisfy Rust's exhaustiveness check.
+//! pair_encode never sees Token::RepRef -- fold.rs calls resolve_ring() to
+//! convert any ring references to plain Backref before pair_encode runs.
+//! The RepRef arm is marked unreachable to satisfy Rust's exhaustiveness check.
 //!
 //! Pair prefix vocabulary:
 //!   LL  000 — LIT + LIT
@@ -145,7 +145,7 @@ pub fn pair_encode(
                         eg_write(&mut w, length - 1)?;
                     }
                     Token::End => unreachable!("END tokens filtered before this loop"),
-                    // P6: resolve_ring() is called before pair_encode — RepRef is unreachable.
+                    // resolve_ring() is called before pair_encode — RepRef is unreachable.
                     Token::RepRef { .. } => unreachable!(
                         "RepRef must be resolved via resolve_ring() before pair_encode"
                     ),

@@ -1,45 +1,22 @@
-// src/dictionary/mod.rs
+// ============================================================================
+// NOTICE: Full documentation, design decisions, and fix history for this file
+// live in docs/mbfa/dictionary.md, section "mod.rs"
+// ============================================================================
 //! Per-format static dictionaries for cross-file backref addressing.
 //!
-//! This replaces the old single flat `dictionary.rs` (Unity + Unreal +
-//! DixScript + K8s/TOML all concatenated into one ~2KB blob that every
-//! file, regardless of format, paid the same offset-bit tax to address and
-//! got diluted by). Each format now owns its own file + its own
-//! provenance/recurrence justification -- see dixscript.rs,
-//! dixscript_binary.rs, unity.rs, unreal.rs, config.rs -- mirroring how
-//! filters/ already splits STL/PLY/BCJ/delta into their own modules behind
-//! filters/probe.rs's format sniff.
+//! Each format owns its own dictionary file and its own provenance --
+//! see dixscript.rs, dixscript_binary.rs, unity.rs, unreal.rs, config.rs.
+//! This keeps per-file match density high (a DixScript source file's
+//! dictionary is 100% DixScript syntax, not diluted by other formats'
+//! bytes) and lets fold.rs skip the scan entirely for files that plainly
+//! aren't any of these formats.
 //!
-//! Concretely this buys three things a shared blob couldn't:
-//!   1. Higher match density: a DixScript source file's dictionary is now
-//!      100% DixScript source syntax instead of ~40% (the rest being
-//!      Unity/Unreal/config bytes a .mdix file will never match against).
-//!   2. Skip the scan entirely for files that plainly aren't any of these
-//!      formats (STL/PLY/DLL/GLB/showcase) instead of always paying for a
-//!      combined-dictionary scan_with_dict pass at fold 1.
-//!   3. Each format's dictionary can be audited, mined, and grown on its
-//!      own budget without trading off against the others -- this is what
-//!      let dixscript.rs grow from ~800 DixScript-relevant bytes (its
-//!      effective share of the old 2062-byte blob) to a dedicated 2218,
-//!      and what motivated splitting dixscript.rs itself again into
-//!      source vs. compiled-binary (see dixscript_binary.rs's doc comment
-//!      for the numbers: source-syntax content was only getting 24.0%
-//!      coverage on compiled binaries; a dedicated ~338B binary-wire-format
-//!      dictionary gets 59.5%).
-//!
-//! ## The header flag this required
-//!
-//! The old doc comment on this module truthfully said "no new opcode, no
-//! header flag" -- with exactly one possible dictionary, whether a given
-//! offset fell into "dictionary space" was fully determined by comparing
-//! it against the fixed DICT_LEN, so the decoder never needed to be told
-//! anything extra. With five differently-sized dictionaries (plus "none"),
-//! that inference is no longer possible: the decoder must be told *which*
-//! dictionary's bytes to use, because DICT_LEN differs per candidate and
-//! decoding with the wrong one silently produces wrong bytes rather than
-//! failing loudly. So lib.rs's header carries one more byte (byte 4,
-//! `dict_flag`) recording the winning DictId, written by fold.rs's fold-1
-//! trial and read back by unfold.rs before any reconstruct() call.
+//! The header carries a `dict_flag` byte (lib.rs byte 4) recording which
+//! `DictId` a file's fold-1 pass used, written by fold.rs and read back by
+//! unfold.rs before any reconstruct() call. This is required because the
+//! dictionaries differ in length -- decoding with the wrong one produces
+//! wrong bytes rather than failing loudly, so the decoder must be told
+//! exactly which one to use rather than inferring it.
 
 pub mod config;
 pub mod dixscript;

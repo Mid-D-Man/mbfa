@@ -324,6 +324,16 @@ jobs:
           run_bench "Showcase_Repetitive.bin" "Showcase_Repetitive" "Showcase"
           run_bench "Showcase_Sparse.bin"     "Showcase_Sparse"     "Showcase"
           run_bench "Showcase_GameMap.bin"    "Showcase_GameMap"    "Showcase"
+          echo ""
+          echo "── Video containers ──────────────────────────────────────────────"
+          run_bench "clip_h264_faststart.mp4" "MP4_Faststart"  "Video"
+          run_bench "clip_h264.mp4"           "MP4_MoovLast"   "Video"
+          run_bench "clip.mov"                "MOV_QuickTime"  "Video"
+          run_bench "clip_vp9.webm"           "WebM_VP9"       "Video"
+          run_bench "clip_h264.mkv"           "MKV_H264"       "Video"
+          run_bench "clip_mjpeg.avi"          "AVI_MJPEG"      "Video"
+          run_bench "clip.ts"                 "MPEGTS_H264"    "Video"
+          run_bench "clip_raw.y4m"            "Y4M_Raw"        "Video"
 
           echo "]" >> bench_files_special/special_results.json
 

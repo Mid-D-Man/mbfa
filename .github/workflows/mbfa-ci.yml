@@ -77,12 +77,21 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings 2>&1 | tee clippy-${{ matrix.os }}.txt || true
 
       - name: Build Debug
+        # `shell: bash` runs with pipefail. Without it the exit status of
+        # `cargo ... | tee` is tee's (always 0), so a failing step stayed green.
+        shell: bash
         run: cargo build --verbose 2>&1 | tee build-debug-${{ matrix.os }}.txt
 
       - name: Build Release
+        # `shell: bash` runs with pipefail. Without it the exit status of
+        # `cargo ... | tee` is tee's (always 0), so a failing step stayed green.
+        shell: bash
         run: cargo build --release --verbose 2>&1 | tee build-release-${{ matrix.os }}.txt
 
       - name: Run Tests
+        # `shell: bash` runs with pipefail. Without it the exit status of
+        # `cargo ... | tee` is tee's (always 0), so a failing step stayed green.
+        shell: bash
         run: cargo test --verbose 2>&1 | tee test-${{ matrix.os }}.txt
 
       - name: Upload build logs

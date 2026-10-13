@@ -1,0 +1,385 @@
+# .github/workflows/mbfa-silesia.yml
+#
+# Silesia corpus benchmark: the README's open item ("Formal benchmark on
+# Silesia corpus"). Same shape as mbfa-corpus.yml (Canterbury), reusing
+# .github/corpus-template.html, with these differences:
+#
+#   * 12 files / 211,938,580 bytes, so it is NOT part of --all. Run it from
+#     Actions -> "MBFA Silesia Corpus Benchmark" -> Run workflow, or with a
+#     commit message containing --silesia.
+#   * Optional `files` input: a comma-separated subset (e.g. "xml,sao") for a
+#     quick run. Blank = all 12.
+#   * Download verified against the official file sizes before anything runs,
+#     from a GitHub-hosted mirror first (fast and stable from Actions), with
+#     the official host as the fallback.
+#   * The roundtrip is checked inside the benchmark loop on the very output
+#     that was timed, so each file is compressed once (Canterbury's workflow
+#     compresses every file twice: once to verify, once to time).
+#   * A failed roundtrip does not stop the run; results are still collected and
+#     uploaded as an artifact, but the job fails and nothing is deployed.
+#   * Baselines run at their command-line defaults, like the Canterbury page
+#     (gzip -6, zstd -3, xz -6, brotli -11, zpaq method 2).
+#
+# Results: https://mid-d-man.github.io/mbfa/silesia/
+name: MBFA Silesia Corpus Benchmark
+
+on:
+  push:
+    branches: [ master, main, develop ]
+  workflow_dispatch:
+    inputs:
+      files:
+        description: 'Comma-separated subset of Silesia files, e.g. "xml,sao" (blank = all 12)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  parse-trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Check for the silesia flag
+        id: check
+        # Commit message via env so a quote or $(...) in it is never executed.
+        env:
+          EVENT: ${{ github.event_name }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          SHOULD_RUN="false"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            SHOULD_RUN="true"
+          elif echo "$COMMIT_MSG" | grep -qiE '\-\-silesia'; then
+            SHOULD_RUN="true"
+          fi
+          echo "should_run=${SHOULD_RUN}" >> "$GITHUB_OUTPUT"
+          echo "Will run the Silesia benchmark: ${SHOULD_RUN}"
+
+  benchmark:
+    runs-on: ubuntu-latest
+    needs: parse-trigger
+    if: needs.parse-trigger.outputs.should_run == 'true'
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install compression tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gzip zstd xz-utils zpaq brotli bc unzip
+
+      - name: Build MBFA release
+        run: cargo build --release
+
+      - name: Download and verify the Silesia corpus
+        shell: bash
+        env:
+          ONLY: ${{ inputs.files }}
+        run: |
+          set -euo pipefail
+          mkdir -p silesia_files silesia_results
+
+          # GitHub-hosted mirror first (12 individual zips), official host as the fallback.
+          if git clone --depth 1 https://github.com/MiloszKrajewski/SilesiaCorpus.git /tmp/silesia_mirror; then
+            for z in /tmp/silesia_mirror/*.zip; do unzip -q -o "$z" -d silesia_files; done
+          else
+            echo "GitHub mirror unavailable, trying the official host"
+            curl -fsSL --retry 3 "http://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip" -o /tmp/silesia.zip
+            unzip -q -o /tmp/silesia.zip -d silesia_files
+          fi
+
+          # Official sizes from the Silesia corpus table. A mismatch means the
+          # mirror changed or a download was truncated: stop before benchmarking.
+          declare -A EXPECT=(
+            [dickens]=10192446 [mozilla]=51220480 [mr]=9970564   [nci]=33553445
+            [ooffice]=6152192  [osdb]=10085684    [reymont]=6627202 [samba]=21606400
+            [sao]=7251944      [webster]=41458703 [x-ray]=8474240  [xml]=5345280
+          )
+          BAD=0
+          for name in "${!EXPECT[@]}"; do
+            if [ ! -f "silesia_files/$name" ]; then echo "MISSING: $name"; BAD=$((BAD+1)); continue; fi
+            got=$(wc -c < "silesia_files/$name")
+            if [ "$got" -ne "${EXPECT[$name]}" ]; then
+              echo "SIZE MISMATCH: $name is $got bytes, expected ${EXPECT[$name]}"; BAD=$((BAD+1))
+            fi
+          done
+          if [ "$BAD" -gt 0 ]; then echo "ERROR: corpus failed verification"; exit 1; fi
+          echo "All 12 Silesia files present with the official sizes"
+
+          # Optional subset for quick runs.
+          if [ -n "${ONLY:-}" ]; then
+            echo "Keeping only: $ONLY"
+            for f in silesia_files/*; do
+              [ -f "$f" ] || continue
+              case ",${ONLY// /}," in
+                *",$(basename "$f"),"*) ;;
+                *) rm -f "$f" ;;
+              esac
+            done
+            if [ -z "$(ls -A silesia_files)" ]; then echo "ERROR: no file matches '$ONLY'"; exit 1; fi
+          fi
+          ls -lh silesia_files
+
+      - name: Run Silesia benchmark (roundtrip checked on the timed output)
+        shell: bash
+        run: |
+          fix_pct() { echo "$1" | sed 's/^\./0./'; }
+
+          file_type() {
+            case "$(basename "$1")" in
+              dickens)          echo "Text" ;;
+              webster|xml)      echo "HTML" ;;
+              samba)            echo "Source" ;;
+              mozilla|ooffice)  echo "Executable" ;;
+              *)                echo "Binary" ;;
+            esac
+          }
+
+          echo "[" > silesia_results/results.json
+          FIRST=true
+          RT_FAILED=0
+
+          run_one() {
+            local file=$1
+            local name=$(basename "$file")
+            local ftype=$(file_type "$file")
+            local orig=$(wc -c < "$file")
+
+            # ── MBFA compress ────────────────────────────────────────────────
+            local t0=$(date +%s%N)
+            ./target/release/mbfa compress "$file" "/tmp/${name}.mbfa" \
+              > "/tmp/${name}_mbfa.log" 2>&1 || true
+            local t1=$(date +%s%N)
+            local mbfa_ms=$(( (t1-t0)/1000000 ))
+            local mbfa_sz=$(wc -c < "/tmp/${name}.mbfa" 2>/dev/null || echo 0)
+            local fold_detail=$(grep -E "^(Original|Fold|Done|Joint|Entropy)" "/tmp/${name}_mbfa.log" | \
+              tr '\n' '|' | sed 's/"/\\"/g')
+
+            # ── MBFA decompress + byte-exact check on that same output ───────
+            t0=$(date +%s%N)
+            ./target/release/mbfa decompress "/tmp/${name}.mbfa" "/tmp/${name}.mbfa.out" \
+              > "/tmp/${name}_decompress.log" 2>&1 || true
+            t1=$(date +%s%N)
+            local mbfa_decomp_ms=$(( (t1-t0)/1000000 ))
+            local rt="PASS"
+            if ! cmp -s "$file" "/tmp/${name}.mbfa.out"; then
+              rt="FAIL"; RT_FAILED=$((RT_FAILED+1))
+              echo "ROUNDTRIP FAIL: $name"
+              tail -n 20 "/tmp/${name}_mbfa.log" || true
+              tail -n 20 "/tmp/${name}_decompress.log" || true
+            fi
+
+            # ── gzip ─────────────────────────────────────────────────────────
+            t0=$(date +%s%N); gzip -k -f -c "$file" > "/tmp/${name}.gz"; t1=$(date +%s%N)
+            local gz_ms=$(( (t1-t0)/1000000 )); local gz_sz=$(wc -c < "/tmp/${name}.gz")
+            t0=$(date +%s%N); gzip -d -k -f -c "/tmp/${name}.gz" > /dev/null 2>/dev/null; t1=$(date +%s%N)
+            local gz_decomp_ms=$(( (t1-t0)/1000000 ))
+
+            # ── zstd ─────────────────────────────────────────────────────────
+            t0=$(date +%s%N); zstd -q -f -c "$file" > "/tmp/${name}.zst"; t1=$(date +%s%N)
+            local zst_ms=$(( (t1-t0)/1000000 )); local zst_sz=$(wc -c < "/tmp/${name}.zst")
+            t0=$(date +%s%N); zstd -d -q -f -c "/tmp/${name}.zst" > /dev/null 2>/dev/null; t1=$(date +%s%N)
+            local zst_decomp_ms=$(( (t1-t0)/1000000 ))
+
+            # ── xz ───────────────────────────────────────────────────────────
+            t0=$(date +%s%N); xz -k -f -c "$file" > "/tmp/${name}.xz"; t1=$(date +%s%N)
+            local xz_ms=$(( (t1-t0)/1000000 )); local xz_sz=$(wc -c < "/tmp/${name}.xz")
+            t0=$(date +%s%N); xz -d -k -f -c "/tmp/${name}.xz" > /dev/null 2>/dev/null; t1=$(date +%s%N)
+            local xz_decomp_ms=$(( (t1-t0)/1000000 ))
+
+            # ── brotli ───────────────────────────────────────────────────────
+            t0=$(date +%s%N); brotli -k -f -c "$file" > "/tmp/${name}.br"; t1=$(date +%s%N)
+            local br_ms=$(( (t1-t0)/1000000 )); local br_sz=$(wc -c < "/tmp/${name}.br")
+            t0=$(date +%s%N); brotli -d -k -f -c "/tmp/${name}.br" > /dev/null 2>/dev/null; t1=$(date +%s%N)
+            local br_decomp_ms=$(( (t1-t0)/1000000 ))
+
+            # ── zpaq (capped: a timeout must not look like a 0% result) ──────
+            rm -f "/tmp/${name}.zpaq"
+            t0=$(date +%s%N)
+            timeout 1500 zpaq a "/tmp/${name}.zpaq" "$file" -method 2 > /dev/null 2>&1 || true
+            t1=$(date +%s%N)
+            local zpaq_ms=$(( (t1-t0)/1000000 ))
+            local zpaq_sz=$(wc -c < "/tmp/${name}.zpaq" 2>/dev/null || echo 0)
+            local zpaq_decomp_ms=0
+            if [ "$zpaq_sz" -gt 0 ]; then
+              t0=$(date +%s%N)
+              timeout 1500 zpaq e "/tmp/${name}.zpaq" -to "/tmp/zpaq_decomp_sil_$$" > /dev/null 2>&1 || true
+              t1=$(date +%s%N)
+              zpaq_decomp_ms=$(( (t1-t0)/1000000 ))
+              rm -rf "/tmp/zpaq_decomp_sil_$$"
+            fi
+
+            # ── percentages ──────────────────────────────────────────────────
+            local mbfa_pct=$(fix_pct $(echo "scale=2; $mbfa_sz*100/$orig" | bc))
+            local gz_pct=$(fix_pct   $(echo "scale=2; $gz_sz  *100/$orig" | bc))
+            local zst_pct=$(fix_pct  $(echo "scale=2; $zst_sz *100/$orig" | bc))
+            local xz_pct=$(fix_pct   $(echo "scale=2; $xz_sz  *100/$orig" | bc))
+            local br_pct=$(fix_pct   $(echo "scale=2; $br_sz  *100/$orig" | bc))
+            local zpaq_pct=100.00
+            [ "$zpaq_sz" -gt 0 ] && zpaq_pct=$(fix_pct $(echo "scale=2; $zpaq_sz*100/$orig" | bc))
+
+            local scores="$mbfa_pct $gz_pct $zst_pct $xz_pct $br_pct $zpaq_pct"
+            local rank=$(echo "$scores" | tr ' ' '\n' | \
+              sort -n | grep -n "^${mbfa_pct}$" | head -1 | cut -d: -f1)
+            [ -z "$rank" ] && rank="-"
+
+            if [ "$FIRST" = "true" ]; then FIRST=false; else echo "," >> silesia_results/results.json; fi
+
+            cat >> silesia_results/results.json << EOJSON
+          {
+            "file": "$name",
+            "type": "$ftype",
+            "original_bytes": $orig,
+            "mbfa_bytes": $mbfa_sz,   "mbfa_pct": $mbfa_pct,   "mbfa_ms": $mbfa_ms,   "mbfa_decomp_ms": $mbfa_decomp_ms,
+            "gzip_bytes": $gz_sz,     "gzip_pct": $gz_pct,     "gzip_ms": $gz_ms,     "gzip_decomp_ms": $gz_decomp_ms,
+            "zstd_bytes": $zst_sz,    "zstd_pct": $zst_pct,    "zstd_ms": $zst_ms,    "zstd_decomp_ms": $zst_decomp_ms,
+            "xz_bytes": $xz_sz,       "xz_pct": $xz_pct,       "xz_ms": $xz_ms,       "xz_decomp_ms": $xz_decomp_ms,
+            "brotli_bytes": $br_sz,   "brotli_pct": $br_pct,   "brotli_ms": $br_ms,   "brotli_decomp_ms": $br_decomp_ms,
+            "zpaq_bytes": $zpaq_sz,   "zpaq_pct": $zpaq_pct,   "zpaq_ms": $zpaq_ms,   "zpaq_decomp_ms": $zpaq_decomp_ms,
+            "mbfa_rank": $rank,
+            "mbfa_roundtrip": "$rt",
+            "fold_detail": "$fold_detail"
+          }
+          EOJSON
+
+            printf "%-9s %10s B | MBFA:%6s%%(#%s) %s C:%-6sms D:%-6sms | xz:%6s%% C:%-6sms | br:%6s%%\n" \
+              "$name" "$orig" "$mbfa_pct" "$rank" "$rt" "$mbfa_ms" "$mbfa_decomp_ms" \
+              "$xz_pct" "$xz_ms" "$br_pct"
+
+            rm -f "/tmp/${name}".{mbfa,mbfa.out,gz,zst,xz,br,zpaq} "/tmp/${name}"_*.log
+          }
+
+          echo "================================================"
+          echo "  MBFA - Silesia Corpus Benchmark"
+          echo "  Build #${{ github.run_number }} | $(date -u)"
+          echo "  C = compress ms   D = decompress ms"
+          echo "================================================"
+
+          # Smallest first, so a partial run (cancelled or timed out) is still useful.
+          for f in $(ls -S -r silesia_files/*); do
+            [ -f "$f" ] && run_one "$f"
+          done
+
+          echo "]" >> silesia_results/results.json
+          echo "================================================"
+          echo "Roundtrip failures: $RT_FAILED"
+          echo "$RT_FAILED" > silesia_results/roundtrip_failures.txt
+
+      - name: Generate Silesia HTML from the corpus template
+        shell: bash
+        run: |
+          cp .github/corpus-template.html silesia_results/index.html
+          BUILD_DATE=$(date -u)
+          BUILD_NUM="${{ github.run_number }}"
+          COMMIT="${{ github.sha }}"
+          BRANCH="${{ github.ref_name }}"
+          sed -i "s/BUILD_NUM_PLACEHOLDER/${BUILD_NUM}/g"  silesia_results/index.html
+          sed -i "s/BRANCH_PLACEHOLDER/${BRANCH}/g"        silesia_results/index.html
+          sed -i "s/COMMIT_PLACEHOLDER/${COMMIT:0:8}/g"    silesia_results/index.html
+          sed -i "s|DATE_PLACEHOLDER|${BUILD_DATE}|g"      silesia_results/index.html
+
+          # The template is written for Canterbury; swap in the Silesia wording.
+          python3 - <<'PY'
+          import re
+          p = "silesia_results/index.html"
+          s = open(p, encoding="utf-8").read()
+          s = s.replace("Canterbury Corpus Benchmark", "Silesia Corpus Benchmark")
+          s = s.replace("Canterbury Corpus", "Silesia Corpus").replace("Canterbury corpus", "Silesia corpus")
+          about = ("<strong>The Silesia Corpus</strong> (Deorowicz, 2003) is a standard benchmark for larger "
+                   "files: 12 real-world files, 211,938,580 bytes in total, covering English prose, HTML, "
+                   "source and executable tarballs, database dumps, medical images, a star catalogue, XML and "
+                   "a PDF. It stresses what Canterbury cannot: multi-megabyte inputs. Baselines run at their "
+                   "command-line defaults (gzip -6, zstd -3, xz -6, brotli -11, zpaq method 2). ")
+          s, n = re.subn(r"<strong>The Silesia Corpus</strong> is the standard.*?Lower % = better compression\.",
+                         about + "Lower % = better compression.", s, flags=re.S)
+          print("about paragraph replaced:", n)
+          open(p, "w", encoding="utf-8").write(s)
+          PY
+
+      - name: Upload Silesia results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: silesia-results-${{ github.run_number }}
+          path: silesia_results/
+          retention-days: 90
+
+      - name: Fail the job if any roundtrip failed
+        shell: bash
+        run: |
+          FAILED=$(cat silesia_results/roundtrip_failures.txt)
+          if [ "$FAILED" -gt 0 ]; then
+            echo "ERROR: $FAILED file(s) did not roundtrip byte-exactly; results are not valid and will not be deployed"
+            exit 1
+          fi
+          echo "All roundtrips passed"
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [parse-trigger, benchmark]
+    if: needs.parse-trigger.outputs.should_run == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          name: silesia-results-${{ github.run_number }}
+          path: silesia_results/
+
+      - name: Deploy Silesia results to gh-pages/silesia
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "MBFA CI"
+          git config --global user.email "ci@mbfa.dev"
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          WORK=$(mktemp -d)
+
+          if git fetch origin gh-pages:gh-pages 2>/dev/null; then
+            git worktree add "$WORK" gh-pages
+          else
+            echo "gh-pages branch does not exist yet, creating orphan"
+            git worktree add --orphan -b gh-pages "$WORK"
+          fi
+
+          mkdir -p "$WORK/silesia"
+          cp silesia_results/index.html   "$WORK/silesia/index.html"
+          cp silesia_results/results.json "$WORK/silesia/results.json"
+
+          cd "$WORK"
+          git add silesia/
+          if git diff --staged --quiet; then echo "No changes to silesia/"; exit 0; fi
+          git commit -m "MBFA Silesia benchmark — Build #${{ github.run_number }} [skip ci]"
+
+          pushed=false
+          for attempt in 1 2 3; do
+            if git push "$REMOTE" gh-pages; then pushed=true; break; fi
+            echo "push rejected (attempt $attempt), rebasing onto the remote gh-pages"
+            git pull --rebase "$REMOTE" gh-pages || true
+          done
+          $pushed
+          echo "Deployed to https://mid-d-man.github.io/mbfa/silesia/"
+
+  summary:
+    runs-on: ubuntu-latest
+    needs: [parse-trigger]
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "MBFA Silesia Corpus - Build #${{ github.run_number }}"
+          echo "Triggered: ${{ needs.parse-trigger.outputs.should_run }}"
+          echo "Use --silesia in a commit message, or run it from the Actions tab (optional file subset)."

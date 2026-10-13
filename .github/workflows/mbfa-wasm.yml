@@ -1,0 +1,200 @@
+# .github/workflows/mbfa-wasm.yml
+#
+# Two things live here:
+#
+#  1. Always-on checks (every push / PR). They keep the serial and wasm builds
+#     honest, so the in-browser feature cannot silently rot between publishes:
+#       * mbfa compiles for wasm32-unknown-unknown with default features off
+#       * the web/mbfa-wasm wrapper type-checks for wasm32
+#       * the serial (no-rayon) path passes the unit tests and tests/roundtrip.rs
+#       * the heavy roundtrip suite passes in release mode
+#
+#  2. The WASM publish pipeline, run on demand: build web/mbfa-wasm with
+#     wasm-pack, prove the built .wasm really compresses and decompresses
+#     (Node smoke test), then copy mbfa.js + mbfa_bg.wasm to the gh-pages
+#     root. gh-pages/special/index.html imports them as ../mbfa.js.
+#
+# Run the publish pipeline from  Actions -> "MBFA WASM" -> Run workflow,
+# or with a commit message containing --wasm or --all (same flag convention
+# as the benchmark workflows).
+name: MBFA WASM
+
+on:
+  push:
+    branches: [master, main, develop]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+
+  # ── 1. Always-on checks ────────────────────────────────────────────────────
+
+  serial-and-wasm-check:
+    name: Serial path + wasm32 compile check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable) with the wasm target
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: mbfa library compiles for wasm32 (default features off)
+        run: cargo check --lib --no-default-features --target wasm32-unknown-unknown
+
+      - name: Wrapper crate type-checks for wasm32
+        run: cargo check --manifest-path web/mbfa-wasm/Cargo.toml --target wasm32-unknown-unknown
+
+      - name: Unit tests + roundtrip suite on the serial path
+        run: cargo test --no-default-features --lib --test roundtrip
+
+  roundtrip-heavy:
+    name: Heavy roundtrip suite (release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      # Boundary sizes around every field-width and threshold switch point,
+      # plus the committed bench_files (alice, holmes, bible). Fails the job on
+      # any mismatch or on expansion beyond the passthrough header.
+      - name: Heavy roundtrip tests
+        run: cargo test --release --test roundtrip -- --ignored heavy_
+
+  # ── 2. WASM publish pipeline (on demand) ───────────────────────────────────
+
+  parse-commit:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Check trigger
+        id: check
+        # The commit message goes through env, not straight into the script,
+        # so a quote or $(...) in a message can never be executed as shell.
+        env:
+          EVENT: ${{ github.event_name }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          SHOULD_RUN="false"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            SHOULD_RUN="true"
+          elif echo "$COMMIT_MSG" | grep -qiE '\-\-(wasm|all)'; then
+            SHOULD_RUN="true"
+          fi
+          echo "should_run=${SHOULD_RUN}" >> "$GITHUB_OUTPUT"
+          echo "Will build and publish the wasm module: ${SHOULD_RUN}"
+
+  build-and-publish:
+    name: Build, smoke-test and publish wasm
+    runs-on: ubuntu-latest
+    needs: parse-commit
+    if: needs.parse-commit.outputs.should_run == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable) with the wasm target
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # --out-name mbfa is what yields mbfa.js / mbfa_bg.wasm, the file names
+      # the special page imports (instead of mbfa_wasm.js / mbfa_wasm_bg.wasm).
+      - name: Build with wasm-pack
+        run: wasm-pack build web/mbfa-wasm --target web --release --out-dir pkg --out-name mbfa
+
+      - name: Show build output
+        run: |
+          ls -l web/mbfa-wasm/pkg
+          test -s web/mbfa-wasm/pkg/mbfa.js
+          test -s web/mbfa-wasm/pkg/mbfa_bg.wasm
+
+      # The step that matters: run the real .wasm in a JS engine. A wasm32-only
+      # failure (clock, threads, an unexpected panic) shows up here, before
+      # anything is published.
+      - name: Smoke test — roundtrip data through the built wasm (Node)
+        run: node web/mbfa-wasm/smoke.mjs
+
+      - name: Keep the build output for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: mbfa-wasm-pkg-${{ github.run_number }}
+          path: web/mbfa-wasm/pkg/
+          retention-days: 14
+
+      - name: Publish mbfa.js + mbfa_bg.wasm to the gh-pages root
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "MBFA CI"
+          git config --global user.email "ci@mbfa.dev"
+
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          WORK=$(mktemp -d)
+
+          if git fetch origin gh-pages:gh-pages 2>/dev/null; then
+            git worktree add "$WORK" gh-pages
+          else
+            git worktree add --orphan -b gh-pages "$WORK"
+          fi
+
+          cp web/mbfa-wasm/pkg/mbfa.js      "$WORK/mbfa.js"
+          cp web/mbfa-wasm/pkg/mbfa_bg.wasm "$WORK/mbfa_bg.wasm"
+
+          cd "$WORK"
+          git add mbfa.js mbfa_bg.wasm
+          if git diff --staged --quiet; then
+            echo "gh-pages already has this exact build"
+            exit 0
+          fi
+          git commit -m "MBFA wasm build — ${GITHUB_SHA::8} [skip ci]"
+
+          # Other workflows also push to gh-pages; if we lose a race, rebase and retry.
+          pushed=false
+          for attempt in 1 2 3; do
+            if git push "$REMOTE" gh-pages; then pushed=true; break; fi
+            echo "push rejected (attempt $attempt) — rebasing onto the remote gh-pages"
+            git pull --rebase "$REMOTE" gh-pages || true
+          done
+          $pushed
+
+      # GitHub Pages publishes asynchronously, so poll for a while. Informational:
+      # a slow Pages build does not fail the job.
+      - name: Check the files are live
+        continue-on-error: true
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          BASE="https://${OWNER}.github.io/${REPO}"
+          for i in $(seq 1 18); do
+            JS=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/mbfa.js" || true)
+            WASM=$(curl -sI "$BASE/mbfa_bg.wasm" | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-type:"{t=$2} END{print c" "t}')
+            echo "attempt $i: mbfa.js -> $JS ; mbfa_bg.wasm -> $WASM"
+            if [ "$JS" = "200" ] && echo "$WASM" | grep -q '^200 application/wasm'; then
+              echo "Live: $BASE/mbfa.js and $BASE/mbfa_bg.wasm"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Not live yet — Pages may still be building; reload the special page in a minute."

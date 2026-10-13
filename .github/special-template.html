@@ -83,6 +83,7 @@
     .badge-dix     { background: #1a0f2a; color: #a371f7; border: 1px solid #3a1a5a; }
     .badge-bin     { background: #1c2128; color: #8b949e; border: 1px solid #30363d; }
     .badge-showcase{ background: #0a2010; color: #39d353; border: 1px solid #196127; }
+    .badge-video   { background: #2a0f1e; color: #ff7eb6; border: 1px solid #5a1a3a; }
 
     .bar-row { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; }
     .bar { height: 6px; border-radius: 3px; min-width: 1px; }
@@ -156,6 +157,9 @@
       border: 1px solid #21262d; border-radius: 6px; padding: 12px 14px;
       margin-top: 12px; line-height: 1.7; }
     .wasm-note code { color: #a371f7; font-family: monospace; font-size: 0.82rem; }
+    .wasm-err { color: #f85149; font-family: monospace; font-size: 0.75rem; margin-top: 8px;
+      word-break: break-word; }
+    .cancel-link { color: #f85149; font-size: 0.72rem; margin-left: 8px; text-decoration: underline; }
     .wasm-status { display: inline-block; font-size: 0.72rem; padding: 2px 8px;
       border-radius: 10px; margin-left: 8px; }
     .wasm-status.loaded   { background: #0f2a1a; color: #3fb950; border: 1px solid #1a5a2a; }
@@ -272,17 +276,18 @@
     <div class="upload-result" id="upload-result"></div>
 
     <div class="wasm-note" id="wasm-instructions">
-      <strong style="color:#e3b341">&#x26A0; MBFA WASM not built</strong> — in-browser MBFA compression is unavailable.
-      Browser gzip results above are still shown for comparison.<br><br>
-      <strong>To enable MBFA in-browser compression:</strong><br>
-      1. Add <code>[lib]</code> with <code>crate-type = ["cdylib"]</code> to <code>Cargo.toml</code><br>
-      2. Add <code>wasm-bindgen</code> exports to <code>src/lib.rs</code>:<br>
-      &nbsp;&nbsp;&nbsp;<code>#[wasm_bindgen] pub fn compress_wasm(data: &amp;[u8]) -&gt; Vec&lt;u8&gt;</code><br>
-      3. Run <code>wasm-pack build --target web --out-dir pkg</code><br>
-      4. Deploy <code>pkg/mbfa.js</code> and <code>pkg/mbfa_bg.wasm</code> to the gh-pages root<br>
-      5. The import path <code>../mbfa.js</code> on this page will find them automatically<br><br>
-      <span style="color:#484f58">Alternatively add a wasm-pack build step to the CI deploy job and copy
-      <code>pkg/</code> into the gh-pages worktree before committing.</span>
+      <strong style="color:#e3b341">&#x26A0; MBFA WASM not loaded</strong> &mdash; in-browser MBFA compression is unavailable.
+      Browser gzip results are still shown for comparison.
+      <div class="wasm-err" id="wasm-error"></div><br>
+      <strong>To publish the WASM build:</strong><br>
+      1. In GitHub open <em>Actions &rarr; MBFA WASM &rarr; Run workflow</em>,
+         or push a commit whose message contains <code>--wasm</code> or <code>--all</code><br>
+      2. The workflow builds <code>web/mbfa-wasm</code> with wasm-pack, roundtrips test data through the
+         real <code>.wasm</code> under Node, and only then copies <code>mbfa.js</code> and
+         <code>mbfa_bg.wasm</code> to the gh-pages root<br>
+      3. Reload this page &mdash; <code>../mbfa.js</code> is picked up automatically<br><br>
+      <span style="color:#484f58">Contract this page expects: <code>compress(bytes, maxFolds?)</code> and
+      <code>decompress(bytes)</code>, both taking and returning <code>Uint8Array</code>.</span>
     </div>
   </div>
 
@@ -334,11 +339,12 @@
     'Config':           { label:'Config Formats',             badgeCls:'badge-config',   badgeText:'Config'    },
     'DixScript':        { label:'DixScript (.mdix / compiled)',badgeCls:'badge-dix',      badgeText:'DixScript' },
     'Binary':           { label:'Binary / Assembly',          badgeCls:'badge-bin',      badgeText:'Binary'    },
+    'Video':            { label:'Video Containers',           badgeCls:'badge-video',    badgeText:'Video'     },
     'Showcase':         { label:'MBFA Showcase',              badgeCls:'badge-showcase', badgeText:'Showcase'  },
   };
   const CAT_ORDER = [
     '3D_filter_target','Unity','Unreal',
-    'Config','DixScript','Binary','Showcase'
+    'Config','DixScript','Binary','Video','Showcase'
   ];
 
   function fmtBytes(n) {
@@ -586,12 +592,182 @@
     if (fileInput.files[0]) handleFile(fileInput.files[0]);
   });
 
+  // ── Helpers ──────────────────────────────────────────────────────────────────
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+  function bytesEqual(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  // MBFA is CPU- and memory-hungry: measured natively it needs roughly 12-15x its
+  // input in memory, and compressing takes several seconds per MB. Warn above the
+  // first limit, refuse above the second (a phone browser tab runs out of memory).
+  const MBFA_WARN_BYTES = 2  * 1024 * 1024;
+  const MBFA_MAX_BYTES  = 24 * 1024 * 1024;
+
+  // ── MBFA WASM engine ─────────────────────────────────────────────────────────
+  // The module is published to the gh-pages root as mbfa.js + mbfa_bg.wasm by the
+  // "MBFA WASM" workflow. It exports  compress(bytes, maxFolds?)  and
+  // decompress(bytes)  (both Uint8Array -> Uint8Array).
+  //
+  // Preferred: run it inside a module Worker, so a multi-second compress never
+  // freezes the page and can be cancelled. Fallback: run on the main thread.
+  const engine = { mode: null, worker: null, mainApi: null, pending: null,
+                   seq: 0, loading: null, error: null };
+
+  const WORKER_SRC = `
+    let api = null;
+    self.onmessage = async (ev) => {
+      const m = ev.data;
+      try {
+        if (m.type === 'init') {
+          const mod = await import(m.jsUrl);
+          await mod.default();               // glue finds mbfa_bg.wasm next to mbfa.js
+          api = mod;
+          self.postMessage({ type: 'ready' });
+        } else if (m.type === 'run') {
+          const t0 = performance.now();
+          const packed = api.compress(m.bytes);
+          const t1 = performance.now();
+          const unpacked = api.decompress(packed);
+          const t2 = performance.now();
+          self.postMessage({ type: 'done', id: m.id, packed: packed, unpacked: unpacked,
+                             compMs: t1 - t0, decompMs: t2 - t1 });
+        }
+      } catch (e) {
+        self.postMessage({ type: 'error', id: m.id,
+                           message: (e && e.message) ? e.message : String(e) });
+      }
+    };`;
+
+  function setBadge(text, cls) {
+    const b = document.getElementById('wasm-badge');
+    b.textContent = text;
+    b.className   = 'wasm-status ' + cls;
+  }
+  function showWasmError(msg) {
+    engine.error = msg;
+    const el = document.getElementById('wasm-error');
+    if (el) el.textContent = 'Why it is not loaded: ' + msg;
+    setBadge('MBFA WASM not loaded', 'missing');
+    document.getElementById('wasm-instructions').style.display = 'block';
+    console.error('[mbfa-wasm] ' + msg);
+  }
+  function markLoaded(mode) {
+    engine.mode  = mode;
+    engine.error = null;
+    setBadge('MBFA WASM loaded ✓' + (mode === 'worker' ? ' (background thread)' : ''), 'loaded');
+    document.getElementById('wasm-instructions').style.display = 'none';
+    const desc = document.querySelector('.upload-desc');
+    if (!desc.dataset.wasmNote) {
+      desc.dataset.wasmNote = '1';
+      desc.innerHTML += ' <strong style="color:#3fb950">MBFA WASM active.</strong>';
+    }
+  }
+
+  function onWorkerMessage(ev) {
+    const m = ev.data, p = engine.pending;
+    if (!p || m.id !== p.id) return;
+    engine.pending = null;
+    if (m.type === 'done') p.resolve(m); else p.reject(new Error(m.message));
+  }
+
+  function startWorker(jsUrl) {
+    return new Promise((resolve, reject) => {
+      let w;
+      try {
+        const blobUrl = URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' }));
+        w = new Worker(blobUrl, { type: 'module' });
+      } catch (e) { reject(e); return; }
+      w.onmessage = (ev) => {
+        if (ev.data.type === 'ready') {
+          engine.worker = w;
+          w.onmessage = onWorkerMessage;
+          w.onerror = (err) => {
+            if (engine.pending) {
+              engine.pending.reject(new Error(err.message || 'MBFA worker crashed'));
+              engine.pending = null;
+            }
+          };
+          resolve();
+        } else if (ev.data.type === 'error') {
+          w.terminate();
+          reject(new Error(ev.data.message));
+        }
+      };
+      w.onerror = (err) => { w.terminate(); reject(new Error(err.message || 'MBFA worker failed to start')); };
+      w.postMessage({ type: 'init', jsUrl: jsUrl });
+    });
+  }
+
+  function loadEngine() {
+    engine.loading = (async () => {
+      const jsUrl = new URL('../mbfa.js', location.href).href;
+      // A HEAD request first gives a readable reason instead of the browser's
+      // generic "Failed to fetch dynamically imported module".
+      try {
+        const res = await fetch(jsUrl, { method: 'HEAD', cache: 'no-store' });
+        if (!res.ok) {
+          throw new Error(jsUrl + ' returned HTTP ' + res.status +
+            ' - the WASM build has not been published yet (see the steps below)');
+        }
+      } catch (e) { showWasmError(e.message || String(e)); return; }
+
+      if (typeof Worker !== 'undefined') {
+        try { await startWorker(jsUrl); markLoaded('worker'); return; }
+        catch (e) { console.warn('[mbfa-wasm] worker start failed, using the main thread:', e); }
+      }
+      try {
+        const mod = await import(jsUrl);
+        await mod.default();
+        engine.mainApi = mod;
+        markLoaded('main');
+      } catch (e) { showWasmError(e.message || String(e)); }
+    })();
+    return engine.loading;
+  }
+
+  // Run compress + decompress. Resolves {packed, unpacked, compMs, decompMs}.
+  function runMbfa(bytes) {
+    if (engine.mode === 'worker') {
+      return new Promise((resolve, reject) => {
+        const id = ++engine.seq;
+        engine.pending = { id: id, resolve: resolve, reject: reject };
+        engine.worker.postMessage({ type: 'run', id: id, bytes: bytes });
+      });
+    }
+    // Main thread: yield once so "Compressing..." paints before the page blocks.
+    return new Promise(r => setTimeout(r, 30)).then(() => {
+      const t0 = performance.now();
+      const packed = engine.mainApi.compress(bytes);
+      const t1 = performance.now();
+      const unpacked = engine.mainApi.decompress(packed);
+      const t2 = performance.now();
+      return { packed: packed, unpacked: unpacked, compMs: t1 - t0, decompMs: t2 - t1 };
+    });
+  }
+
+  // Throw the worker away (stops a runaway compress, or clears a wasm trap) and
+  // start a fresh one for the next file.
+  function restartEngine() {
+    if (engine.worker) { engine.worker.terminate(); engine.worker = null; }
+    if (engine.pending) { engine.pending.reject(new Error('Cancelled')); engine.pending = null; }
+    engine.mode = null;
+    setBadge('MBFA WASM restarting…', 'missing');
+    loadEngine();
+  }
+
+  // ── Handle a dropped / chosen file ───────────────────────────────────────────
   async function handleFile(file) {
     resultBox.style.display = 'none';
     setProgress(10);
     const origSize = file.size;
-    const arrBuf   = await file.arrayBuffer();
-    const bytes    = new Uint8Array(arrBuf);
+    const safeName = escapeHtml(file.name);
+    const bytes    = new Uint8Array(await file.arrayBuffer());
     setProgress(30);
 
     // ── Always run browser gzip (CompressionStream) ───────────────────────────
@@ -614,104 +790,108 @@
         gzipMs   = (performance.now() - t).toFixed(1);
         gzipSize = chunks.reduce((a, c) => a + c.length, 0);
         gzipPct  = (gzipSize / origSize * 100).toFixed(2);
-      } catch(_) {}
+      } catch (_) {}
     }
     setProgress(60);
 
-    // ── Try MBFA WASM if available ────────────────────────────────────────────
-    if (typeof window.mbfa_compress === 'function') {
-      try {
-        const t0         = performance.now();
-        const compressed = window.mbfa_compress(bytes);
-        const compMs     = (performance.now() - t0).toFixed(1);
-        setProgress(80);
-        const t1           = performance.now();
-        const decompressed = window.mbfa_decompress(compressed);
-        const decompMs     = (performance.now() - t1).toFixed(1);
-        setProgress(100);
+    const gzipRow = gzipPct !== null ? `
+      <div class="result-row"><span class="result-label">Browser gzip (reference)</span>
+        <span class="result-val" style="color:#79c0ff">${gzipPct}% in ${gzipMs}ms (${fmtBytes(gzipSize)})</span></div>` : '';
+    const fileRow = `
+      <div class="result-row"><span class="result-label">File</span>
+        <span class="result-val info">${safeName}</span></div>
+      <div class="result-row"><span class="result-label">Original size</span>
+        <span class="result-val">${fmtBytes(origSize)}</span></div>`;
 
-        const ratio = (compressed.length / origSize * 100).toFixed(2);
-        const saved = origSize - compressed.length;
-        const rtOk  = decompressed.length === origSize;
+    // Wait for a load that is still in flight (e.g. a drop right after page load).
+    if (engine.loading) await engine.loading;
 
-        resultBox.style.display = 'block';
-        resultBox.innerHTML = `
-          <div class="result-row"><span class="result-label">File</span>
-            <span class="result-val info">${file.name}</span></div>
-          <div class="result-row"><span class="result-label">Original size</span>
-            <span class="result-val">${fmtBytes(origSize)}</span></div>
-          <div class="result-row"><span class="result-label">MBFA compressed</span>
-            <span class="result-val ${parseFloat(ratio) < 100 ? 'good' : 'bad'}">${fmtBytes(compressed.length)} (${ratio}%)</span></div>
-          <div class="result-row"><span class="result-label">Space saved</span>
-            <span class="result-val">${fmtBytes(Math.max(0, saved))}</span></div>
-          <div class="result-row"><span class="result-label">MBFA compress time</span>
-            <span class="result-val info">${compMs} ms</span></div>
-          <div class="result-row"><span class="result-label">MBFA decompress time</span>
-            <span class="result-val" style="color:#a371f7">${decompMs} ms</span></div>
-          <div class="result-row"><span class="result-label">Roundtrip</span>
-            <span class="result-val ${rtOk ? 'good' : 'bad'}">${rtOk ? 'PASS ✓' : 'FAIL — size mismatch'}</span></div>
-          ${gzipPct !== null ? `
-          <div class="result-row"><span class="result-label">Browser gzip (reference)</span>
-            <span class="result-val" style="color:#79c0ff">${gzipPct}% in ${gzipMs}ms (${fmtBytes(gzipSize)})</span></div>` : ''}
-          <div style="margin-top:10px;font-size:0.72rem;color:#484f58">
-            Browser WASM timings may differ from server-side CI numbers due to JIT warmup.
-          </div>`;
-      } catch(e) {
-        setProgress(100);
-        resultBox.style.display = 'block';
-        resultBox.innerHTML = `<div class="result-row">
-          <span class="result-label">MBFA error</span>
-          <span class="result-val bad">${e.message || String(e)}</span></div>
-          ${gzipPct !== null ? `<div class="result-row">
-          <span class="result-label">Browser gzip (reference)</span>
-          <span class="result-val" style="color:#79c0ff">${gzipPct}% in ${gzipMs}ms</span></div>` : ''}`;
-      }
+    // ── MBFA not available: say why, show gzip only ───────────────────────────
+    if (engine.mode === null) {
+      setProgress(100);
+      resultBox.style.display = 'block';
+      resultBox.innerHTML = fileRow + gzipRow + `
+        <div class="result-row"><span class="result-label">MBFA WASM</span>
+          <span class="result-val bad">Not loaded — see the note above</span></div>
+        ${engine.error ? `<div class="wasm-err">${escapeHtml(engine.error)}</div>` : ''}`;
       return;
     }
 
-    // ── WASM not available: show browser gzip only ────────────────────────────
-    setProgress(100);
-    resultBox.style.display = 'block';
-    if (gzipPct !== null) {
-      resultBox.innerHTML = `
-        <div class="result-row"><span class="result-label">File</span>
-          <span class="result-val info">${file.name}</span></div>
-        <div class="result-row"><span class="result-label">Original size</span>
-          <span class="result-val">${fmtBytes(origSize)}</span></div>
-        <div class="result-row"><span class="result-label">Browser gzip result</span>
-          <span class="result-val ${parseFloat(gzipPct) < 100 ? 'good' : 'bad'}">${fmtBytes(gzipSize)} (${gzipPct}%)</span></div>
-        <div class="result-row"><span class="result-label">Browser gzip time</span>
-          <span class="result-val info">${gzipMs} ms</span></div>
-        <div class="result-row"><span class="result-label">MBFA WASM</span>
-          <span class="result-val bad">Not loaded — see instructions above</span></div>`;
-    } else {
-      resultBox.innerHTML = `
-        <div class="result-row"><span class="result-label">File</span>
-          <span class="result-val info">${file.name} (${fmtBytes(origSize)})</span></div>
-        <div class="result-row"><span class="result-label">Status</span>
-          <span class="result-val bad">MBFA WASM not loaded, CompressionStream unavailable</span></div>`;
+    // ── Too big for a browser tab ─────────────────────────────────────────────
+    if (origSize > MBFA_MAX_BYTES) {
+      setProgress(100);
+      resultBox.style.display = 'block';
+      resultBox.innerHTML = fileRow + gzipRow + `
+        <div class="result-row"><span class="result-label">MBFA</span>
+          <span class="result-val bad">Skipped — over the ${fmtBytes(MBFA_MAX_BYTES)} in-browser limit</span></div>
+        <div class="wasm-err">MBFA needs roughly 12–15× its input in memory. Use the mbfa CLI for larger files.</div>`;
+      return;
     }
+
+    // ── Run MBFA ──────────────────────────────────────────────────────────────
+    setProgress(80);
+    const slowNote = origSize > MBFA_WARN_BYTES ? `
+      <div style="margin-top:8px;font-size:0.72rem;color:#e3b341">
+        Large file — MBFA can take several seconds per MB in the browser${engine.mode === 'worker'
+          ? ', running in the background; the page stays usable.'
+          : ' on the main thread; the page may freeze until it finishes.'}
+      </div>` : '';
+    resultBox.style.display = 'block';
+    resultBox.innerHTML = fileRow + `
+      <div class="result-row"><span class="result-label">MBFA</span>
+        <span class="result-val info">Compressing… <span id="run-status">0.0 s</span>
+          ${engine.mode === 'worker' ? ' <a href="#" id="cancel-run" class="cancel-link">cancel</a>' : ''}
+        </span></div>${slowNote}`;
+    const cancelLink = document.getElementById('cancel-run');
+    if (cancelLink) cancelLink.addEventListener('click', ev => { ev.preventDefault(); restartEngine(); });
+    const startedAt = performance.now();
+    const timer = setInterval(() => {
+      const el = document.getElementById('run-status');
+      if (el) el.textContent = ((performance.now() - startedAt) / 1000).toFixed(1) + ' s';
+    }, 250);
+
+    let r;
+    try {
+      r = await runMbfa(bytes);
+    } catch (e) {
+      clearInterval(timer);
+      setProgress(100);
+      const cancelled = e && e.message === 'Cancelled';
+      resultBox.innerHTML = fileRow + gzipRow + `
+        <div class="result-row"><span class="result-label">MBFA ${cancelled ? 'stopped' : 'error'}</span>
+          <span class="result-val bad">${cancelled ? 'Cancelled' : escapeHtml((e && e.message) || String(e))}</span></div>
+        ${cancelled ? '' : '<div class="wasm-err">See the browser console for the Rust panic message, if any.</div>'}`;
+      if (!cancelled && engine.mode === 'worker') restartEngine();   // a wasm trap leaves the instance unusable
+      return;
+    }
+    clearInterval(timer);
+    setProgress(100);
+
+    const packedLen = r.packed.length;
+    const ratio = (packedLen / origSize * 100).toFixed(2);
+    const saved = origSize - packedLen;
+    const rtOk  = bytesEqual(bytes, r.unpacked);        // byte-exact, not just the same length
+
+    resultBox.innerHTML = fileRow + `
+      <div class="result-row"><span class="result-label">MBFA compressed</span>
+        <span class="result-val ${parseFloat(ratio) < 100 ? 'good' : 'bad'}">${fmtBytes(packedLen)} (${ratio}%)</span></div>
+      <div class="result-row"><span class="result-label">Space saved</span>
+        <span class="result-val">${fmtBytes(Math.max(0, saved))}</span></div>
+      <div class="result-row"><span class="result-label">MBFA compress time</span>
+        <span class="result-val info">${r.compMs.toFixed(1)} ms</span></div>
+      <div class="result-row"><span class="result-label">MBFA decompress time</span>
+        <span class="result-val" style="color:#a371f7">${r.decompMs.toFixed(1)} ms</span></div>
+      <div class="result-row"><span class="result-label">Roundtrip</span>
+        <span class="result-val ${rtOk ? 'good' : 'bad'}">${rtOk ? 'PASS ✓ (byte-exact)' : 'FAIL — content mismatch'}</span></div>
+      ${gzipRow}
+      <div style="margin-top:10px;font-size:0.72rem;color:#484f58">
+        Browser WASM timings differ from the server-side CI numbers: the browser runs
+        MBFA single-threaded, while the CI binary uses all cores.
+      </div>`;
   }
 
-  // ── Load MBFA WASM (optional) ─────────────────────────────────────────────
-  (async () => {
-    try {
-      const mod = await import('../mbfa.js');
-      await mod.default('../mbfa_bg.wasm');
-      window.mbfa_compress   = mod.compress;
-      window.mbfa_decompress = mod.decompress;
-      // Update badge
-      const badge = document.getElementById('wasm-badge');
-      badge.textContent = 'MBFA WASM loaded ✓';
-      badge.className   = 'wasm-status loaded';
-      // Hide the instructions note
-      document.getElementById('wasm-instructions').style.display = 'none';
-      document.querySelector('.upload-desc').innerHTML +=
-        ' <strong style="color:#3fb950">MBFA WASM active.</strong>';
-    } catch(_) {
-      // WASM not available — graceful fallback shown in handleFile
-    }
-  })();
+  // ── Load MBFA WASM (optional: the page works without it) ─────────────────────
+  loadEngine();
 </script>
 </body>
   </html>

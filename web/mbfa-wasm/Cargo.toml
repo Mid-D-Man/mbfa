@@ -1,0 +1,35 @@
+# web/mbfa-wasm/Cargo.toml
+[package]
+name        = "mbfa-wasm"
+version     = "0.1.0"
+edition     = "2021"
+description = "WASM bindings for MBFA: a thin wrapper over the mbfa crate's compress/decompress, used by the Direct File Test on the special benchmark page"
+publish     = false
+
+# This crate lives inside the mbfa repo but is built on its own with wasm-pack.
+# An empty [workspace] table makes it its own workspace root, so cargo never
+# tries to treat it as a member of some parent workspace.
+[workspace]
+
+[lib]
+# cdylib: what wasm-bindgen / wasm-pack turn into the .wasm binary.
+# rlib alongside it keeps the crate usable from ordinary native tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# default-features = false is the whole point of this dependency line.
+# mbfa's default features are `parallel` (rayon: OS threads) and `archive`
+# (walkdir + sysinfo: filesystem and OS queries). None of that exists on
+# wasm32-unknown-unknown. Without them mbfa uses its serial `par` shim, which
+# was checked to produce byte-identical output to the parallel build.
+mbfa = { path = "../..", default-features = false }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+
+[profile.release]
+# Speed over size here, unlike a render-only wasm: compression is CPU-bound and
+# the module is downloaded once per visit, so the extra ~100 KB buys much more
+# than it costs. Switch to opt-level = "s" if download size ever matters more.
+opt-level = 3
+lto = true
+codegen-units = 1

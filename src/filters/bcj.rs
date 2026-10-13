@@ -149,22 +149,51 @@ pub fn detect_aout(data: &[u8], flag_x86: u8, flag_sparc: u8) -> Option<u8> {
     None
 }
 
-// ── BCJ x86 tables ────────────────────────────────────────────────────────────
+// ── BCJ x86 ───────────────────────────────────────────────────────────────────
+//
+// Port of the standard x86 BCJ filter (the one in xz / liblzma / 7-Zip). It
+// converts the 32-bit operand of E8 (CALL) and E9 (JMP) between relative form
+// (what the instruction stores) and absolute form (what compresses better,
+// because the same target is then the same bytes wherever it is called from).
+//
+// Two details make the transform an exact bijection, and an earlier version of
+// this file left both out:
+//
+//   1. The refinement loop (`loop { ... src = dest ^ mask }`). When an earlier
+//      E8/E9 lies within the last three bytes, the converted operand overlaps
+//      bytes the decoder will inspect to decide whether *that* earlier opcode
+//      was converted. The loop re-derives `dest` until the byte the decoder
+//      will look at is not 0x00/0xFF, so the decoder reaches the same decision
+//      as the encoder.
+//   2. Writing the result sign-extended from bit 24 (`dest &= 0x01FFFFFF;
+//      dest |= 0 - (dest & 0x01000000)`) in BOTH directions. Without it the
+//      decoder can restore 0xFE where the original byte was 0x00.
+//
+// Verified against liblzma's x86 filter (Python `lzma.FILTER_X86`) on the
+// Silesia `ooffice` DLL: encoder output is byte-identical, and each side
+// decodes the other's output exactly. Before this fix the encoder differed from
+// liblzma in 175 bytes of that file and the roundtrip lost 307 bytes.
 
 static MASK_TO_ALLOWED: [bool; 8] = [true, true, true, false, true, false, false, false];
 static MASK_TO_BIT:     [usize; 8] = [0, 1, 2, 2, 3, 3, 3, 3];
 
+/// True for the two "sign-extension" bytes of a plausible 25-bit displacement.
 #[inline(always)]
 fn is_near_operand_high_byte(b: u8) -> bool { b == 0x00 || b == 0xFF }
 
-// ── BCJ x86 encode ────────────────────────────────────────────────────────────
-
-pub fn bcj_x86_encode(data: &[u8]) -> Vec<u8> {
+/// Shared body of the x86 BCJ encoder and decoder. `encoding` selects the
+/// direction (relative -> absolute when true, absolute -> relative when false).
+///
+/// Decisions only ever read bytes at or after the current position, and every
+/// byte this function modifies lies before the next position it scans, so
+/// reading from `data` while writing to `out` is equivalent to the reference's
+/// in-place operation.
+fn bcj_x86_convert(data: &[u8], encoding: bool) -> Vec<u8> {
     let mut out = data.to_vec();
     let n = data.len();
     if n < 5 { return out; }
 
-    let size      = n - 4;
+    let size = n - 4;
     let mut i:         usize = 0;
     let mut prev_pos:  usize = usize::MAX;
     let mut prev_mask: usize = 0;
@@ -173,8 +202,10 @@ pub fn bcj_x86_encode(data: &[u8]) -> Vec<u8> {
         if data[i] & 0xFE != 0xE8 { i += 1; continue; }
 
         let dist = i.wrapping_sub(prev_pos);
-        if dist <= 3 {
-            prev_mask = (prev_mask << dist.wrapping_sub(1)) & 7;
+        if dist > 3 {
+            prev_mask = 0;
+        } else {
+            prev_mask = (prev_mask << (dist - 1)) & 7;
             if prev_mask != 0 {
                 let b = data[i + 4 - MASK_TO_BIT[prev_mask]];
                 if !MASK_TO_ALLOWED[prev_mask] || is_near_operand_high_byte(b) {
@@ -184,62 +215,24 @@ pub fn bcj_x86_encode(data: &[u8]) -> Vec<u8> {
                     continue;
                 }
             }
-        } else {
-            prev_mask = 0;
         }
         prev_pos = i;
 
         if is_near_operand_high_byte(data[i + 4]) {
-            let rel = i32::from_le_bytes([data[i+1], data[i+2], data[i+3], data[i+4]]);
-            let abs = rel.wrapping_add(i as i32 + 5) as u32;
-            let mut norm  = abs & 0x01FF_FFFF;
-            norm         |= 0u32.wrapping_sub(norm & 0x0100_0000);
-            out[i+1..i+5].copy_from_slice(&norm.to_le_bytes());
-            i += 4;
-        } else {
-            prev_mask = (prev_mask << 1) | 1;
-        }
-        i += 1;
-    }
-    out
-}
-
-// ── BCJ x86 decode ────────────────────────────────────────────────────────────
-
-pub fn bcj_x86_decode(data: &[u8]) -> Vec<u8> {
-    let mut out = data.to_vec();
-    let n = data.len();
-    if n < 5 { return out; }
-
-    let size      = n - 4;
-    let mut i:         usize = 0;
-    let mut prev_pos:  usize = usize::MAX;
-    let mut prev_mask: usize = 0;
-
-    while i < size {
-        if data[i] & 0xFE != 0xE8 { i += 1; continue; }
-
-        let dist = i.wrapping_sub(prev_pos);
-        if dist <= 3 {
-            prev_mask = (prev_mask << dist.wrapping_sub(1)) & 7;
-            if prev_mask != 0 {
-                let b = data[i + 4 - MASK_TO_BIT[prev_mask]];
-                if !MASK_TO_ALLOWED[prev_mask] || is_near_operand_high_byte(b) {
-                    prev_pos  = i;
-                    prev_mask = (prev_mask << 1) | 1;
-                    i        += 1;
-                    continue;
-                }
+            let mut src = u32::from_le_bytes([data[i + 1], data[i + 2], data[i + 3], data[i + 4]]);
+            let ip = (i as u32).wrapping_add(5);
+            let mut dest;
+            loop {
+                dest = if encoding { src.wrapping_add(ip) } else { src.wrapping_sub(ip) };
+                if prev_mask == 0 { break; }
+                let j = (MASK_TO_BIT[prev_mask] * 8) as u32;
+                let b = (dest >> (24 - j)) as u8;
+                if !is_near_operand_high_byte(b) { break; }
+                src = dest ^ ((1u32 << (32 - j)) - 1);
             }
-        } else {
-            prev_mask = 0;
-        }
-        prev_pos = i;
-
-        if is_near_operand_high_byte(data[i + 4]) {
-            let abs = u32::from_le_bytes([data[i+1], data[i+2], data[i+3], data[i+4]]);
-            let rel = abs.wrapping_sub(i as u32 + 5) as i32;
-            out[i+1..i+5].copy_from_slice(&rel.to_le_bytes());
+            dest &= 0x01FF_FFFF;
+            dest |= 0u32.wrapping_sub(dest & 0x0100_0000);
+            out[i + 1..i + 5].copy_from_slice(&dest.to_le_bytes());
             i += 4;
         } else {
             prev_mask = (prev_mask << 1) | 1;
@@ -248,6 +241,12 @@ pub fn bcj_x86_decode(data: &[u8]) -> Vec<u8> {
     }
     out
 }
+
+/// x86 BCJ, forward direction (relative -> absolute). Filter flag 9.
+pub fn bcj_x86_encode(data: &[u8]) -> Vec<u8> { bcj_x86_convert(data, true) }
+
+/// x86 BCJ, inverse direction (absolute -> relative). Filter flag 9.
+pub fn bcj_x86_decode(data: &[u8]) -> Vec<u8> { bcj_x86_convert(data, false) }
 
 // ── BCJ ARM 32-bit (flag 11) ──────────────────────────────────────────────────
 

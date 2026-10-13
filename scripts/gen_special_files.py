@@ -1167,6 +1167,490 @@ def gen_uasset():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+# ── Video containers ──────────────────────────────────────────────────────────
+#
+# Real codec output (H.264, VP9, MJPEG scan data) is close to incompressible, so
+# the coded-frame payloads below are seeded pseudo-random bytes: a stand-in, not
+# real video. What these files model faithfully is everything *around* the
+# payload, which is where a general-purpose compressor can still find
+# redundancy: box / element headers, per-frame length prefixes, sample tables
+# and indexes, parameter sets repeated at every keyframe, JPEG tables repeated
+# in every MJPEG frame, MPEG-TS packet headers and continuity counters.
+#
+# The one exception is Y4M, which is raw YUV and therefore genuinely
+# compressible (it is also the file that needs the largest match offsets).
+#
+# Every container is built to be structurally consistent -- box sizes, chunk
+# offsets, Matroska seek positions and AVI indexes all agree with the bytes --
+# so a real demuxer such as ffprobe can open them.
+
+def _rand_bytes(rng, n):
+    return rng.getrandbits(8 * n).to_bytes(n, "little") if n > 0 else b""
+
+
+def _frame_sizes(rng, n_frames, key_every, key_bytes, delta_bytes):
+    """Per-frame coded sizes: big keyframes, smaller log-normal delta frames."""
+    sizes = []
+    for i in range(n_frames):
+        if i % key_every == 0:
+            s = int(rng.gauss(key_bytes, key_bytes * 0.06))
+        else:
+            s = int(rng.lognormvariate(math.log(delta_bytes), 0.45))
+        sizes.append(max(256, s))
+    return sizes
+
+
+# ---- H.264 samples (length-prefixed "AVCC" form, as used in MP4 and MKV) -----
+
+_SPS = bytes.fromhex("6764001facd9405005bb011000000300100000030300f1831960")
+_PPS = bytes.fromhex("68ebe3cb22c0")
+
+_X264_TEXT = (
+    "x264 - core 164 r3095 baee400 - H.264/MPEG-4 AVC codec - Copyleft 2003-2022 - "
+    "http://www.videolan.org/x264.html - options: cabac=1 ref=3 deblock=1:0:0 "
+    "analyse=0x3:0x113 me=hex subme=7 psy=1 psy_rd=1.00:0.00 mixed_ref=1 me_range=16 "
+    "chroma_me=1 trellis=1 8x8dct=1 cqm=0 deadzone=21,11 fast_pskip=1 "
+    "chroma_qp_offset=-2 threads=3 lookahead_threads=1 sliced_threads=0 nr=0 "
+    "decimate=1 interlaced=0 bluray_compat=0 constrained_intra=0 bframes=3 "
+    "b_pyramid=2 b_adapt=1 b_bias=0 direct=1 weightb=1 open_gop=0 weightp=2 "
+    "keyint=250 keyint_min=25 scenecut=40 intra_refresh=0 rc_lookahead=40 rc=crf "
+    "mbtree=1 crf=23.0 qcomp=0.60 qpmin=0 qpmax=69 qpstep=4 ip_ratio=1.40 aq=1:1.00"
+)
+
+
+def _sei_user_data(text):
+    uuid = bytes.fromhex("dc45e9bde6d948b7962cd820d923eeef")  # x264's SEI UUID
+    body = uuid + text.encode("ascii") + b"\x00"
+    size = len(body)
+    return b"\x05" + b"\xff" * (size // 255) + bytes([size % 255]) + body + b"\x80"
+
+
+def _avc_nal(nal_type, ref_idc, body):
+    return struct.pack(">I", 1 + len(body)) + bytes([(ref_idc << 5) | nal_type]) + body
+
+
+def _h264_sample(rng, size, keyframe, frame_no, with_sei):
+    parts = []
+    used = 0
+    if with_sei:
+        sei = _avc_nal(6, 0, _sei_user_data(_X264_TEXT))
+        parts.append(sei)
+        used += len(sei)
+    if keyframe:
+        slice_hdr = b"\x88\x84\x21"
+    else:
+        slice_hdr = bytes([0x9A, 0x20 | (frame_no & 0x0F), 0x6C])
+    payload_len = max(0, size - used - 5 - len(slice_hdr))
+    parts.append(_avc_nal(5 if keyframe else 1, 3 if keyframe else 2,
+                          slice_hdr + _rand_bytes(rng, payload_len)))
+    return b"".join(parts)
+
+
+def _avcc_record():
+    return (bytes([1, _SPS[1], _SPS[2], _SPS[3], 0xFF, 0xE1])
+            + struct.pack(">H", len(_SPS)) + _SPS
+            + bytes([1]) + struct.pack(">H", len(_PPS)) + _PPS)
+
+
+# ---- ISO base media: MP4 / MOV ------------------------------------------------
+
+def _box(typ, payload=b""):
+    return struct.pack(">I4s", 8 + len(payload), typ) + payload
+
+
+def _fullbox(typ, version, flags, payload=b""):
+    return _box(typ, bytes([version]) + flags.to_bytes(3, "big") + payload)
+
+
+_MAC_EPOCH_2024 = 3786912000      # 2024-01-01T00:00:00Z, seconds since 1904
+_UNITY_MATRIX = struct.pack(">9I", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
+
+
+def _mp4_moov(width, height, timescale, delta, sizes, key_numbers, offsets, quicktime):
+    n = len(sizes)
+    movie_ts = 1000
+    dur_track = n * delta
+    dur_movie = dur_track * movie_ts // timescale
+    t = _MAC_EPOCH_2024
+
+    mvhd = _fullbox(b"mvhd", 0, 0,
+                    struct.pack(">IIII", t, t, movie_ts, dur_movie)
+                    + struct.pack(">I", 0x00010000) + struct.pack(">H", 0x0100)
+                    + b"\x00" * 10 + _UNITY_MATRIX + b"\x00" * 24
+                    + struct.pack(">I", 2))
+
+    tkhd = _fullbox(b"tkhd", 0, 3,
+                    struct.pack(">IIII", t, t, 1, 0) + struct.pack(">I", dur_movie)
+                    + b"\x00" * 8 + struct.pack(">hhhh", 0, 0, 0, 0)
+                    + _UNITY_MATRIX + struct.pack(">II", width << 16, height << 16))
+
+    mdhd = _fullbox(b"mdhd", 0, 0,
+                    struct.pack(">IIII", t, t, timescale, dur_track)
+                    + struct.pack(">HH", 0x55C4, 0))          # language 'und'
+
+    if quicktime:
+        hdlr = _fullbox(b"hdlr", 0, 0, b"mhlr" + b"vide" + b"appl"
+                        + struct.pack(">II", 0, 0) + b"\x0cVideoHandler")
+        dhlr = _fullbox(b"hdlr", 0, 0, b"dhlr" + b"alis" + b"appl"
+                        + struct.pack(">II", 0, 0) + b"\x0bDataHandler")
+    else:
+        hdlr = _fullbox(b"hdlr", 0, 0, struct.pack(">I4s", 0, b"vide")
+                        + b"\x00" * 12 + b"VideoHandler\x00")
+        dhlr = b""
+
+    vmhd = _fullbox(b"vmhd", 0, 1, struct.pack(">HHHH", 0, 0, 0, 0))
+    dinf = _box(b"dinf", _fullbox(b"dref", 0, 0,
+                                  struct.pack(">I", 1) + _fullbox(b"url ", 0, 1)))
+
+    avc1 = (b"\x00" * 6 + struct.pack(">H", 1)
+            + struct.pack(">HH", 0, 0) + b"\x00" * 12
+            + struct.pack(">HH", width, height)
+            + struct.pack(">II", 0x00480000, 0x00480000)
+            + struct.pack(">I", 0) + struct.pack(">H", 1)
+            + b"\x0aAVC Coding".ljust(32, b"\x00")
+            + struct.pack(">Hh", 0x18, -1)
+            + _box(b"avcC", _avcc_record()))
+    stsd = _fullbox(b"stsd", 0, 0, struct.pack(">I", 1) + _box(b"avc1", avc1))
+    stts = _fullbox(b"stts", 0, 0, struct.pack(">III", 1, n, delta))
+    stss = _fullbox(b"stss", 0, 0, struct.pack(">I", len(key_numbers))
+                    + b"".join(struct.pack(">I", k) for k in key_numbers))
+    stsc = _fullbox(b"stsc", 0, 0, struct.pack(">IIII", 1, 1, 1, 1))
+    stsz = _fullbox(b"stsz", 0, 0, struct.pack(">II", 0, n)
+                    + b"".join(struct.pack(">I", s) for s in sizes))
+    stco = _fullbox(b"stco", 0, 0, struct.pack(">I", n)
+                    + b"".join(struct.pack(">I", o) for o in offsets))
+    stbl = _box(b"stbl", stsd + stts + stss + stsc + stsz + stco)
+
+    minf = _box(b"minf", vmhd + dhlr + dinf + stbl)
+    trak = _box(b"trak", tkhd + _box(b"mdia", mdhd + hdlr + minf))
+
+    udta = b""
+    if not quicktime:
+        too = _box(b"\xa9too", _box(b"data", struct.pack(">II", 1, 0) + b"Lavf60.16.100"))
+        mdir = _fullbox(b"hdlr", 0, 0, struct.pack(">I4s", 0, b"mdir")
+                        + b"appl" + b"\x00" * 8 + b"\x00")
+        udta = _box(b"udta", _fullbox(b"meta", 0, 0, mdir + _box(b"ilst", too)))
+
+    return _box(b"moov", mvhd + trak + udta)
+
+
+def gen_mp4(faststart, seed, quicktime=False, n_frames=120, width=640, height=360,
+            key_every=30):
+    """H.264-style MP4 / MOV. faststart=True puts moov before mdat."""
+    rng = random.Random(seed)
+    plan = _frame_sizes(rng, n_frames, key_every, 14_000, 2_200)
+    samples = [_h264_sample(rng, sz, i % key_every == 0, i, i == 0)
+               for i, sz in enumerate(plan)]
+    sizes = [len(s) for s in samples]
+    keys = [i + 1 for i in range(n_frames) if i % key_every == 0]
+    mdat = _box(b"mdat", b"".join(samples))
+
+    if quicktime:
+        ftyp = _box(b"ftyp", b"qt  " + struct.pack(">I", 0x200) + b"qt  ")
+    else:
+        ftyp = _box(b"ftyp", b"isom" + struct.pack(">I", 0x200) + b"isomiso2avc1mp41")
+
+    def moov_for(first_sample_offset):
+        offsets, o = [], first_sample_offset
+        for s in sizes:
+            offsets.append(o)
+            o += s
+        return _mp4_moov(width, height, 15360, 512, sizes, keys, offsets, quicktime)
+
+    if faststart:
+        moov_len = len(moov_for(0))               # length does not depend on offsets
+        return ftyp + moov_for(len(ftyp) + moov_len + 8) + mdat
+    pad = _box(b"wide") if quicktime else _box(b"free")
+    return ftyp + pad + mdat + moov_for(len(ftyp) + len(pad) + 8)
+
+
+# ---- Matroska / WebM ----------------------------------------------------------
+
+def _ebml_vint(n):
+    for w in range(1, 9):
+        if n < (1 << (7 * w)) - 1:
+            return (n | (1 << (7 * w))).to_bytes(w, "big")
+    raise ValueError("EBML size too large")
+
+
+def _ebml_size8(n):
+    return (n | (1 << 56)).to_bytes(8, "big")
+
+
+def _el(eid, payload):
+    return eid + _ebml_vint(len(payload)) + payload
+
+
+def _uint_be(n, width=None):
+    if width is None:
+        width = max(1, (n.bit_length() + 7) // 8)
+    return n.to_bytes(width, "big")
+
+
+def _ebml_void(total):
+    """A Void element occupying exactly `total` bytes (total >= 129)."""
+    body = total - 1 - len(_ebml_vint(total - 3))
+    return b"\xEC" + _ebml_vint(body) + b"\x00" * body
+
+
+_ID_INFO, _ID_TRACKS, _ID_CUES = b"\x15\x49\xA9\x66", b"\x16\x54\xAE\x6B", b"\x1C\x53\xBB\x6B"
+
+
+def gen_matroska(webm, seed, n_frames=120, width=640, height=360, key_every=30):
+    """VP9-style WebM or H.264-style MKV with Cues and SeekHead consistent."""
+    rng = random.Random(seed)
+    key_bytes, delta_bytes = (12_000, 1_900) if webm else (14_000, 2_200)
+    plan = _frame_sizes(rng, n_frames, key_every, key_bytes, delta_bytes)
+
+    frames = []
+    for i, sz in enumerate(plan):
+        key = i % key_every == 0
+        if webm:
+            hdr = bytes([0x82 if key else 0x86, 0x49, 0x83 if key else 0x81])
+            data = hdr + _rand_bytes(rng, max(0, sz - 3))
+        else:
+            data = _h264_sample(rng, sz, key, i, i == 0)
+        frames.append((key, data))
+
+    ms = lambda i: round(i * 1000 / 30)
+    clusters = []                                   # (cluster_time_ms, element_bytes)
+    for c0 in range(0, n_frames, key_every):
+        tc = ms(c0)
+        body = _el(b"\xE7", _uint_be(tc))
+        for i in range(c0, min(c0 + key_every, n_frames)):
+            key, data = frames[i]
+            block = (b"\x81" + struct.pack(">h", ms(i) - tc)
+                     + bytes([0x80 if key else 0x00]) + data)
+            body += _el(b"\xA3", block)
+        clusters.append((tc, _el(b"\x1F\x43\xB6\x75", body)))
+
+    ebml = _el(b"\x1A\x45\xDF\xA3",
+               _el(b"\x42\x86", _uint_be(1)) + _el(b"\x42\xF7", _uint_be(1))
+               + _el(b"\x42\xF2", _uint_be(4)) + _el(b"\x42\xF3", _uint_be(8))
+               + _el(b"\x42\x82", b"webm" if webm else b"matroska")
+               + _el(b"\x42\x87", _uint_be(4)) + _el(b"\x42\x85", _uint_be(2)))
+
+    info = _el(_ID_INFO,
+               _el(b"\x2A\xD7\xB1", _uint_be(1_000_000))
+               + _el(b"\x4D\x80", b"Lavf60.16.100") + _el(b"\x57\x41", b"Lavf60.16.100")
+               + _el(b"\x44\x89", struct.pack(">d", float(ms(n_frames))))
+               + _el(b"\x73\xA4", _rand_bytes(rng, 16)))
+
+    video = _el(b"\xE0", _el(b"\xB0", _uint_be(width)) + _el(b"\xBA", _uint_be(height)))
+    entry = (_el(b"\xD7", _uint_be(1)) + _el(b"\x73\xC5", _rand_bytes(rng, 8))
+             + _el(b"\x83", _uint_be(1)) + _el(b"\x9C", _uint_be(0))
+             + _el(b"\x23\xE3\x83", _uint_be(33_333_333))
+             + _el(b"\x86", b"V_VP9" if webm else b"V_MPEG4/ISO/AVC")
+             + (b"" if webm else _el(b"\x63\xA2", _avcc_record()))
+             + video)
+    tracks = _el(_ID_TRACKS, _el(b"\xAE", entry))
+
+    def seek(sid, pos):
+        return _el(b"\x4D\xBB", _el(b"\x53\xAB", sid) + _el(b"\x53\xAC", _uint_be(pos, 4)))
+
+    def seekhead(p_info, p_tracks, p_cues):
+        return _el(b"\x11\x4D\x9B\x74",
+                   seek(_ID_INFO, p_info) + seek(_ID_TRACKS, p_tracks) + seek(_ID_CUES, p_cues))
+
+    void = _ebml_void(1024 if webm else 4096)
+    p_info = len(seekhead(0, 0, 0)) + len(void)
+    p_tracks = p_info + len(info)
+    pos = p_tracks + len(tracks)
+    cue_points = []
+    for tc, el in clusters:
+        cue_points.append(_el(b"\xBB", _el(b"\xB3", _uint_be(tc))
+                              + _el(b"\xB7", _el(b"\xF7", _uint_be(1))
+                                    + _el(b"\xF1", _uint_be(pos)))))
+        pos += len(el)
+    cues = _el(_ID_CUES, b"".join(cue_points))
+    payload = (seekhead(p_info, p_tracks, pos) + void + info + tracks
+               + b"".join(el for _, el in clusters) + cues)
+    return ebml + b"\x18\x53\x80\x67" + _ebml_size8(len(payload)) + payload
+
+
+# ---- AVI (MJPEG) --------------------------------------------------------------
+
+_STD_LUMA_Q = [
+    16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55,
+    14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62,
+    18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92,
+    49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
+]
+_STD_CHROMA_Q = (
+    [17, 18, 24, 47] + [99] * 4 + [18, 21, 26, 66] + [99] * 4
+    + [24, 26, 56] + [99] * 5 + [47, 66] + [99] * 6 + [99] * 32
+)
+
+
+def _jpeg_headers(width, height):
+    q = lambda tbl: bytes(max(1, (v * 30 + 50) // 100) for v in tbl)   # ~quality 85
+    dht = lambda cls_id, counts, symbols: (
+        b"\xFF\xC4" + struct.pack(">H", 2 + 1 + 16 + len(symbols))
+        + bytes([cls_id]) + bytes(counts) + bytes(symbols))
+    ac_symbols = [(r << 4) | s for r in range(16) for s in range(1, 11)] + [0x00, 0xF0]
+    random.Random(1234).shuffle(ac_symbols)
+    return (b"\xFF\xD8"
+            + b"\xFF\xE0" + struct.pack(">H", 16) + b"JFIF\x00\x01\x01\x00"
+            + struct.pack(">HH", 1, 1) + b"\x00\x00"
+            + b"\xFF\xDB" + struct.pack(">H", 67) + b"\x00" + q(_STD_LUMA_Q)
+            + b"\xFF\xDB" + struct.pack(">H", 67) + b"\x01" + q(_STD_CHROMA_Q)
+            + b"\xFF\xC0" + struct.pack(">H", 17) + b"\x08" + struct.pack(">HH", height, width)
+            + b"\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01"
+            + dht(0x00, [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0], range(12))
+            + dht(0x10, [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7D], ac_symbols)
+            + dht(0x01, [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0], range(12))
+            + dht(0x11, [0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77], ac_symbols)
+            + b"\xFF\xDA" + struct.pack(">H", 12) + b"\x03\x01\x00\x02\x11\x03\x11\x00\x3F\x00")
+
+
+def _riff_chunk(fourcc, data):
+    return fourcc + struct.pack("<I", len(data)) + data + (b"\x00" if len(data) % 2 else b"")
+
+
+def _riff_list(kind, children):
+    return b"LIST" + struct.pack("<I", 4 + len(children)) + kind + children
+
+
+def gen_mjpeg_avi(seed, n_frames=20, width=320, height=240):
+    rng = random.Random(seed)
+    headers = _jpeg_headers(width, height)            # identical in every frame
+    chunks, entries, offset = [], [], 4               # offsets count from the 'movi' fourcc
+    for i in range(n_frames):
+        scan = _rand_bytes(rng, max(1024, int(rng.gauss(18_000, 1_500)))).replace(b"\xff", b"\xff\x00")
+        frame = headers + scan + b"\xFF\xD9"
+        chunk = _riff_chunk(b"00dc", frame)
+        entries.append(struct.pack("<4sIII", b"00dc", 0x10, offset, len(frame)))
+        chunks.append(chunk)
+        offset += len(chunk)
+    max_frame = max(len(c) for c in chunks)
+
+    avih = struct.pack("<IIIIIIIIII4I", 33333, max_frame * 30, 0, 0x910, n_frames, 0, 1,
+                       max_frame, width, height, 0, 0, 0, 0)
+    strh = (b"vids" + b"MJPG" + struct.pack("<IHHIIIIIIIIhhhh", 0, 0, 0, 0, 1, 30, 0, n_frames,
+                                             max_frame, 0xFFFFFFFF, 0, 0, 0, width, height))
+    strf = struct.pack("<IiiHH4sIiiII", 40, width, height, 1, 24, b"MJPG",
+                       width * height * 3, 0, 0, 0, 0)
+    hdrl = _riff_list(b"hdrl", _riff_chunk(b"avih", avih)
+                      + _riff_list(b"strl", _riff_chunk(b"strh", strh) + _riff_chunk(b"strf", strf)))
+    junk = _riff_chunk(b"JUNK", b"\x00" * 1008)
+    info = _riff_list(b"INFO", _riff_chunk(b"ISFT", b"Lavf60.16.100\x00"))
+    movi = _riff_list(b"movi", b"".join(chunks))
+    idx1 = _riff_chunk(b"idx1", b"".join(entries))
+    body = b"AVI " + hdrl + junk + info + movi + idx1
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+# ---- MPEG transport stream ----------------------------------------------------
+
+def _crc32_mpeg(data):
+    crc = 0xFFFFFFFF
+    for b in data:
+        crc ^= b << 24
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x04C11DB7) & 0xFFFFFFFF if crc & 0x80000000 else (crc << 1) & 0xFFFFFFFF
+    return crc
+
+
+def _ts_psi(pid, section, cc):
+    section += struct.pack(">I", _crc32_mpeg(section))
+    payload = (b"\x00" + section).ljust(184, b"\xFF")
+    return bytes([0x47, 0x40 | (pid >> 8), pid & 0xFF, 0x10 | (cc & 0x0F)]) + payload
+
+
+def _pes_header(pts):
+    p = bytes([0x21 | ((pts >> 29) & 0x0E), (pts >> 22) & 0xFF,
+               ((pts >> 14) & 0xFE) | 1, (pts >> 7) & 0xFF, ((pts << 1) & 0xFE) | 1])
+    return b"\x00\x00\x01\xE0" + struct.pack(">H", 0) + b"\x80\x80\x05" + p
+
+
+def _ts_packets(pes, pid, cc, pcr=None, keyframe=False):
+    packets, pos, first = [], 0, True
+    while pos < len(pes):
+        remaining = len(pes) - pos
+        af = b""
+        if first and pcr is not None:
+            pcr_field = struct.pack(">Q", (pcr << 15) | (0x3F << 9))[2:]
+            af = bytes([7, 0x10 | (0x40 if keyframe else 0)]) + pcr_field
+        space = 184 - len(af)
+        if remaining < space:                         # stuff with an adaptation field
+            stuff = space - remaining
+            if af:
+                af = bytes([af[0] + stuff]) + af[1:] + b"\xFF" * stuff
+            elif stuff == 1:
+                af = b"\x00"
+            else:
+                af = bytes([stuff - 1, 0x00]) + b"\xFF" * (stuff - 2)
+            space = 184 - len(af)
+        chunk = pes[pos:pos + space]
+        pos += len(chunk)
+        hdr = bytes([0x47, (0x40 if first else 0) | (pid >> 8), pid & 0xFF,
+                     (0x30 if af else 0x10) | (cc & 0x0F)])
+        packets.append(hdr + af + chunk)
+        cc = (cc + 1) & 0x0F
+        first = False
+    return packets, cc
+
+
+def gen_mpegts(seed, n_frames=100, key_every=25):
+    rng = random.Random(seed)
+    plan = _frame_sizes(rng, n_frames, key_every, 14_000, 2_800)
+    pat = b"\x00" + struct.pack(">H", 0xB000 | 13) + struct.pack(">H", 1) + b"\xC1\x00\x00" \
+          + struct.pack(">HH", 1, 0xE000 | 0x1000)
+    pmt = b"\x02" + struct.pack(">H", 0xB000 | 18) + struct.pack(">H", 1) + b"\xC1\x00\x00" \
+          + struct.pack(">H", 0xE000 | 0x100) + struct.pack(">H", 0xF000) \
+          + bytes([0x1B]) + struct.pack(">HH", 0xE000 | 0x100, 0xF000)
+    sc = b"\x00\x00\x00\x01"
+    out, cc_vid, cc_pat, cc_pmt = [], 0, 0, 0
+    for i, size in enumerate(plan):
+        key = i % key_every == 0
+        if i % 5 == 0:                                # PSI repeated every 5 frames
+            out.append(_ts_psi(0, pat, cc_pat)); cc_pat = (cc_pat + 1) & 0x0F
+            out.append(_ts_psi(0x1000, pmt, cc_pmt)); cc_pmt = (cc_pmt + 1) & 0x0F
+        es = sc + b"\x09\xF0"                         # access unit delimiter
+        if key:
+            es += sc + _SPS + sc + _PPS
+        hdr = b"\x65\x88\x84\x21" if key else bytes([0x41, 0x9A, 0x20 | (i & 0x0F), 0x6C])
+        es += sc + hdr + _rand_bytes(rng, max(0, size - len(es) - len(sc) - len(hdr)))
+        pts = 90000 + i * 3000
+        pkts, cc_vid = _ts_packets(_pes_header(pts) + es, 0x100, cc_vid,
+                                   pcr=(pts - 6000) if key else None, keyframe=key)
+        out.extend(pkts)
+    return b"".join(out)
+
+
+# ---- Raw video: YUV4MPEG2 (genuinely compressible) ------------------------------
+
+def gen_y4m(width=176, height=144, n_frames=12, seed=11):
+    rng = random.Random(seed)
+    out = bytearray(f"YUV4MPEG2 W{width} H{height} F30:1 Ip A1:1 C420jpeg XYSCSS=420JPEG\n".encode())
+    cw, ch = width // 2, height // 2
+    noise = (-1, 0, 0, 1)
+    for f in range(n_frames):
+        out += b"FRAME\n"
+        bx = int((width - 24) * (0.5 + 0.5 * math.sin(f * 0.45)))
+        by = int((height - 24) * (0.5 + 0.5 * math.cos(f * 0.31)))
+        for y in range(height):                       # luma: gradient + checks + moving box + sensor noise
+            base = 40 + (y * 150) // height
+            row = bytearray()
+            for x in range(width):
+                v = base + (x * 30) // width + 8 * (((x >> 4) + (y >> 4)) & 1)
+                if bx <= x < bx + 24 and by <= y < by + 24:
+                    v = 235
+                v += noise[rng.getrandbits(2)]
+                row.append(min(235, max(16, v)))
+            out += row
+        for plane in (0, 1):                          # chroma: smooth gradients, box tinted
+            for y in range(ch):
+                row = bytearray()
+                for x in range(cw):
+                    v = 128 + (((x * 40) // cw) if plane == 0 else ((y * 40) // ch)) - 20
+                    if bx // 2 <= x < bx // 2 + 12 and by // 2 <= y < by // 2 + 12:
+                        v = 90 if plane == 0 else 170
+                    row.append(v)
+                out += row
+    return bytes(out)
+
+
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1229,6 +1713,24 @@ def main():
         "256KB: 50% non-zero structured payload + 50% zero padding, 64-byte period")
     out("Showcase_GameMap.bin",    gen_showcase_gamemap(width=256, height=256),
         "128KB: tile-based 2D map — ~85% empty (0x00), rooms+corridors")
+
+    print("\n── Video containers ─────────────────────────────────────────────")
+    out("clip_h264_faststart.mp4", gen_mp4(faststart=True, seed=21),
+        "MP4 (H.264-style) moov-first (faststart) — structured moov up front, random coded frames")
+    out("clip_h264.mp4",           gen_mp4(faststart=False, seed=22),
+        "MP4 (H.264-style) moov-last (ffmpeg default layout) — mdat first, moov at the end")
+    out("clip.mov",                gen_mp4(faststart=False, quicktime=True, seed=23),
+        "QuickTime MOV — wide + mdat, then moov (qt brand, mhlr/dhlr handlers)")
+    out("clip_vp9.webm",           gen_matroska(webm=True, seed=24),
+        "WebM (VP9-style) — EBML header, SeekHead, Cues, 1 s clusters, random coded frames")
+    out("clip_h264.mkv",           gen_matroska(webm=False, seed=25),
+        "Matroska (H.264-style) — Void padding, avcC CodecPrivate, Cues")
+    out("clip_mjpeg.avi",          gen_mjpeg_avi(seed=26),
+        "AVI MJPEG 320×240 — identical JPEG tables repeated in every frame, idx1 index")
+    out("clip.ts",                 gen_mpegts(seed=27),
+        "MPEG-TS H.264 — 188-byte packets, PAT/PMT repeated, continuity counters, PCR")
+    out("clip_raw.y4m",            gen_y4m(),
+        "Raw YUV4MPEG2 4:2:0 176×144 ×12 frames — uncompressed (the compressible video case)")
 
     manifest_path = os.path.join(args.output_dir, "special_manifest.json")
     with open(manifest_path, "w") as f:

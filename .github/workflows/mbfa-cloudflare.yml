@@ -1,0 +1,248 @@
+# .github/workflows/mbfa-cloudflare.yml
+#
+# Publishes the mbfa site on Cloudflare Pages.
+#
+# How the mbfa site is put together: there is no single "site build". Six
+# workflows (Build & Benchmark, Canterbury, Special, Archive, Silesia, WASM)
+# each add their own folder to the gh-pages branch, so that branch is the
+# accumulated site. Cloudflare Pages direct uploads are full snapshots (a deploy
+# of one folder would replace everything else), so no individual workflow can
+# deploy "its" folder. Instead this workflow takes whatever is on gh-pages and
+# deploys it as one Pages deployment.
+#
+# When it runs:
+#   * after any of those six workflows finishes successfully, but only if that
+#     run actually changed gh-pages (most pushes publish nothing, and those are
+#     skipped in a few seconds);
+#   * on demand: Actions -> "MBFA Cloudflare Pages" -> Run workflow (always
+#     deploys the current gh-pages).
+#
+# One-time setup, in THIS repo (secrets do not carry over from msx unless you
+# made them organisation-level):
+#   Settings -> Secrets and variables -> Actions -> New repository secret
+#     CLOUDFLARE_API_TOKEN   a token with "Cloudflare Pages: Edit"
+#     CLOUDFLARE_ACCOUNT_ID  from the Cloudflare dashboard's right sidebar
+#   Optional repository variable:
+#     CF_PAGES_PROJECT       Pages project name (default: mbfa). Project names
+#                            are unique across Cloudflare; if "mbfa" is taken,
+#                            set this to something else.
+# Until the secrets exist the workflow skips itself with a warning instead of
+# failing every run (a manual run does fail, so you notice).
+#
+# Like msx's cloudflare-pages.yml, this runs alongside GitHub Pages rather than
+# replacing it. Once the Cloudflare URL is confirmed serving real traffic,
+# retire GitHub Pages deliberately (Settings -> Pages). Keep the gh-pages
+# *branch*: it is the site's state, and this workflow reads it.
+name: MBFA Cloudflare Pages
+
+on:
+  workflow_run:
+    workflows:
+      - "MBFA Build & Benchmark"
+      - "MBFA Canterbury Corpus Benchmark"
+      - "MBFA Special Benchmark"
+      - "MBFA Archive Benchmark"
+      - "MBFA Silesia Corpus Benchmark"
+      - "MBFA WASM"
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write   # lets wrangler-action record the deployment on GitHub
+
+# One deployment at a time; a newer queued run replaces an older queued one, and
+# each run snapshots gh-pages when it starts, so the last one always wins.
+concurrency:
+  group: mbfa-cloudflare-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy gh-pages to Cloudflare Pages
+    runs-on: ubuntu-latest
+    # A completed workflow_run that failed or was cancelled published nothing;
+    # pull-request runs never touch gh-pages.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event != 'pull_request')
+    env:
+      PROJECT: ${{ vars.CF_PAGES_PROJECT || 'mbfa' }}
+
+    steps:
+      - name: Check the Cloudflare secrets exist
+        id: secrets
+        env:
+          EVENT: ${{ github.event_name }}
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CF_TOKEN" ] || [ -z "$CF_ACCOUNT" ]; then
+            MSG="Add CLOUDFLARE_API_TOKEN (Cloudflare Pages: Edit) and CLOUDFLARE_ACCOUNT_ID under Settings > Secrets and variables > Actions in this repo. msx's secrets do not carry over unless they are organisation-level."
+            if [ "$EVENT" = "workflow_dispatch" ]; then
+              echo "::error title=Cloudflare secrets missing::$MSG"
+              exit 1
+            fi
+            echo "::warning title=Cloudflare secrets missing, skipping::$MSG"
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "have=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the published site (gh-pages)
+        if: steps.secrets.outputs.have == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 1
+
+      # Most completed runs publish nothing (a push without a benchmark flag).
+      # Deploy only if gh-pages was committed to during the triggering run.
+      - name: Did the triggering run publish anything?
+        id: gate
+        if: steps.secrets.outputs.have == 'true'
+        env:
+          EVENT: ${{ github.event_name }}
+          TRIGGER: ${{ github.event.workflow_run.name }}
+          RUN_STARTED: ${{ github.event.workflow_run.run_started_at }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "Manual run: deploying the current gh-pages."
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          COMMIT_TS=$(git log -1 --format=%ct)
+          START_TS=$(date -d "$RUN_STARTED" +%s 2>/dev/null || echo 0)
+          COMMIT_ISO=$(date -u -d "@$COMMIT_TS" +%Y-%m-%dT%H:%M:%SZ)
+          if [ "$START_TS" -eq 0 ]; then
+            echo "Could not read when '$TRIGGER' started; deploying to be safe."
+            deploy=true
+          elif [ "$COMMIT_TS" -ge $((START_TS - 120)) ]; then
+            # 120 s of slack for clock differences between GitHub and the runner
+            echo "gh-pages changed at $COMMIT_ISO, after '$TRIGGER' started ($RUN_STARTED): deploying."
+            deploy=true
+          else
+            echo "'$TRIGGER' published nothing new (gh-pages last changed $COMMIT_ISO, before it started at $RUN_STARTED): nothing to deploy."
+            deploy=false
+          fi
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble the site
+        id: assemble
+        if: steps.gate.outputs.deploy == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p cf_site
+          tar --exclude='./.git' --exclude='./cf_site' -cf - . | tar -xf - -C cf_site
+          test -f cf_site/index.html || { echo "::error::gh-pages has no index.html"; exit 1; }
+
+          # Without a top-level 404.html, Cloudflare Pages behaves like a
+          # single-page app and answers EVERY unknown path with index.html and
+          # status 200. That would make a missing file (mbfa.js before the wasm
+          # is published, say) look present, so ship a real 404 page.
+          if [ ! -f cf_site/404.html ]; then
+            cat > cf_site/404.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>Not found | MBFA</title>
+          <body style="font-family:system-ui,sans-serif;background:#0d1117;color:#c9d1d9;padding:3rem">
+          <h1>404</h1>
+          <p>That page is not part of the MBFA benchmark site.</p>
+          <p><a href="/" style="color:#58a6ff">Back to the benchmark report</a></p>
+          HTML
+          fi
+
+          # Which gh-pages commit this deployment was built from.
+          git rev-parse HEAD > cf_site/deployed-from.txt
+
+          FILES=$(find cf_site -type f | wc -l)
+          BIG=$(find cf_site -type f -size +25M | wc -l)
+          echo "Files to upload: $FILES (Pages limit 20,000); files over 25 MiB: $BIG"
+          if [ "$FILES" -gt 20000 ] || [ "$BIG" -gt 0 ]; then
+            echo "::error::the site exceeds Cloudflare Pages direct-upload limits"
+            exit 1
+          fi
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+
+      - name: Create the Cloudflare Pages project if missing
+        if: steps.gate.outputs.deploy == 'true'
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command:   pages project create ${{ env.PROJECT }} --production-branch=main
+        continue-on-error: true   # already exists on every run after the first
+
+      # --branch=main is explicit on purpose: this job has gh-pages checked out,
+      # and wrangler would otherwise use that branch name and publish a
+      # *preview* deployment instead of the production one.
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        if: steps.gate.outputs.deploy == 'true'
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId:   ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command:     pages deploy cf_site --project-name=${{ env.PROJECT }} --branch=main
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify the deployment serves the site
+        if: steps.gate.outputs.deploy == 'true'
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: |
+          if [ -z "${DEPLOY_URL:-}" ]; then
+            echo "::notice::wrangler did not report a deployment URL; skipping the live check"
+            exit 0
+          fi
+          URL="${DEPLOY_URL%/}"
+          echo "Checking $URL"
+          fail=0
+          get_code() {
+            curl -s -o /dev/null -w '%{http_code}' --retry 6 --retry-delay 5 --retry-all-errors "$URL/$1"
+          }
+
+          # Every section that exists in this snapshot must answer 200.
+          for p in index.html special/index.html corpus/index.html archive/index.html silesia/index.html; do
+            [ -f "cf_site/$p" ] || continue
+            code=$(get_code "$p")
+            echo "  $p -> $code"
+            [ "$code" = "200" ] || fail=1
+          done
+
+          # The in-browser wasm module, if it has been published.
+          if [ -f cf_site/mbfa_bg.wasm ]; then
+            code=$(get_code mbfa.js); echo "  mbfa.js -> $code"; [ "$code" = "200" ] || fail=1
+            ctype=$(curl -sI --retry 3 --retry-all-errors "$URL/mbfa_bg.wasm" | tr -d '\r' | awk 'tolower($1)=="content-type:"{print $2}')
+            echo "  mbfa_bg.wasm content-type -> ${ctype:-none}"
+            [ "$ctype" = "application/wasm" ] || fail=1
+          else
+            echo "  (wasm not published yet: run Actions -> MBFA WASM)"
+          fi
+
+          # A missing path must be a real 404 (proves 404.html is in effect), because
+          # the special page's wasm check relies on it.
+          code=$(get_code "this-file-does-not-exist.js"); echo "  missing path -> $code"
+          [ "$code" = "404" ] || echo "::warning::unknown paths return $code, not 404; the special page cannot tell a missing mbfa.js from a present one"
+
+          [ "$fail" -eq 0 ] || { echo "::error::the deployment is missing pages or serves them wrongly"; exit 1; }
+          echo "Deployment verified"
+
+      - name: Summary
+        if: steps.gate.outputs.deploy == 'true'
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.deployment-url }}
+          ALIAS_URL: ${{ steps.deploy.outputs.pages-deployment-alias-url }}
+          PAGES_ENV: ${{ steps.deploy.outputs.pages-environment }}
+          FILES: ${{ steps.assemble.outputs.files }}
+        run: |
+          {
+            echo "## MBFA site on Cloudflare Pages"
+            echo ""
+            echo "- Project: \`$PROJECT\` (environment: ${PAGES_ENV:-unknown})"
+            echo "- This deployment: ${DEPLOY_URL:-unknown}"
+            echo "- Alias: ${ALIAS_URL:-unknown}"
+            echo "- Built from gh-pages commit: \`$(git rev-parse --short HEAD)\` ($FILES files)"
+            echo "- Triggered by: ${{ github.event_name == 'workflow_dispatch' && 'manual run' || github.event.workflow_run.name }}"
+          } >> "$GITHUB_STEP_SUMMARY"

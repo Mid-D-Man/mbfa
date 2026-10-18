@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MBFA — Silesia Corpus | Build #7</title>
+  <title>MBFA — Silesia Corpus | Build #11</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 32px 24px; }
@@ -80,6 +80,20 @@
     .badge-bin    { background:#1c2128; color:#8b949e; border:1px solid #30363d; }
     .badge-exe    { background:#2a0f0f; color:#f85149; border:1px solid #5a1a1a; }
 
+    /* Wide tables (extra baselines) scroll sideways inside their own box, with the file name pinned. */
+    .table-wrap { overflow-x: auto; margin-bottom: 32px; border-radius: 8px; }
+    .table-wrap table { margin-bottom: 0; min-width: 760px; }
+    .table-wrap.wide table { min-width: 1500px; }
+    th.pin, td.pin { position: sticky; left: 0; background: #161b22; z-index: 1; }
+    thead tr th.pin { background: #1c2128; }
+    tbody tr:hover td.pin { background: #1c2128; }
+    .chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 0.74rem; color: #8b949e; }
+    .chip { background: #21262d; border: 1px solid #30363d; color: #8b949e; padding: 3px 10px;
+      border-radius: 12px; cursor: pointer; font-size: 0.74rem; }
+    .chip.on { background: #0f1e3a; border-color: #1f4080; color: #e6edf3; }
+    .rt-bad { color: #f85149; font-weight: 700; }
+    .rank-of { color: #484f58; font-size: 0.68rem; }
+
     .bar-row { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; }
     .bar { height: 6px; border-radius: 3px; min-width: 1px; }
 
@@ -113,7 +127,7 @@
     .timing-card .t-sub   { font-size: 0.68rem; color: #484f58; margin-top: 2px; }
 
     .cmp-row { display: flex; flex-direction: column; gap: 7px; }
-    .cmp-item { display: grid; grid-template-columns: 60px 1fr 52px 68px 52px 52px;
+    .cmp-item { display: grid; grid-template-columns: 74px 1fr 52px 68px 62px 52px;
       align-items: center; gap: 7px; }
     .cmp-label { font-size: 0.76rem; }
     .cmp-track { background: #0d1117; border-radius: 3px; height: 9px; overflow: hidden; }
@@ -146,15 +160,15 @@
     <h1>&#x1F4DA; MBFA <span>&#x2014; Silesia Corpus Benchmark</span></h1>
     <p style="color:#8b949e;margin-top:5px">MidManStudio | Standard compression research benchmark suite</p>
     <div class="meta">
-      <div class="meta-item"><strong>Build:</strong> #7</div>
+      <div class="meta-item"><strong>Build:</strong> #11</div>
       <div class="meta-item"><strong>Branch:</strong> master</div>
-      <div class="meta-item"><strong>Commit:</strong> 494b6fdc</div>
-      <div class="meta-item"><strong>Date:</strong> Fri Oct 16 21:13:38 UTC 2026</div>
+      <div class="meta-item"><strong>Commit:</strong> 60d1c89f</div>
+      <div class="meta-item"><strong>Date:</strong> Sun Oct 18 10:05:39 UTC 2026</div>
     </div>
   </header>
 
   <div class="about">
-    <strong>The Silesia Corpus</strong> (Deorowicz, 2003) is a standard benchmark for larger files: 12 real-world files, 211,938,580 bytes in total, covering English prose, HTML, source and executable tarballs, database dumps, medical images, a star catalogue, XML and a PDF. It stresses what Canterbury cannot: multi-megabyte inputs. Baselines run at their command-line defaults (gzip -6, zstd -3, xz -6, brotli -11, zpaq method 2). Lower % = better compression. <span style="color:#79c0ff">C</span> = compress ms,
+    <strong>The Silesia Corpus</strong> (Deorowicz, 2003) is a standard benchmark for larger files: 12 real-world files, 211,938,580 bytes in total, covering English prose, HTML, source and executable tarballs, database dumps, medical images, a star catalogue, XML and a PDF. It stresses what Canterbury cannot: multi-megabyte inputs. Baselines run at their command-line defaults (gzip -6, zstd -3, xz -6, brotli -11, zpaq method 2); the extra columns run other well-known codecs at their strongest practical setting (lz4 -9, bzip2 -9, bzip3, zstd -19 --long=27, xz -9e, 7-Zip PPMd, zopfli), single-threaded. Lower % = better compression. <span style="color:#79c0ff">C</span> = compress ms,
     <span style="color:#a371f7">D</span> = decompress ms.
     All MBFA roundtrips must pass for results to be valid.
   </div>
@@ -220,6 +234,7 @@
     <div class="legend-item"><div class="dot" style="background:#e3b341"></div>xz</div>
     <div class="legend-item"><div class="dot" style="background:#3fb950"></div>brotli</div>
     <div class="legend-item"><div class="dot" style="background:#ff7b72"></div>zpaq</div>
+    <span id="legend-extra" style="display:contents"></span>
     <div class="legend-item" style="margin-left:auto;font-size:0.72rem;color:#484f58">
       <span style="color:#79c0ff">C</span> = compress ms &nbsp;
       <span style="color:#a371f7">D</span> = decompress ms &nbsp;
@@ -228,26 +243,18 @@
   </div>
   <p class="click-hint">&#x1F4A1; Click any row for breakdown, timing detail, and fold pipeline</p>
 
+  <div class="chips" id="extra-chips" style="display:none"></div>
+  <div class="table-wrap" id="table-wrap">
   <table>
     <thead>
-      <tr>
-        <th>File</th>
-        <th>Size</th>
-        <th>MBFA</th>
-        <th>gzip</th>
-        <th>zstd</th>
-        <th>xz</th>
-        <th>brotli</th>
-        <th>zpaq</th>
-        <th>Rank</th>
-        <th>Bars</th>
-      </tr>
+      <tr id="thead-row"></tr>
     </thead>
     <tbody id="tbody"></tbody>
   </table>
+  </div>
 
   <footer>
-    MBFA Silesia Corpus — MidManStudio — Build #7
+    MBFA Silesia Corpus — MidManStudio — Build #11
   </footer>
 </div>
 
@@ -318,11 +325,148 @@
     return `#${r}`;
   }
 
+  // The original six tools keep their flat fields (gzip_pct, gzip_ms ...). Extra baselines,
+  // when a results.json has them, live under row.extra[key] = {label, cmd, bytes, pct, ms,
+  // dms, rt}; older results.json files simply have none and render as before.
+  const CORE = [
+    {k:'mbfa',   label:'MBFA'},   {k:'gzip', label:'gzip'}, {k:'zstd', label:'zstd'},
+    {k:'xz',     label:'xz'},     {k:'brotli', label:'brotli'}, {k:'zpaq', label:'zpaq'},
+  ];
+  const EXTRA_ORDER = ['lz4', 'bzip2', 'bzip3', 'zstd19', 'xz9e', 'ppmd', 'zopfli'];
+  Object.assign(COLORS, {
+    lz4:'#8b949e', bzip2:'#56d4dd', bzip3:'#7ee787', zstd19:'#d2a8ff',
+    xz9e:'#f2cc60', ppmd:'#ffa657', zopfli:'#b1bac4'
+  });
+  const EXTRA_FALLBACK = ['#58a6ff', '#ff9bce', '#9be9a8', '#e3b341'];
+  function colorOf(k) {
+    if (!COLORS[k]) COLORS[k] = EXTRA_FALLBACK[Object.keys(COLORS).length % EXTRA_FALLBACK.length];
+    return COLORS[k];
+  }
+
+  let extraKeys = [];            // extra tools present in this results.json, display order
+  const extraLabel = {};         // key -> short label
+  const extraCmd   = {};         // key -> command line (tooltip)
+  const hiddenExtras = new Set();
+
+  // Every tool with a usable number for this row: the six core tools, then the visible extras.
+  // includeHidden = true gives the full set (ranking and "wins" ignore the visibility chips).
+  function toolsOf(row, includeHidden) {
+    const out = CORE.map(c => ({
+      k:c.k, label:c.label, pct:row[c.k + '_pct'], bytes:row[c.k + '_bytes'],
+      cMs:row[c.k + '_ms'], dMs:row[c.k + '_decomp_ms'], extra:false
+    }));
+    const ex = row.extra || {};
+    extraKeys.forEach(k => {
+      const e = ex[k];
+      if (!e || e.bytes === null || e.bytes === undefined) return;
+      if (!includeHidden && hiddenExtras.has(k)) return;
+      out.push({k, label:e.label || k, pct:e.pct, bytes:e.bytes, cMs:e.ms, dMs:e.dms,
+                extra:true, rtBad:e.rt === false});
+    });
+    return out.filter(t => t.pct !== undefined && t.pct !== null && !isNaN(parseFloat(t.pct)));
+  }
+
+  // 1 + the number of tools that beat MBFA strictly; ties share the better place, like the CI's rank.
+  function rankOf(row) {
+    const all = toolsOf(row, true);
+    const m = parseFloat(row.mbfa_pct);
+    return 1 + all.filter(t => t.k !== 'mbfa' && parseFloat(t.pct) < m).length;
+  }
+
+  function render() {
+    const data = allData;
+    const hasExtras = extraKeys.length > 0;
+    document.getElementById('table-wrap').classList.toggle('wide', hasExtras);
+
+    // a column exists for every core tool and for every extra tool that has a number in some row
+    const shown = new Set();
+    data.forEach(row => toolsOf(row, false).forEach(t => shown.add(t.k)));
+    const cols = CORE.map(c => c.k).concat(extraKeys.filter(k => shown.has(k)));
+    document.getElementById('thead-row').innerHTML =
+      '<th class="pin">File</th><th>Size</th>' +
+      cols.map(k => {
+        const label = CORE.find(c => c.k === k) ? CORE.find(c => c.k === k).label : (extraLabel[k] || k);
+        const tip = extraCmd[k] ? ` title="${extraCmd[k]}"` : '';
+        return `<th${tip}>${label}</th>`;
+      }).join('') + '<th>Rank</th><th>Bars</th>';
+
+    const tbody = document.getElementById('tbody');
+    tbody.innerHTML = '';
+
+    data.forEach((row, idx) => {
+      const tools = toolsOf(row, false);
+      const byKey = {};
+      tools.forEach(t => byKey[t.k] = t);
+      const allTools = toolsOf(row, true);
+      const best  = Math.min(...allTools.map(t => parseFloat(t.pct)));
+      const rank  = rankOf(row);
+      const scale = v => Math.min(130, Math.round(parseFloat(v) * 1.3));
+
+      function cell(k) {
+        const t = byKey[k];
+        if (!t) return '<td class="sub">&mdash;</td>';
+        const isB = parseFloat(t.pct) <= best;
+        const color = colorOf(k);
+        return `<td style="color:${isB ? color : ''}" class="${isB ? 'win' : ''}">
+          ${t.pct}%${t.rtBad ? ' <span class="rt-bad" title="did not round-trip">!</span>' : ''}<br>
+          <span class="sub" style="color:#79c0ff">C:${t.cMs !== undefined ? t.cMs : '—'}ms</span>
+          <span class="sub-decomp"> D:${t.dMs !== undefined ? t.dMs + 'ms' : '—'}</span>
+        </td>`;
+      }
+
+      const tr = document.createElement('tr');
+      tr.dataset.idx = idx;
+      tr.innerHTML =
+        `<td class="pin" style="font-weight:600">${row.file}
+           <span class="badge ${badgeCls(row.type)}">${row.type}</span></td>` +
+        `<td>${fmtBytes(row.original_bytes)}</td>` +
+        cols.map(cell).join('') +
+        `<td class="${rankClass(rank)}">${rankEmoji(rank)}${hasExtras ? `<div class="rank-of">of ${allTools.length}</div>` : ''}</td>` +
+        `<td>${tools.map(t =>
+              `<div class="bar-row">
+                 <div class="bar" style="background:${colorOf(t.k)};width:${scale(t.pct)}px"></div>
+                 <span style="font-size:0.70rem;color:${colorOf(t.k)}">${t.pct}%</span>
+               </div>`).join('')}</td>`;
+
+      tr.addEventListener('click', () => openModal(idx));
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderChips() {
+    const box = document.getElementById('extra-chips');
+    if (!extraKeys.length) { box.style.display = 'none'; return; }
+    box.style.display = 'flex';
+    box.innerHTML = '<span>Extra baselines:</span>' + extraKeys.map(k =>
+      `<button class="chip ${hiddenExtras.has(k) ? '' : 'on'}" data-k="${k}" title="${extraCmd[k] || ''}"
+         style="${hiddenExtras.has(k) ? '' : 'border-left:3px solid ' + colorOf(k)}">${extraLabel[k] || k}</button>`
+    ).join('');
+    box.querySelectorAll('.chip').forEach(b => b.addEventListener('click', () => {
+      const k = b.dataset.k;
+      if (hiddenExtras.has(k)) hiddenExtras.delete(k); else hiddenExtras.add(k);
+      renderChips();
+      render();
+    }));
+    document.getElementById('legend-extra').innerHTML = extraKeys.map(k =>
+      `<div class="legend-item"><div class="dot" style="background:${colorOf(k)}"></div>${extraLabel[k] || k}</div>`
+    ).join('');
+  }
+
   fetch('results.json')
     .then(r => r.json())
     .then(data => {
       allData = data;
-      const tbody = document.getElementById('tbody');
+
+      // Which extra tools does this results.json carry?
+      const seen = new Set();
+      data.forEach(row => Object.keys(row.extra || {}).forEach(k => {
+        seen.add(k);
+        const e = row.extra[k];
+        if (e && e.label) extraLabel[k] = e.label;
+        if (e && e.cmd)   extraCmd[k]   = e.cmd;
+      }));
+      extraKeys = EXTRA_ORDER.filter(k => seen.has(k))
+                    .concat([...seen].filter(k => !EXTRA_ORDER.includes(k)));
 
       // Summary stats
       const n = data.length;
@@ -332,14 +476,10 @@
 
       data.forEach(row => {
         const m = parseFloat(row.mbfa_pct);
-        const g = parseFloat(row.gzip_pct);
-        const z = parseFloat(row.zstd_pct);
-        const x = parseFloat(row.xz_pct);
-        const b = parseFloat(row.brotli_pct);
-        const p = parseFloat(row.zpaq_pct);
-        if (m <= Math.min(g, z, x, b, p)) wins++;
+        const others = toolsOf(row, true).filter(t => t.k !== 'mbfa').map(t => parseFloat(t.pct));
+        if (m <= Math.min(...others)) wins++;
         if (row.mbfa_roundtrip === 'PASS') rtPass++;
-        sumMbfa += m; sumGzip += g; sumZstd += z;
+        sumMbfa += m; sumGzip += parseFloat(row.gzip_pct); sumZstd += parseFloat(row.zstd_pct);
         sumCtime += (row.mbfa_ms || 0);
         if (row.mbfa_decomp_ms !== undefined) {
           sumDtime += row.mbfa_decomp_ms;
@@ -364,51 +504,8 @@
       gEl.className = 'value ' + (parseFloat(vg) <= 0 ? 'win' : 'loss');
       zEl.className = 'value ' + (parseFloat(vz) <= 0 ? 'win' : 'loss');
 
-      data.forEach((row, idx) => {
-        const m    = parseFloat(row.mbfa_pct);
-        const best = Math.min(m, parseFloat(row.gzip_pct), parseFloat(row.zstd_pct),
-                              parseFloat(row.xz_pct), parseFloat(row.brotli_pct),
-                              parseFloat(row.zpaq_pct));
-        const rank  = row.mbfa_rank;
-        const scale = v => Math.min(130, Math.round(parseFloat(v) * 1.3));
-
-        function cell(pct, color, cMs, dMs) {
-          const isB = parseFloat(pct) <= best;
-          return `<td style="color:${isB ? color : ''}" class="${isB ? 'win' : ''}">
-            ${pct}%<br>
-            <span class="sub" style="color:#79c0ff">C:${cMs}ms</span>
-            <span class="sub-decomp"> D:${dMs !== undefined ? dMs+'ms' : '—'}</span>
-          </td>`;
-        }
-
-        const tr = document.createElement('tr');
-        tr.dataset.idx = idx;
-        tr.innerHTML =
-          `<td style="font-weight:600">${row.file}
-             <span class="badge ${badgeCls(row.type)}">${row.type}</span></td>` +
-          `<td>${fmtBytes(row.original_bytes)}</td>` +
-          cell(row.mbfa_pct,   COLORS.mbfa,   row.mbfa_ms,   row.mbfa_decomp_ms) +
-          cell(row.gzip_pct,   COLORS.gzip,   row.gzip_ms,   row.gzip_decomp_ms) +
-          cell(row.zstd_pct,   COLORS.zstd,   row.zstd_ms,   row.zstd_decomp_ms) +
-          cell(row.xz_pct,     COLORS.xz,     row.xz_ms,     row.xz_decomp_ms)   +
-          cell(row.brotli_pct, COLORS.brotli, row.brotli_ms, row.brotli_decomp_ms)+
-          cell(row.zpaq_pct,   COLORS.zpaq,   row.zpaq_ms,   row.zpaq_decomp_ms)  +
-          `<td class="${rankClass(rank)}">${rankEmoji(rank)}</td>` +
-          `<td>
-            ${Object.entries({
-                mbfa:row.mbfa_pct, gzip:row.gzip_pct, zstd:row.zstd_pct,
-                xz:row.xz_pct, brotli:row.brotli_pct, zpaq:row.zpaq_pct
-              }).map(([k,v]) =>
-                `<div class="bar-row">
-                   <div class="bar" style="background:${COLORS[k]};width:${scale(v)}px"></div>
-                   <span style="font-size:0.70rem;color:${COLORS[k]}">${v}%</span>
-                 </div>`
-              ).join('')}
-          </td>`;
-
-        tr.addEventListener('click', () => openModal(idx));
-        tbody.appendChild(tr);
-      });
+      renderChips();
+      render();
     })
     .catch(e => {
       document.getElementById('tbody').innerHTML =
@@ -461,21 +558,14 @@
           : ''}</div>
       </div>`;
 
-    const algos = [
-      {k:'mbfa',   pct:row.mbfa_pct,   bytes:row.mbfa_bytes,   cMs:row.mbfa_ms,   dMs:row.mbfa_decomp_ms},
-      {k:'gzip',   pct:row.gzip_pct,   bytes:row.gzip_bytes,   cMs:row.gzip_ms,   dMs:row.gzip_decomp_ms},
-      {k:'zstd',   pct:row.zstd_pct,   bytes:row.zstd_bytes,   cMs:row.zstd_ms,   dMs:row.zstd_decomp_ms},
-      {k:'xz',     pct:row.xz_pct,     bytes:row.xz_bytes,     cMs:row.xz_ms,     dMs:row.xz_decomp_ms},
-      {k:'brotli', pct:row.brotli_pct, bytes:row.brotli_bytes, cMs:row.brotli_ms, dMs:row.brotli_decomp_ms},
-      {k:'zpaq',   pct:row.zpaq_pct,   bytes:row.zpaq_bytes,   cMs:row.zpaq_ms,   dMs:row.zpaq_decomp_ms},
-    ];
+    const algos = toolsOf(row, true);
     const maxPct = Math.max(...algos.map(a => parseFloat(a.pct)));
 
     document.getElementById('modal-cmp').innerHTML = algos.map(a => {
       const w = Math.min(100, (parseFloat(a.pct)/maxPct)*100).toFixed(1);
-      const c = COLORS[a.k];
+      const c = colorOf(a.k);
       return `<div class="cmp-item">
-        <div class="cmp-label" style="color:${c}">${a.k}</div>
+        <div class="cmp-label" style="color:${c}" title="${extraCmd[a.k] || ''}">${a.label}${a.rtBad ? ' <span class="rt-bad">!</span>' : ''}</div>
         <div class="cmp-track">
           <div class="cmp-fill" style="width:${w}%;background:${c}"></div>
         </div>

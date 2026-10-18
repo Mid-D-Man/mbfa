@@ -40,9 +40,12 @@ use crate::par::ParallelIterator;
 const INCOMPRESSIBLE_ENTROPY_THRESHOLD: f64 = 7.8;
 const INCOMPRESSIBLE_MIN_BYTES:         usize = 50_000;
 
-fn sample_entropy(data: &[u8]) -> f64 {
-    const SAMPLE_SIZE: usize = 8192;
-    let sample = if data.len() > SAMPLE_SIZE { &data[..SAMPLE_SIZE] } else { data };
+/// Largest unfiltered input for which a "fold gave up" result is retried with
+/// `fold::fold_forced`. The retry runs the whole pipeline (4-9 s per MB), so
+/// it is bounded; bigger inputs keep the old behaviour of being stored.
+const FORCED_RETRY_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+fn byte_entropy(sample: &[u8]) -> f64 {
     let mut freq = [0u32; 256];
     for &b in sample { freq[b as usize] += 1; }
     let n = sample.len() as f64;
@@ -50,6 +53,22 @@ fn sample_entropy(data: &[u8]) -> f64 {
         .filter(|&&c| c > 0)
         .map(|&c| { let p = c as f64 / n; -p * p.log2() })
         .sum()
+}
+
+/// Lowest byte entropy over up to 16 evenly spread 4 KiB windows (the first
+/// and the last included). The gate used to look at the first 8 KiB only, so a
+/// file that starts with already-compressed bytes (an APK or any other ZIP
+/// whose first entry is deflated) was stored even when most of it was not.
+/// Inputs of two windows or less are measured whole, as before.
+fn sample_entropy(data: &[u8]) -> f64 {
+    const WIN: usize = 4096;
+    const MAX_WINDOWS: usize = 16;
+    if data.len() <= 2 * WIN { return byte_entropy(data); }
+    let windows = (data.len() / WIN).min(MAX_WINDOWS);
+    let stride  = (data.len() - WIN) / (windows - 1);
+    (0..windows)
+        .map(|k| { let s = k * stride; byte_entropy(&data[s..s + WIN]) })
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// File header layout (bytes 0-4 + N ob + N lb):
@@ -124,10 +143,25 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     }
 
     // ── Fold passes ───────────────────────────────────────────────────────────
+    let mut fold_out = fold::fold(to_fold, max_folds, filter_flag)?;
+
+    // fold() gives up (folds_done == 0) when fold 1's RAW bitstream is not
+    // clearly smaller than the input. That test cannot see what the entropy
+    // stage would do with mostly-literal data (see fold::fold_forced), so give
+    // such unfiltered input a second chance. It cannot make the output worse:
+    // the size guard below falls back to a plain store.
+    if fold_out.1 == 0
+        && filter_flag == filters::FILTER_NONE
+        && max_folds >= 1
+        && input.len() <= FORCED_RETRY_MAX_BYTES
+    {
+        println!("Fold 1 gave up; retrying with the entropy stage allowed to decide");
+        fold_out = fold::fold_forced(to_fold, max_folds)?;
+    }
+
     let (compressed, folds_done, used_pairing,
          offset_bits_per_fold, length_bits_per_fold,
-         fold1_tokens_opt, ring_was_used, dict_id_used) =
-        fold::fold(to_fold, max_folds, filter_flag)?;
+         fold1_tokens_opt, ring_was_used, dict_id_used) = fold_out;
 
     // Belt-and-suspenders (fold.rs already guarantees this): a dictionary
     // can only have been used if fold 1 actually happened.
@@ -348,6 +382,16 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
     for &ob in &out_ob { output.push(ob as u8); }
     for &lb in &out_lb { output.push(lb as u8); }
     output.extend_from_slice(&final_payload);
+
+    // Never be bigger than a plain store (5-byte header + the original bytes).
+    if output.len() >= 5 + input.len() {
+        let mut out = Vec::with_capacity(5 + input.len());
+        out.push(0u8); out.push(0u8); out.push(0u8);
+        out.push(filters::FILTER_NONE);
+        out.push(0u8);
+        out.extend_from_slice(input);
+        return Ok(out);
+    }
     Ok(output)
 }
 

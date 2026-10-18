@@ -25,7 +25,15 @@
 //! `println!`s in the library are no-ops on this target. Panics become traps,
 //! so `console_error_panic_hook` is installed to log the real message first.
 
+use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
+
+thread_local! {
+    /// Message of the most recent Rust panic. A wasm trap reaches JavaScript as a bare
+    /// "RuntimeError: unreachable"; the page asks for this string (`last_panic`) and shows it,
+    /// because a phone browser has no console to read the real message from.
+    static LAST_PANIC: RefCell<String> = RefCell::new(String::new());
+}
 
 /// Same fold limit the CLI passes (`src/main.rs`: `mbfa::compress(&input, 8)`).
 const DEFAULT_MAX_FOLDS: u8 = 8;
@@ -33,7 +41,17 @@ const DEFAULT_MAX_FOLDS: u8 = 8;
 /// Runs once when the module is instantiated.
 #[wasm_bindgen(start)]
 pub fn start() {
-    console_error_panic_hook::set_once();
+    std::panic::set_hook(Box::new(|info| {
+        LAST_PANIC.with(|p| *p.borrow_mut() = info.to_string());
+        console_error_panic_hook::hook(info);
+    }));
+}
+
+/// The message of the most recent Rust panic in this module instance, or "" if none.
+/// (A trap that is not a panic, such as an allocation failure, leaves it empty.)
+#[wasm_bindgen]
+pub fn last_panic() -> String {
+    LAST_PANIC.with(|p| p.borrow().clone())
 }
 
 /// Compress `data`. `max_folds` is optional (JS may omit it); the default

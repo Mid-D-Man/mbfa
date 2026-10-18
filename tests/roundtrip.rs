@@ -167,6 +167,46 @@ fn roundtrip(label: &str, data: &[u8]) -> usize {
     packed.len()
 }
 
+/// A ZIP-shaped container: for every entry a local header (fixed fields plus
+/// the entry name), a payload of random bytes standing in for deflated data,
+/// then a central directory repeating every name. This is the shape of docx,
+/// pptx, apk and jar files: mostly incompressible payload, with real LZ
+/// structure only in the headers.
+fn zip_like(seed: u64, entries: usize, payload: usize) -> Vec<u8> {
+    let mut rng = Rng::new(seed);
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for i in 0..entries {
+        let name = format!("ppt/slides/_rels/slide{i}.xml.rels");
+        let offset = out.len() as u32;
+        let extra = rng.below(32);
+        let body = rng.bytes(payload + extra);
+        let crc = rng.bytes(4);
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&[20, 0, 6, 0, 8, 0, 0, 0, 0x21, 0x00]);
+        out.extend_from_slice(&crc);
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(body.len() as u32 * 3).to_le_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&body);
+        central.extend_from_slice(b"PK\x01\x02");
+        central.extend_from_slice(&[20, 3, 20, 0, 6, 0, 8, 0, 0, 0, 0x21, 0x00]);
+        central.extend_from_slice(&crc);
+        central.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(body.len() as u32 * 3).to_le_bytes());
+        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&[0u8; 12]);
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    out.extend_from_slice(&central);
+    out.extend_from_slice(b"PK\x05\x06");
+    out.extend_from_slice(&[0u8; 18]);
+    out
+}
+
 // ── Default (fast) tests ─────────────────────────────────────────────────────
 
 #[test]
@@ -256,6 +296,56 @@ fn random_data_never_expands_beyond_header() {
         let mut rng = Rng::new(9_000 + len as u64);
         roundtrip(&format!("random len={len}"), &rng.bytes(len));
     }
+}
+
+// ── ZIP-family containers ────────────────────────────────────────────────────
+//
+// docx / pptx / apk files used to be stored at 100.0% although gzip and xz
+// shave 15-25% off them: fold 1 judged the RAW bitstream (9-bit literals) and
+// gave up before the entropy stage ran, and the early-exit gate looked only at
+// the first 8 KiB, which is deflated data in a ZIP. See fold::fold_forced and
+// lib.rs sample_entropy.
+
+#[test]
+fn zip_like_container_is_not_stored() {
+    // Below the 50 KB early-exit gate: only the fold-1 give-up applies.
+    let data = zip_like(77, 10, 900);
+    assert!(data.len() < 50_000, "test data should stay under the gate size");
+    let packed = roundtrip("zip-like small", &data);
+    assert!(
+        packed * 100 < data.len() * 98,
+        "zip-like container was stored: {} -> {} bytes",
+        data.len(),
+        packed
+    );
+}
+
+#[test]
+#[ignore = "heavy: cargo test --release --test roundtrip -- --ignored heavy_"]
+fn heavy_zip_like_container_past_the_entropy_gate() {
+    // Above 50 KB, with a random-looking head: the gate must look past the
+    // first 8 KiB (the central directory at the tail is where the structure is).
+    let data = zip_like(78, 120, 600);
+    assert!(data.len() > 50_000, "test data should exceed the gate size");
+    let packed = roundtrip("zip-like large", &data);
+    assert!(
+        packed * 100 < data.len() * 97,
+        "zip-like container was stored: {} -> {} bytes",
+        data.len(),
+        packed
+    );
+}
+
+#[test]
+fn incompressible_data_is_still_stored_quickly() {
+    // The retry for "fold gave up" must not turn a plain store into a slow,
+    // pointless compress of truly random data above the gate size.
+    let mut rng = Rng::new(4242);
+    let data = rng.bytes(200_000);
+    let t0 = std::time::Instant::now();
+    let packed = roundtrip("random 200k", &data);
+    assert_eq!(packed, data.len() + 5, "random data must come back as a plain store");
+    assert!(t0.elapsed().as_secs() < 20, "random data took {:?}", t0.elapsed());
 }
 
 #[test]

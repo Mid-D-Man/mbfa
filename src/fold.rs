@@ -119,7 +119,31 @@ fn log_phase_c_gain(tokens: &[Token], ob: u32, lb: u32, input_len: usize) {
 pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
     -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>, Vec<u32>, Option<Vec<Token>>, bool, crate::dictionary::DictId)>
 {
-    let skip_incompressible_bail = filter_flag != 0u8;
+    fold_impl(input, max_folds, filter_flag, false)
+}
+
+/// Second attempt for unfiltered input that `fold` gave up on.
+///
+/// `fold` judges fold 1 by the size of the RAW LZ bitstream, where every
+/// literal costs LIT_TOTAL_BITS (9) bits. Data that is mostly incompressible
+/// bytes with some LZ-able structure -- ZIP-family containers (docx, pptx,
+/// apk, jar: deflated members plus repeated names in the local headers and
+/// the central directory) -- therefore always looks like an expansion
+/// (> 100%), and every bail-out fires before the entropy stage, which codes
+/// those same literals at about 8 bits or less, ever gets to run. Here the
+/// in-scan expansion bails are off and fold 1 is handed to the entropy stage
+/// even when its raw bitstream is larger than the input; the caller keeps
+/// the result only if it really is smaller than a plain store.
+pub fn fold_forced(input: &[u8], max_folds: u8)
+    -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>, Vec<u32>, Option<Vec<Token>>, bool, crate::dictionary::DictId)>
+{
+    fold_impl(input, max_folds, 0u8, true)
+}
+
+fn fold_impl(input: &[u8], max_folds: u8, filter_flag: u8, force_entropy: bool)
+    -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>, Vec<u32>, Option<Vec<Token>>, bool, crate::dictionary::DictId)>
+{
+    let skip_incompressible_bail = filter_flag != 0u8 || force_entropy;
     let fold1_min_improvement = if skip_incompressible_bail { 1.0_f64 } else { MIN_IMPROVEMENT_RATIO };
 
     let mut current            = input.to_vec();
@@ -219,6 +243,25 @@ pub fn fold(input: &[u8], max_folds: u8, filter_flag: u8)
             println!("Fold 1 (LZ): {} bits ({} bytes)", folded_bits, folded.len());
 
             let ratio = folded_bits as f64 / prev_size as f64;
+            if force_entropy && ratio >= 1.0 {
+                // The raw bitstream is bigger than the input (9-bit literals),
+                // which says nothing about what the entropy stage can do with
+                // it. Hand fold 1 over and stop: a second fold would run on
+                // this expanded stream.
+                println!(
+                    "Fold 1 raw bitstream expands (ratio {:.3}); passing it to the entropy stage anyway",
+                    ratio
+                );
+                current_ob    = ob;
+                current_lb    = lb;
+                current       = folded;
+                folds_done    = 1;
+                ring_was_used = fold1_ring_active;
+                offset_bits_per_fold.push(ob);
+                length_bits_per_fold.push(lb);
+                fold1_tokens  = Some(tokens);
+                break;
+            }
             if ratio >= fold1_min_improvement {
                 println!("Fold 1 not worth it (ratio {:.3}), stopping at fold 0", ratio);
                 break;

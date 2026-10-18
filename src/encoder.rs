@@ -119,17 +119,47 @@ impl RepSlots {
     fn valid(&self) -> &[u32] { &self.slots[..self.len] }
 }
 
+/// Length of the common prefix of `a` and `b`, eight bytes per step.
+/// Little-endian loads on every target, so the first differing byte is
+/// `trailing_zeros / 8` regardless of the machine's native byte order.
+#[inline]
+fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    let mut k = 0;
+    while k + 8 <= n {
+        let x = u64::from_le_bytes([a[k], a[k+1], a[k+2], a[k+3], a[k+4], a[k+5], a[k+6], a[k+7]])
+              ^ u64::from_le_bytes([b[k], b[k+1], b[k+2], b[k+3], b[k+4], b[k+5], b[k+6], b[k+7]]);
+        if x != 0 { return k + (x.trailing_zeros() / 8) as usize; }
+        k += 8;
+    }
+    while k < n && a[k] == b[k] { k += 1; }
+    k
+}
+
+/// How many bytes starting at `i` repeat the data `span` bytes earlier, at
+/// most `limit` (callers pass `min(max_len, n - i)`).
+///
+/// This is exactly the old byte loop `while len < max_len && i + len < n &&
+/// input[j + len % span] == input[i + len]` with j = i - span, without the
+/// per-byte division. While `len < span` the source is a plain slice; past
+/// `span` (an overlapping match, e.g. a run) every byte must equal the one
+/// `span` earlier in the output, because all earlier bytes already matched
+/// and so input[j + len % span] == input[i + len - span].
+#[inline]
+pub(crate) fn match_len(input: &[u8], i: usize, span: usize, limit: usize) -> usize {
+    let j = i - span;
+    let first = span.min(limit);
+    let l = common_prefix_len(&input[j..j + first], &input[i..i + first]);
+    if l < first || limit <= span { return l; }
+    span + common_prefix_len(&input[i..i + (limit - span)], &input[i + span..i + limit])
+}
+
 #[inline]
 fn rep_match_len(input: &[u8], i: usize, offset: u32, max_len: usize) -> usize {
     let off = offset as usize;
     if off == 0 || off > i { return 0; }
-    let j = i - off;
-    let n = input.len();
-    let mut len = 0;
-    while len < max_len && (i + len) < n && input[j + (len % off)] == input[i + len] {
-        len += 1;
-    }
-    len
+    let limit = max_len.min(input.len().saturating_sub(i));
+    match_len(input, i, off, limit)
 }
 
 /// Core LZ scanner.
@@ -379,7 +409,9 @@ fn find_match(
     window_mask: usize,
     chain_limit: usize,
 ) -> (usize, usize) {
-    let n = input.len();
+    // No match can be longer than this; once best_len reaches it the rest of
+    // the chain cannot change the result.
+    let limit = max_len.min(input.len().saturating_sub(i));
     let mut best_offset = 0;
     let mut best_len    = 0;
     let mut steps       = 0;
@@ -388,20 +420,19 @@ fn find_match(
     while cur != u32::MAX && steps < chain_limit {
         let j = cur as usize;
         if i <= j || i - j > max_off { break; }
+        if best_len >= limit { break; }
 
         let span = i - j;
-        let mut len = 0;
-        while len < max_len
-            && (i + len) < n
-            && input[j + (len % span)] == input[i + len]
-        {
-            len += 1;
-        }
-
-        if len > best_len {
-            best_len    = len;
-            best_offset = span;
-            if best_len == max_len { break; }
+        // To be longer than best_len a candidate must also agree at index
+        // best_len, so test that one byte before comparing anything else.
+        let probe = if best_len < span { best_len } else { best_len % span };
+        if input[j + probe] == input[i + best_len] {
+            let len = match_len(input, i, span, limit);
+            if len > best_len {
+                best_len    = len;
+                best_offset = span;
+                if best_len == max_len { break; }
+            }
         }
 
         cur   = prev[j & window_mask];
@@ -855,3 +886,123 @@ pub fn scan_adaptive(input: &[u8], skip_incompressible_bail: bool) -> (Vec<Token
         phase_c_from_baseline(baseline, wide_discovery, input, skip_incompressible_bail, final_emit_repref);
     (tokens, ob, lb, false)
             }
+
+
+#[cfg(test)]
+mod match_len_tests {
+    use super::*;
+
+    /// The loop match_len / rep_match_len replaced, kept verbatim as the reference.
+    fn reference_len(input: &[u8], i: usize, span: usize, max_len: usize) -> usize {
+        let j = i - span;
+        let n = input.len();
+        let mut len = 0;
+        while len < max_len && (i + len) < n && input[j + (len % span)] == input[i + len] {
+            len += 1;
+        }
+        len
+    }
+
+    /// find_match as it was before the best_len pre-check and the early exit.
+    fn reference_find_match(
+        input: &[u8], i: usize, h: usize, head: &[u32], prev: &[u32],
+        max_off: usize, max_len: usize, window_mask: usize, chain_limit: usize,
+    ) -> (usize, usize) {
+        let n = input.len();
+        let (mut best_offset, mut best_len, mut steps) = (0, 0, 0);
+        let mut cur = head[h];
+        while cur != u32::MAX && steps < chain_limit {
+            let j = cur as usize;
+            if i <= j || i - j > max_off { break; }
+            let span = i - j;
+            let len = reference_len(input, i, span, max_len);
+            if len > best_len {
+                best_len = len;
+                best_offset = span;
+                if best_len == max_len { break; }
+            }
+            cur = prev[j & window_mask];
+            steps += 1;
+        }
+        (best_offset, best_len)
+    }
+
+    struct Xs(u64);
+    impl Xs {
+        fn next(&mut self) -> u64 { self.0 ^= self.0 << 13; self.0 ^= self.0 >> 7; self.0 ^= self.0 << 17; self.0 }
+        fn below(&mut self, n: usize) -> usize { (self.next() % n as u64) as usize }
+    }
+
+    /// Runs, short periods, repeated blocks and noise: every branch of match_len
+    /// (plain, overlapping, 8-byte word boundaries, limits below / above span).
+    fn nasty_data(seed: u64, len: usize) -> Vec<u8> {
+        let mut r = Xs(seed * 2654435761 + 12345);
+        let mut v: Vec<u8> = Vec::new();
+        while v.len() < len {
+            match r.below(5) {
+                0 => { let b = r.next() as u8; let n = 1 + r.below(40); v.extend(std::iter::repeat(b).take(n)); }
+                1 => { let p = 1 + r.below(12); let pat: Vec<u8> = (0..p).map(|_| r.next() as u8).collect();
+                       for k in 0..(p * (1 + r.below(8)) + r.below(p)) { v.push(pat[k % p]); } }
+                2 if v.len() > 20 => { let s = r.below(v.len() - 10); let n = 1 + r.below(30).min(v.len() - s - 1); let blk: Vec<u8> = v[s..s + n].to_vec(); v.extend(blk); }
+                _ => { for _ in 0..(1 + r.below(24)) { v.push((r.next() % 4) as u8); } }
+            }
+        }
+        v.truncate(len);
+        v
+    }
+
+    #[test]
+    fn match_len_equals_the_byte_loop() {
+        for seed in 1..=10u64 {
+            let data = nasty_data(seed, 500);
+            let n = data.len();
+            for i in 1..n {
+                let mut spans: Vec<usize> = (1..=17).collect();
+                spans.extend([i / 2, i.saturating_sub(1), i]);
+                for &span in &spans {
+                    if span == 0 || span > i { continue; }
+                    for &max_len in &[0usize, 1, 2, 7, 8, 9, 15, 16, 17, 255, 100_000] {
+                        let limit = max_len.min(n - i);
+                        assert_eq!(
+                            match_len(&data, i, span, limit),
+                            reference_len(&data, i, span, max_len),
+                            "seed {seed} i {i} span {span} max_len {max_len}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rep_match_len_equals_the_byte_loop() {
+        let data = nasty_data(99, 400);
+        for i in 0..data.len() {
+            for off in 0..=40u32 {
+                let want = if off == 0 || off as usize > i { 0 } else { reference_len(&data, i, off as usize, 300) };
+                assert_eq!(rep_match_len(&data, i, off, 300), want, "i {i} off {off}");
+            }
+        }
+    }
+
+    #[test]
+    fn find_match_equals_the_unoptimised_chain_walk() {
+        for seed in 1..=6u64 {
+            let data = nasty_data(seed + 50, 1500);
+            let n = data.len();
+            for &(max_off, max_len, chain_limit) in &[(300usize, 255usize, 64usize), (1 << 17, 255, 512), (1 << 17, 4095, 16), (40, 20, 256)] {
+                let (window_size, window_mask) = window_alloc_and_mask(max_off, n);
+                let mut head = vec![u32::MAX; HASH_SIZE];
+                let mut prev = vec![u32::MAX; window_size];
+                for i in 0..n {
+                    let h = hash3(&data, i);
+                    let got  = find_match(&data, i, h, &head, &prev, max_off, max_len, window_mask, chain_limit);
+                    let want = reference_find_match(&data, i, h, &head, &prev, max_off, max_len, window_mask, chain_limit);
+                    assert_eq!(got, want, "seed {seed} i {i} off {max_off} len {max_len} chain {chain_limit}");
+                    prev[i & window_mask] = head[h];
+                    head[h] = i as u32;
+                }
+            }
+        }
+    }
+}

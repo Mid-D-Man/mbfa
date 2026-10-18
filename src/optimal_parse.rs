@@ -131,22 +131,24 @@ impl MatchFinder {
         let mut steps = 0usize;
         let mut cur = self.head[h];
         let cap = max_search_len.min(self.max_len);
+        // Nothing can be longer than this (same bound the old byte loop had).
+        let limit = (cap as usize).min(n.saturating_sub(i));
 
         while cur != NONE_MARK && steps < self.chain_limit {
             let j = cur as usize;
             if i <= j || (i - j) as u32 > self.max_off { break; }
-            let span = (i - j) as u32;
-            let mut length = 0u32;
-            while length < cap
-                && (i + length as usize) < n
-                && data[j + (length as usize % span as usize)] == data[i + length as usize]
-            {
-                length += 1;
-            }
-            if length > best_len {
-                best_len = length;
-                out.push(MatchCandidate { length, offset: span });
-                if best_len == cap { break; }
+            if best_len as usize >= limit { break; }
+            let span = i - j;
+            // A candidate only beats best_len if it also agrees at index best_len.
+            let bl = best_len as usize;
+            let probe = if bl < span { bl } else { bl % span };
+            if data[j + probe] == data[i + bl] {
+                let length = crate::encoder::match_len(data, i, span, limit) as u32;
+                if length > best_len {
+                    best_len = length;
+                    out.push(MatchCandidate { length, offset: span as u32 });
+                    if best_len == cap { break; }
+                }
             }
             cur = self.prev[j & self.window_mask];
             steps += 1;
@@ -159,16 +161,8 @@ impl MatchFinder {
 
 fn rep_match_len(data: &[u8], i: usize, offset: u32, max_len: u32) -> u32 {
     if offset == 0 || offset as usize > i { return 0; }
-    let j = i - offset as usize;
-    let n = data.len();
-    let mut length = 0u32;
-    while length < max_len
-        && (i + length as usize) < n
-        && data[j + (length as usize % offset as usize)] == data[i + length as usize]
-    {
-        length += 1;
-    }
-    length
+    let limit = (max_len as usize).min(data.len().saturating_sub(i));
+    crate::encoder::match_len(data, i, offset as usize, limit) as u32
 }
 
 // ── Pricing, against v9's real prob layout (entropy_v9.rs). Kept in this

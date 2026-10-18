@@ -39,3 +39,4 @@ cargo build --release --no-default-features --ignore-rust-version --examples
 echo
 echo "lab ready:  $WORK/mbfa   (examples in $WORK/target/release/examples)"
 echo "  roundtrip + size + time :  $WORK/target/release/examples/rt FILE...   (results on stderr, lines start with RESULT)"
+echo "  size + FNV hash + compress ms + roundtrip, for before/after diffs :  $WORK/target/release/examples/cz FILE...   (lines start with CZ)"

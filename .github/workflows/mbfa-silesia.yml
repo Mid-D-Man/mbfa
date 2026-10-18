@@ -78,6 +78,11 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y gzip zstd xz-utils zpaq brotli bc unzip
+          # Extra baselines (scripts/extra_baselines.py). Installed one by one so a package
+          # that is missing on the runner only drops that column instead of failing the job.
+          for pkg in bzip2 lz4 bzip3 zopfli p7zip-full; do
+            sudo apt-get install -y "$pkg" || echo "::warning::could not install $pkg; its column will be missing"
+          done
 
       - name: Build MBFA release
         run: cargo build --release
@@ -276,6 +281,14 @@ jobs:
           echo "Roundtrip failures: $RT_FAILED"
           echo "$RT_FAILED" > silesia_results/roundtrip_failures.txt
 
+      # Extra reference points beside the five baselines above: lz4 -9, bzip2 -9, bzip3,
+      # zstd -19 --long, xz -9e, 7-Zip PPMd and zopfli. Same files, one tool at a time, every output
+      # decompressed and checked. Adds roughly 15-25 minutes on the full corpus. A tool that is not
+      # installed, fails or runs past the 15 minute limit only loses its own cell; it never fails the job.
+      - name: Extra baselines (bzip2, lz4, bzip3, zstd-19, xz-9e, 7z-ppmd, zopfli)
+        shell: bash
+        run: python3 scripts/extra_baselines.py silesia_results/results.json silesia_files --timeout 900
+
       - name: Generate Silesia HTML from the corpus template
         shell: bash
         run: |
@@ -300,7 +313,10 @@ jobs:
                    "files: 12 real-world files, 211,938,580 bytes in total, covering English prose, HTML, "
                    "source and executable tarballs, database dumps, medical images, a star catalogue, XML and "
                    "a PDF. It stresses what Canterbury cannot: multi-megabyte inputs. Baselines run at their "
-                   "command-line defaults (gzip -6, zstd -3, xz -6, brotli -11, zpaq method 2). ")
+                   "command-line defaults (gzip -6, zstd -3, xz -6, brotli -11, zpaq method 2); the extra "
+                   "columns run other well-known codecs at their strongest practical setting "
+                   "(lz4 -9, bzip2 -9, bzip3, zstd -19 --long=27, xz -9e, 7-Zip PPMd, zopfli), "
+                   "single-threaded. ")
           s, n = re.subn(r"<strong>The Silesia Corpus</strong> is the standard.*?Lower % = better compression\.",
                          about + "Lower % = better compression.", s, flags=re.S)
           print("about paragraph replaced:", n)

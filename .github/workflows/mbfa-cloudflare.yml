@@ -203,11 +203,20 @@ jobs:
             curl -s -o /dev/null -w '%{http_code}' --retry 6 --retry-delay 5 --retry-all-errors "$URL/$1"
           }
 
+          # Cloudflare Pages serves a folder's index.html at the folder URL and answers a request
+          # for ".../index.html" with a 308 redirect to it ("pretty URLs"). So ask for the folder
+          # URL itself, as a visitor does; the old check asked for index.html, got a 308 and
+          # failed a deployment that was in fact fine (mbfa.js 200, wasm type right, 404 right).
+          # --location follows any redirect that is still left, e.g. folder -> folder/ .
+          get_page() {
+            curl -sL -o /dev/null -w '%{http_code}' --retry 6 --retry-delay 5 --retry-all-errors "$URL/$1"
+          }
+
           # Every section that exists in this snapshot must answer 200.
-          for p in index.html special/index.html corpus/index.html archive/index.html silesia/index.html; do
-            [ -f "cf_site/$p" ] || continue
-            code=$(get_code "$p")
-            echo "  $p -> $code"
+          for d in "" special/ corpus/ archive/ silesia/; do
+            [ -f "cf_site/${d}index.html" ] || continue
+            code=$(get_page "$d")
+            echo "  /${d} -> $code"
             [ "$code" = "200" ] || fail=1
           done
 

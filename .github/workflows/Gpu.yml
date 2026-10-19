@@ -1,0 +1,52 @@
+name: MBFA GPU exactness (software Vulkan)
+
+# GitHub-hosted runners have no GPU, so this cannot measure speed. It runs the
+# GPU code on lavapipe (software Vulkan) and proves that the GPU match table,
+# the scan driven by it, and whole-file compression equal the CPU path.
+# Speed is measured with `cargo run --release --features gpu --example gpubench`
+# on a machine with a real GPU.
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'src/**'
+      - 'tests/gpu.rs'
+      - 'examples/gpubench.rs'
+      - 'Cargo.toml'
+      - '.github/workflows/mbfa-gpu.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/gpu.rs'
+      - 'Cargo.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-exactness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable; wgpu needs a recent compiler)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install software Vulkan (lavapipe)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+
+      - name: Show the adapter
+        run: vulkaninfo --summary || true
+
+      - name: GPU table, scan and compress equal the CPU path
+        run: cargo test --release --no-default-features --features gpu --test gpu -- --test-threads=1 --nocapture
+
+      - name: Table path equals plain scan (CPU only), and the default build still passes
+        run: cargo test --release --no-default-features --lib --test roundtrip

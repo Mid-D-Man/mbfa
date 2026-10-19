@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MBFA — Special Benchmark | Build #209</title>
+  <title>MBFA — Special Benchmark | Build #211</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 32px 24px; }
@@ -179,6 +179,11 @@
       border-radius: 12px; cursor: pointer; font-size: 0.74rem; }
     .chip.on { background: #0f1e3a; border-color: #1f4080; color: #e6edf3; }
     .rt-bad { color: #f85149; font-weight: 700; }
+    .dl-btn { background: #1f6feb; color: #fff; border: 0; border-radius: 6px; padding: 7px 14px;
+      font-weight: 600; font-size: 0.8rem; cursor: pointer; max-width: 100%; overflow-wrap: anywhere; }
+    .dl-btn:hover { background: #388bfd; }
+    .dl-hint { margin-top: 8px; font-size: 0.72rem; color: #8b949e; }
+    .dl-hint code { color: #a371f7; font-family: monospace; }
     .rank-of { color: #484f58; font-size: 0.68rem; }
   </style>
 </head>
@@ -190,10 +195,10 @@
     <h1>&#x1F3AE; MBFA <span>&#x2014; Special Benchmark</span></h1>
     <p style="color:#8b949e;margin-top:5px">MidManStudio &middot; Game engine assets &middot; 3D formats &middot; Config &middot; DixScript &middot; Binary &middot; MBFA Showcase</p>
     <div class="meta">
-      <div class="meta-item"><strong>Build:</strong> #209</div>
+      <div class="meta-item"><strong>Build:</strong> #211</div>
       <div class="meta-item"><strong>Branch:</strong> master</div>
-      <div class="meta-item"><strong>Commit:</strong> d77054cd</div>
-      <div class="meta-item"><strong>Date:</strong> Sun Oct 18 20:24:09 UTC 2026</div>
+      <div class="meta-item"><strong>Commit:</strong> 27f3c16b</div>
+      <div class="meta-item"><strong>Date:</strong> Mon Oct 19 07:06:21 UTC 2026</div>
     </div>
   </header>
 
@@ -276,7 +281,7 @@
       <span class="wasm-status missing" id="wasm-badge">MBFA WASM not loaded</span>
     </h2>
     <p class="upload-desc">
-      Drop any file to compress it locally. Browser gzip runs immediately via
+      Drop any file to compress it locally, then download the result as a <code style="color:#a371f7;font-family:monospace">.mbfa</code> file. Browser gzip runs immediately via
       <code style="color:#a371f7;font-family:monospace">CompressionStream</code>.
       MBFA in-browser compression requires the WASM build — see note below.
       <strong style="color:#e6edf3">Nothing is uploaded to any server.</strong>
@@ -306,7 +311,7 @@
     </div>
   </div>
 
-  <footer>MBFA Special Benchmark &mdash; MidManStudio &mdash; Build #209</footer>
+  <footer>MBFA Special Benchmark &mdash; MidManStudio &mdash; Build #211</footer>
 </div>
 
 <!-- Modal -->
@@ -681,6 +686,21 @@
     return String(s).replace(/[&<>"']/g, c =>
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
+  // Save bytes as a file. The object URL is released after a minute, long enough for the
+  // browser (including Android) to finish writing the download.
+  function downloadBytes(bytes, filename) {
+    const blob = new Blob([bytes], { type: 'application/octet-stream' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
   function bytesEqual(a, b) {
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -970,6 +990,7 @@
     const ratio = (packedLen / origSize * 100).toFixed(2);
     const saved = origSize - packedLen;
     const rtOk  = bytesEqual(bytes, r.unpacked);        // byte-exact, not just the same length
+    const dlName = (file.name || 'file') + '.mbfa';
 
     resultBox.innerHTML = fileRow + `
       <div class="result-row"><span class="result-label">MBFA compressed</span>
@@ -982,11 +1003,19 @@
         <span class="result-val" style="color:#a371f7">${r.decompMs.toFixed(1)} ms</span></div>
       <div class="result-row"><span class="result-label">Roundtrip</span>
         <span class="result-val ${rtOk ? 'good' : 'bad'}">${rtOk ? 'PASS ✓ (byte-exact)' : 'FAIL — content mismatch'}</span></div>
+      ${rtOk ? `
+      <div class="result-row"><span class="result-label">Download</span>
+        <span class="result-val"><button type="button" class="dl-btn" id="dl-mbfa">⬇ ${escapeHtml(dlName)} (${fmtBytes(packedLen)})</button></span></div>
+      <div class="dl-hint">Same bytes the CLI writes. Restore it with
+        <code>mbfa decompress &lt;file&gt;.mbfa &lt;original-name&gt;</code>.</div>` : `
+      <div class="dl-hint">No download offered: the in-browser roundtrip did not match the original.</div>`}
       ${gzipRow}
       <div style="margin-top:10px;font-size:0.72rem;color:#484f58">
         Browser WASM timings differ from the server-side CI numbers: the browser runs
         MBFA single-threaded, while the CI binary uses all cores.
       </div>`;
+    const dlBtn = document.getElementById('dl-mbfa');
+    if (dlBtn) dlBtn.addEventListener('click', () => downloadBytes(r.packed, dlName));
   }
 
   // ── Load MBFA WASM (optional: the page works without it) ─────────────────────

@@ -13,6 +13,22 @@
 use std::{env, fs, path::Path, process};
 
 fn main() {
+    // MBFA_GPU=off|auto|force picks the match-finder acceleration policy (see docs/mbfa/gpu.md).
+    // Without the `gpu` feature there is nothing to accelerate and this has no effect.
+    if let Ok(v) = env::var("MBFA_GPU") {
+        match v.to_ascii_lowercase().as_str() {
+            "off" | "0" | "no" => mbfa::set_accel(mbfa::Accel::Off),
+            "force" => mbfa::set_accel(mbfa::Accel::Force),
+            "auto" | "1" | "" => {}
+            other => eprintln!("MBFA_GPU={other}: expected off, auto or force; ignoring"),
+        }
+    }
+    // MBFA_GPU_ALLOW_SOFTWARE=1 lets the probe use a software Vulkan adapter such as lavapipe
+    // (testing only: it is slower than the CPU path).
+    #[cfg(feature = "gpu")]
+    if env::var("MBFA_GPU_ALLOW_SOFTWARE").map(|v| v == "1").unwrap_or(false) {
+        mbfa::gpu::allow_software_adapter(true);
+    }
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {

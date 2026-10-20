@@ -46,7 +46,7 @@ const CEILING_UPPER_HALF_THRESHOLD: f64 = 0.20;
 
 const REP_SLOTS: usize = 4;
 
-const HASH_SIZE:  usize = 1 << 16;
+pub(crate) const HASH_SIZE:  usize = 1 << 16;
 const HASH_MASK:  usize = HASH_SIZE - 1;
 const LAZY_SHORT_LEN: usize = 6;
 
@@ -73,14 +73,14 @@ pub fn compute_chain_limit(input_len: usize, offset_bits: u32) -> usize {
 }
 
 #[inline]
-fn window_alloc_and_mask(max_off_limit: usize, n: usize) -> (usize, usize) {
+pub(crate) fn window_alloc_and_mask(max_off_limit: usize, n: usize) -> (usize, usize) {
     let raw  = max_off_limit.min(n).max(1);
     let pow2 = raw.next_power_of_two();
     (pow2, pow2 - 1)
 }
 
 #[inline]
-fn hash3(input: &[u8], pos: usize) -> usize {
+pub(crate) fn hash3(input: &[u8], pos: usize) -> usize {
     if pos + 2 >= input.len() { return 0; }
     let v = (input[pos]     as usize).wrapping_mul(2_654_435_761)
         ^   (input[pos + 1] as usize).wrapping_mul(2_246_822_519)
@@ -216,6 +216,16 @@ pub fn min_offset_bits_for_dict(dict_len: usize, real_len: usize) -> u32 {
 /// those transparently via its DICT++output virtual addressing.
 /// start_at=0 (scan()'s case) preserves the original behavior exactly.
 pub fn scan_from(input: &[u8], start_at: usize, offset_bits: u32, length_bits: u32, skip_bail: bool, emit_repref: bool) -> (Vec<Token>, bool) {
+    scan_from_mode(input, start_at, offset_bits, length_bits, skip_bail, emit_repref, crate::matchtable::accel())
+}
+
+/// `scan_from` with an explicit acceleration mode (tests compare modes without
+/// touching the process-wide policy). The tokens are identical in every mode:
+/// see matchtable.rs for why, and the tests for the proof by comparison.
+pub(crate) fn scan_from_mode(
+    input: &[u8], start_at: usize, offset_bits: u32, length_bits: u32,
+    skip_bail: bool, emit_repref: bool, mode: crate::matchtable::Accel,
+) -> (Vec<Token>, bool) {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
     let backref_bits = backref_total_bits(offset_bits, length_bits);
@@ -224,8 +234,14 @@ pub fn scan_from(input: &[u8], start_at: usize, offset_bits: u32, length_bits: u
     let n = input.len();
     let (window_size, window_mask) = window_alloc_and_mask(max_off, n);
 
-    let mut head      = vec![u32::MAX; HASH_SIZE];
-    let mut prev      = vec![u32::MAX; window_size];
+    // A match table, when one is available, replaces the hash chains.
+    let mut oracle = crate::matchtable::oracle_for(
+        input,
+        crate::matchtable::Params { start_at, max_off, max_len, chain_limit },
+        mode,
+    );
+    let mut head      = if oracle.is_none() { vec![u32::MAX; HASH_SIZE] } else { Vec::new() };
+    let mut prev      = if oracle.is_none() { vec![u32::MAX; window_size] } else { Vec::new() };
     let mut tokens    = Vec::with_capacity(n / 2 + 1);
     let mut rep_slots = RepSlots::new();
     let mut i         = 0;
@@ -235,6 +251,9 @@ pub fn scan_from(input: &[u8], start_at: usize, offset_bits: u32, length_bits: u
     // like real input positions, just never considered as a candidate to emit
     // a token FOR (no lazy matching, no RepRef bookkeeping needed there; it's
     // only ever a source of matches for i >= start_at, never a match target).
+    if oracle.is_some() {
+        i = start_at.min(n);
+    }
     while i < start_at.min(n) {
         let h = hash3(input, i);
         prev[i & window_mask] = head[h];
@@ -259,8 +278,10 @@ pub fn scan_from(input: &[u8], start_at: usize, offset_bits: u32, length_bits: u
         }
 
         let h = hash3(input, i);
-        let (mut best_offset, mut best_len) =
-            find_match(input, i, h, &head, &prev, max_off, max_len, window_mask, chain_limit);
+        let (mut best_offset, mut best_len) = match oracle.as_ref() {
+            Some(o) => o.find(i, 0),
+            None => find_match(input, i, h, &head, &prev, max_off, max_len, window_mask, chain_limit),
+        };
 
         // Ring probing: only when emit_repref=true. When false, this
         // entire block is skipped and all matches remain Token::Backref.
@@ -288,16 +309,22 @@ pub fn scan_from(input: &[u8], start_at: usize, offset_bits: u32, length_bits: u
         if ref_worthwhile {
             let lazy = if i + 1 < n {
                 let h1 = hash3(input, i + 1);
-                let (_, len1) = find_match(
-                    input, i + 1, h1, &head, &prev, max_off, max_len, window_mask, chain_limit,
-                );
+                let (_, len1) = match oracle.as_ref() {
+                    Some(o) => o.find(i + 1, 1),
+                    None => find_match(
+                        input, i + 1, h1, &head, &prev, max_off, max_len, window_mask, chain_limit,
+                    ),
+                };
                 if len1 > best_len {
                     true
                 } else if best_len <= LAZY_SHORT_LEN && i + 2 < n {
                     let h2 = hash3(input, i + 2);
-                    let (_, len2) = find_match(
-                        input, i + 2, h2, &head, &prev, max_off, max_len, window_mask, chain_limit,
-                    );
+                    let (_, len2) = match oracle.as_ref() {
+                        Some(o) => o.find(i + 2, 2),
+                        None => find_match(
+                            input, i + 2, h2, &head, &prev, max_off, max_len, window_mask, chain_limit,
+                        ),
+                    };
                     len2 > best_len + 2
                 } else {
                     false
@@ -307,17 +334,21 @@ pub fn scan_from(input: &[u8], start_at: usize, offset_bits: u32, length_bits: u
             };
 
             if lazy {
-                prev[i & window_mask] = head[h];
-                head[h] = i as u32;
+                match oracle.as_mut() {
+                    Some(o) => o.note_insert(i),
+                    None => { prev[i & window_mask] = head[h]; head[h] = i as u32; }
+                }
                 tokens.push(Token::Lit { byte: input[i] });
                 lit_count += 1;
                 i += 1;
             } else {
-                for k in 0..best_len {
-                    if i + k + 2 < n {
-                        let hk = hash3(input, i + k);
-                        prev[(i + k) & window_mask] = head[hk];
-                        head[hk] = (i + k) as u32;
+                if oracle.is_none() {
+                    for k in 0..best_len {
+                        if i + k + 2 < n {
+                            let hk = hash3(input, i + k);
+                            prev[(i + k) & window_mask] = head[hk];
+                            head[hk] = (i + k) as u32;
+                        }
                     }
                 }
                 if emit_repref {
@@ -347,8 +378,10 @@ pub fn scan_from(input: &[u8], start_at: usize, offset_bits: u32, length_bits: u
                 i += best_len;
             }
         } else {
-            prev[i & window_mask] = head[h];
-            head[h] = i as u32;
+            match oracle.as_mut() {
+                Some(o) => o.note_insert(i),
+                None => { prev[i & window_mask] = head[h]; head[h] = i as u32; }
+            }
             tokens.push(Token::Lit { byte: input[i] });
             lit_count += 1;
             i += 1;
@@ -398,7 +431,7 @@ pub fn scan_discover(input: &[u8], offset_bits: u32, length_bits: u32) -> Vec<To
     tokens
 }
 
-fn find_match(
+pub(crate) fn find_match(
     input:       &[u8],
     i:           usize,
     h:           usize,

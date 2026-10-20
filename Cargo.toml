@@ -24,6 +24,11 @@ bitstream-io = "2.4"
 sysinfo       = { version = "0.32", optional = true }
 walkdir       = { version = "2",    optional = true }
 rayon         = { version = "1",    optional = true }
+# GPU match finding (feature "gpu"): see src/gpu.rs. wgpu 30 needs Rust 1.87+; the default
+# build never compiles it. pollster blocks on wgpu's async setup calls; bytemuck casts buffers.
+wgpu          = { version = "30",   optional = true, default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan", "metal", "dx12"] }
+pollster      = { version = "0.4",  optional = true }
+bytemuck      = { version = "1",    optional = true }
 
 [features]
 default = ["parallel", "archive"]
@@ -43,6 +48,11 @@ parallel = ["dep:rayon"]
 # parallel (no serial fallback needed -- nothing archive-shaped runs on a
 # single-threaded wasm target anyway).
 archive = ["dep:walkdir", "dep:sysinfo", "parallel"]
+# Optional GPU acceleration of the match finder (wgpu: Vulkan / Metal / DirectX 12 / GL).
+# Needs Rust 1.87+ and is OFF by default; the default build is unchanged. At run time it is
+# used only when a suitable adapter is found and the input is large enough, otherwise the CPU
+# path runs. Output is identical either way. See src/gpu.rs and src/matchtable.rs.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [dev-dependencies]
 # NOTE: html_reports pulls in `plotters` which adds 30-60s to a clean build.
@@ -52,3 +62,8 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "compare"
 harness = false
+
+[[example]]
+name = "gpubench"
+path = "examples/gpubench.rs"
+required-features = ["gpu"]

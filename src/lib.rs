@@ -11,6 +11,10 @@
 
 pub mod opcode;
 pub mod encoder;
+pub mod matchtable;
+#[cfg(feature = "gpu")]
+pub mod gpu;
+pub use matchtable::{accel, set_accel, Accel};
 pub mod bitwriter;
 pub mod bitreader;
 pub mod decoder;

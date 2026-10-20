@@ -15,4 +15,5 @@
   overrides::
     target("README.md", "README.md")
     target("CONTRIBUTING.md", "CONTRIBUTING.md")
+    target("Cargo.toml", "Cargo.toml")
 )

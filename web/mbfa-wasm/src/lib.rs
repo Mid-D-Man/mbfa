@@ -41,6 +41,8 @@ const DEFAULT_MAX_FOLDS: u8 = 8;
 /// Runs once when the module is instantiated.
 #[wasm_bindgen(start)]
 pub fn start() {
+    // The browser runs MBFA single-threaded; keep the original (fast) search there.
+    mbfa::set_effort(mbfa::Effort::Fast);
     std::panic::set_hook(Box::new(|info| {
         LAST_PANIC.with(|p| *p.borrow_mut() = info.to_string());
         console_error_panic_hook::hook(info);

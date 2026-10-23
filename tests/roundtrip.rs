@@ -530,6 +530,40 @@ fn executable_roundtrips_through_the_full_pipeline() {
 
 #[test]
 #[ignore = "heavy: cargo test --release --test roundtrip -- --ignored heavy_"]
+fn heavy_effort_levels_roundtrip_above_the_optimal_parse_limit() {
+    // 420 KB: above the optimal-parse limit, so the deep wide scan, the
+    // entropy-scored candidate choice and the long-match split for v9 all run.
+    // Long repeated paragraphs give matches well past the v9 coder's limit of 272.
+    let mut rng = Rng::new(20241021);
+    let words: [&[u8]; 8] = [b"alpha ", b"beta ", b"gamma ", b"delta ", b"epsilon ", b"zeta ", b"eta ", b"theta\n"];
+    let mut data: Vec<u8> = Vec::new();
+    let paragraph: Vec<u8> = (0..1500).flat_map(|_| words[rng.below(8)].to_vec()).take(1500).collect();
+    while data.len() < 420_000 {
+        match rng.below(6) {
+            0 => data.extend_from_slice(&paragraph),
+            1 => { let n = 200 + rng.below(3000); data.extend(std::iter::repeat(b'x').take(n)); }
+            _ => { for _ in 0..(1 + rng.below(60)) { data.extend_from_slice(words[rng.below(8)]); } }
+        }
+    }
+    data.truncate(420_000);
+
+    let original = mbfa::effort();
+    let mut sizes = Vec::new();
+    for e in [mbfa::Effort::Fast, mbfa::Effort::Normal, mbfa::Effort::Max] {
+        mbfa::set_effort(e);
+        sizes.push((e, roundtrip(&format!("effort {e:?}"), &data)));
+    }
+    mbfa::set_effort(original);
+    println!("sizes by effort: {sizes:?}");
+    // The deeper searches pick a candidate only when it is smaller in entropy-coded
+    // terms, so on this data they must not lose to the original search.
+    let fast = sizes[0].1;
+    assert!(sizes[1].1 <= fast + fast / 100, "Normal {} vs Fast {}", sizes[1].1, fast);
+    assert!(sizes[2].1 <= fast + fast / 100, "Max {} vs Fast {}", sizes[2].1, fast);
+}
+
+#[test]
+#[ignore = "heavy: cargo test --release --test roundtrip -- --ignored heavy_"]
 fn heavy_long_range_match_across_large_windows() {
     // Same idea as the small-window test, at the 15/17/18-bit window edges.
     let gaps = [

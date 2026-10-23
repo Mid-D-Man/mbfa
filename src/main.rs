@@ -23,6 +23,15 @@ fn main() {
             other => eprintln!("MBFA_GPU={other}: expected off, auto or force; ignoring"),
         }
     }
+    // MBFA_EFFORT=fast|normal|max picks the search effort for large inputs (see src/effort.rs).
+    if let Ok(v) = env::var("MBFA_EFFORT") {
+        match v.to_ascii_lowercase().as_str() {
+            "fast" => mbfa::set_effort(mbfa::Effort::Fast),
+            "max" => mbfa::set_effort(mbfa::Effort::Max),
+            "normal" | "" => {}
+            other => eprintln!("MBFA_EFFORT={other}: expected fast, normal or max; ignoring"),
+        }
+    }
     // MBFA_GPU_ALLOW_SOFTWARE=1 lets the probe use a software Vulkan adapter such as lavapipe
     // (testing only: it is slower than the CPU path).
     #[cfg(feature = "gpu")]

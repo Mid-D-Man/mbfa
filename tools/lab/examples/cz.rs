@@ -1,6 +1,11 @@
 // scratch: compress each file, print sha-ish checksum + size + ms (stderr), so before/after builds can be diffed
 use std::time::Instant;
 fn main() {
+    match std::env::var("MBFA_EFFORT").ok().as_deref() {
+        Some("fast") => mbfa::set_effort(mbfa::Effort::Fast),
+        Some("max") => mbfa::set_effort(mbfa::Effort::Max),
+        _ => {}
+    }
     for path in std::env::args().skip(1) {
         let data = std::fs::read(&path).expect("read");
         let t0 = Instant::now();

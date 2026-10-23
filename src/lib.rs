@@ -12,9 +12,11 @@
 pub mod opcode;
 pub mod encoder;
 pub mod matchtable;
+pub mod effort;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub use matchtable::{accel, set_accel, Accel};
+pub use effort::{effort, set_effort, Effort};
 pub mod bitwriter;
 pub mod bitreader;
 pub mod decoder;
@@ -196,6 +198,14 @@ pub fn compress(input: &[u8], max_folds: u8) -> io::Result<Vec<u8>> {
                 opcode::resolve_ring(&tokens_raw)
             } else {
                 tokens_raw.clone()
+            };
+
+            // Effort Normal/Max: split matches longer than the v9 coder's limit so v9
+            // competes for every fold-1 stream (see effort.rs). v1-v8 keep the unsplit tokens.
+            let tokens_raw = if effort::effort() != effort::Effort::Fast {
+                opcode::split_long_matches(&tokens_raw, entropy_v9::RC_MAX_BACKREF_LEN)
+            } else {
+                tokens_raw
             };
 
             let raw_size   = compressed.len();
@@ -625,6 +635,12 @@ fn pair_vs_entropy(
     pair_ob_per_fold: &[u32],
     pair_lb_per_fold: &[u32],
 ) -> io::Result<(Vec<u8>, u8, bool, u8, Vec<u32>, Vec<u32>)> {
+    // Effort Normal/Max: v9 sees long matches split (see effort.rs).
+    let fold1_tokens_raw = if effort::effort() != effort::Effort::Fast {
+        opcode::split_long_matches(&fold1_tokens_raw, entropy_v9::RC_MAX_BACKREF_LEN)
+    } else {
+        fold1_tokens_raw
+    };
     let fold1_bytes_est = {
         let bits: u32 = fold1_tokens.iter()
             .map(|t| opcode::token_bit_cost(t, ob1, lb1))

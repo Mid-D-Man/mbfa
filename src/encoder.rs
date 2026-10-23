@@ -226,10 +226,30 @@ pub(crate) fn scan_from_mode(
     input: &[u8], start_at: usize, offset_bits: u32, length_bits: u32,
     skip_bail: bool, emit_repref: bool, mode: crate::matchtable::Accel,
 ) -> (Vec<Token>, bool) {
+    scan_from_impl(input, start_at, offset_bits, length_bits, skip_bail, emit_repref, mode, None)
+}
+
+/// A scan with an explicit hash-chain depth instead of `compute_chain_limit`'s
+/// default (Effort::Normal / Max use this for their one deep scan).
+pub(crate) fn scan_deep(
+    input: &[u8], offset_bits: u32, length_bits: u32,
+    skip_bail: bool, emit_repref: bool, chain_limit: usize,
+) -> (Vec<Token>, bool) {
+    scan_from_impl(
+        input, 0, offset_bits, length_bits, skip_bail, emit_repref,
+        crate::matchtable::accel(), Some(chain_limit),
+    )
+}
+
+fn scan_from_impl(
+    input: &[u8], start_at: usize, offset_bits: u32, length_bits: u32,
+    skip_bail: bool, emit_repref: bool, mode: crate::matchtable::Accel,
+    chain_override: Option<usize>,
+) -> (Vec<Token>, bool) {
     let max_off      = max_offset(offset_bits);
     let max_len      = max_length(length_bits);
     let backref_bits = backref_total_bits(offset_bits, length_bits);
-    let chain_limit  = compute_chain_limit(input.len(), offset_bits);
+    let chain_limit  = chain_override.unwrap_or_else(|| compute_chain_limit(input.len(), offset_bits));
 
     let n = input.len();
     let (window_size, window_mask) = window_alloc_and_mask(max_off, n);

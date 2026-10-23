@@ -121,6 +121,45 @@ pub const ENTROPY_SAFE_MAX_LENGTH: u32 = 65280;
 
 // ── Ring resolver ─────────────────────────────────────────────────────────────
 
+/// Split matches longer than `max_len` into several equal-sized pieces, so a
+/// stream produced with wide length fields can go through coders that cap
+/// match length (the v9 range coder: 272). The expansion is unchanged.
+///
+/// The extra pieces repeat the offset of the first, so in a stream that uses
+/// ring tokens they are `RepRef { slot: 0 }` (cheap to code); in a stream with
+/// no ring tokens they are plain `Backref`s. Pieces are never shorter than
+/// `max_len / 2`, so no piece falls below a coder's minimum length.
+pub fn split_long_matches(tokens: &[Token], max_len: u32) -> Vec<Token> {
+    let has_rep = tokens.iter().any(|t| matches!(t, Token::RepRef { .. }));
+    let mut out = Vec::with_capacity(tokens.len());
+    for t in tokens {
+        match *t {
+            Token::Backref { offset, length } if length > max_len => {
+                let k = (length + max_len - 1) / max_len;
+                let (base, rem) = (length / k, length % k);
+                for i in 0..k {
+                    let l = base + if i < rem { 1 } else { 0 };
+                    out.push(if i == 0 || !has_rep {
+                        Token::Backref { offset, length: l }
+                    } else {
+                        Token::RepRef { slot: 0, length: l }
+                    });
+                }
+            }
+            Token::RepRef { slot, length } if length > max_len => {
+                let k = (length + max_len - 1) / max_len;
+                let (base, rem) = (length / k, length % k);
+                for i in 0..k {
+                    let l = base + if i < rem { 1 } else { 0 };
+                    out.push(Token::RepRef { slot: if i == 0 { slot } else { 0 }, length: l });
+                }
+            }
+            ref other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
 /// Convert all `Token::RepRef` to `Token::Backref` by maintaining an LRU ring
 /// state identical to the decoder's ring.
 pub fn resolve_ring(tokens: &[Token]) -> Vec<Token> {
@@ -158,3 +197,69 @@ pub fn resolve_ring(tokens: &[Token]) -> Vec<Token> {
 
     result
                                                     }
+
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    fn expand(tokens: &[Token]) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        for t in resolve_ring(tokens) {
+            match t {
+                Token::Lit { byte } => out.push(byte),
+                Token::Backref { offset, length } => {
+                    for _ in 0..length { let b = out[out.len() - offset as usize]; out.push(b); }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn stream(with_rep: bool) -> Vec<Token> {
+        let mut t: Vec<Token> = (0..40u8).map(|b| Token::Lit { byte: b.wrapping_mul(7) }).collect();
+        t.push(Token::Backref { offset: 30, length: 900 });       // overlapping, long
+        t.push(Token::Lit { byte: 9 });
+        t.push(Token::Backref { offset: 17, length: 273 });       // just over the limit
+        t.push(Token::Backref { offset: 5, length: 272 });        // exactly the limit: untouched
+        if with_rep {
+            t.push(Token::RepRef { slot: 0, length: 700 });
+            t.push(Token::Backref { offset: 120, length: 3 });
+            t.push(Token::RepRef { slot: 1, length: 1000 });
+        }
+        t.push(Token::End);
+        t
+    }
+
+    #[test]
+    fn splitting_keeps_the_expansion_and_the_length_limit() {
+        for &with_rep in &[false, true] {
+            let t = stream(with_rep);
+            let s = split_long_matches(&t, 272);
+            assert_eq!(expand(&s), expand(&t), "with_rep {with_rep}");
+            for tok in &s {
+                match tok {
+                    Token::Backref { length, .. } | Token::RepRef { length, .. } => {
+                        assert!(*length <= 272, "piece length {length}");
+                    }
+                    _ => {}
+                }
+            }
+            // every piece cut from a long match is at least half the limit
+            let longest_in = |ts: &[Token]| ts.iter().filter_map(|t| match t {
+                Token::Backref { length, .. } | Token::RepRef { length, .. } => Some(*length), _ => None }).max();
+            assert!(longest_in(&t).unwrap() > 272);
+            assert!(longest_in(&s).unwrap() <= 272);
+        }
+    }
+
+    #[test]
+    fn nothing_to_split_is_unchanged() {
+        let t = vec![
+            Token::Lit { byte: 1 }, Token::Lit { byte: 2 },
+            Token::Backref { offset: 2, length: 272 }, Token::End,
+        ];
+        assert_eq!(split_long_matches(&t, 272), t);
+    }
+}

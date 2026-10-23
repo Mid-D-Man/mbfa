@@ -140,6 +140,24 @@ pub fn fold_forced(input: &[u8], max_folds: u8)
     fold_impl(input, max_folds, 0u8, true)
 }
 
+/// Length width of the deep scan (Effort::Normal / Max): 8 bits keeps every match
+/// within what the v9 range coder accepts.
+const DEEP_LB: u32 = 8;
+
+/// Entropy-coded size of a token stream as the v9 range coder would write it, or
+/// `None` if it cannot be coded. Matches longer than v9's limit are split first.
+fn v9_score(tokens: &[Token]) -> Option<usize> {
+    let split = crate::opcode::split_long_matches(tokens, crate::entropy_v9::RC_MAX_BACKREF_LEN);
+    if !crate::entropy_v9::tokens_safe_for_v9(&split) { return None; }
+    crate::entropy_v9::write_tokens_v9(&split).ok().map(|v| v.len())
+}
+
+/// Size used to compare fold-1 candidates: entropy-coded when `tuned`, else the
+/// raw fixed-width bitstream (the original criterion).
+fn candidate_score(tokens: &[Token], ob: u32, lb: u32, tuned: bool) -> Option<usize> {
+    if tuned { v9_score(tokens) } else { write_tokens(tokens, ob, lb).ok().map(|(b, _)| b.len()) }
+}
+
 fn fold_impl(input: &[u8], max_folds: u8, filter_flag: u8, force_entropy: bool)
     -> std::io::Result<(Vec<u8>, u8, bool, Vec<u32>, Vec<u32>, Option<Vec<Token>>, bool, crate::dictionary::DictId)>
 {
@@ -168,7 +186,7 @@ fn fold_impl(input: &[u8], max_folds: u8, filter_flag: u8, force_entropy: bool)
 
         // ── Fold 1: adaptive scan on raw input ───────────────────────────────
         if fold_num == 1 {
-            let (mut tokens, mut ob, lb, definitely_incompressible) =
+            let (mut tokens, mut ob, mut lb, definitely_incompressible) =
                 scan_adaptive(&current, skip_incompressible_bail);
 
             if definitely_incompressible {
@@ -178,6 +196,41 @@ fn fold_impl(input: &[u8], max_folds: u8, filter_flag: u8, force_entropy: bool)
                 );
                 folds_done = 0;
                 break;
+            }
+
+            // Effort Normal / Max (see effort.rs): above the optimal-parse limit, judge
+            // candidates by entropy-coded size and try one deep scan with a window wide
+            // enough for the whole input. Fast keeps the original search exactly.
+            let effort = crate::effort::effort();
+            let tuned = effort != crate::effort::Effort::Fast
+                && !force_entropy
+                && current.len() >= crate::effort::TUNED_MIN_BYTES;
+            // Set when an entropy-scored choice changed the parse. The score is the v9 size of
+            // the fold-1 tokens, which is only what the output will be if folding stops here:
+            // the entropy stage codes the LAST fold's stream, and a second fold (judged by the
+            // raw bitstream) would throw that estimate away.
+            let mut tuned_won = false;
+            if tuned {
+                if let (Some(best), Some(chain)) = (v9_score(&tokens), effort.deep_chain()) {
+                    let need = (usize::BITS - (current.len().max(2) - 1).leading_zeros()).max(1);
+                    let cand_ob = need.min(crate::opcode::OFFSET_BITS_MAX).max(ob);
+                    let (t, bailed) =
+                        crate::encoder::scan_deep(&current, cand_ob, DEEP_LB, true, true, chain);
+                    if !bailed {
+                        if let Some(score) = v9_score(&t) {
+                            if score < best {
+                                println!(
+                                    "Deep wide scan wins: {} B < {} B (entropy-coded; offset_bits {} -> {}, length_bits {} -> {}, chain {})",
+                                    score, best, ob, cand_ob, lb, DEEP_LB, chain
+                                );
+                                tokens = t;
+                                ob = cand_ob;
+                                lb = DEEP_LB;
+                                tuned_won = true;
+                            }
+                        }
+                    }
+                }
             }
 
             // Try each shortlisted per-format dictionary candidate too
@@ -190,8 +243,8 @@ fn fold_impl(input: &[u8], max_folds: u8, filter_flag: u8, force_entropy: bool)
             // the already-chosen length_bits (conservative: skip the
             // candidate rather than widen length_bits for it).
             {
-                if let Ok((normal_folded, _)) = write_tokens(&tokens, ob, lb) {
-                    let mut best_size   = normal_folded.len();
+                if let Some(normal_score) = candidate_score(&tokens, ob, lb, tuned) {
+                    let mut best_size   = normal_score;
                     let mut best_tokens: Option<Vec<Token>> = None;
                     let mut best_ob     = ob;
                     let mut best_id     = crate::dictionary::DictId::None;
@@ -208,9 +261,9 @@ fn fold_impl(input: &[u8], max_folds: u8, filter_flag: u8, force_entropy: bool)
                             _ => true,
                         });
                         if dict_bailed || dict_tokens.is_empty() || !lengths_fit { continue; }
-                        if let Ok((dict_folded, _)) = write_tokens(&dict_tokens, dict_ob, lb) {
-                            if dict_folded.len() < best_size {
-                                best_size   = dict_folded.len();
+                        if let Some(ds) = candidate_score(&dict_tokens, dict_ob, lb, tuned) {
+                            if ds < best_size {
+                                best_size   = ds;
                                 best_tokens = Some(dict_tokens);
                                 best_ob     = dict_ob;
                                 best_id     = candidate;
@@ -220,12 +273,14 @@ fn fold_impl(input: &[u8], max_folds: u8, filter_flag: u8, force_entropy: bool)
 
                     if let Some(winning_tokens) = best_tokens {
                         println!(
-                            "Dictionary candidate {:?} ({}B) wins: {} B < {} B (raw, offset_bits {} -> {})",
-                            best_id, best_id.bytes().len(), best_size, normal_folded.len(), ob, best_ob
+                            "Dictionary candidate {:?} ({}B) wins: {} B < {} B ({}, offset_bits {} -> {})",
+                            best_id, best_id.bytes().len(), best_size, normal_score,
+                            if tuned { "entropy-coded" } else { "raw" }, ob, best_ob
                         );
                         tokens       = winning_tokens;
                         ob           = best_ob;
                         dict_id_used = best_id;
+                        if tuned { tuned_won = true; }
                     }
                 }
             }
@@ -288,6 +343,10 @@ fn fold_impl(input: &[u8], max_folds: u8, filter_flag: u8, force_entropy: bool)
             fold1_tokens  = Some(tokens);
             offset_bits_per_fold.push(ob);
             length_bits_per_fold.push(lb);
+            if tuned_won {
+                println!("Fold 1 kept: the entropy-scored candidate won, so no second fold is attempted");
+                break;
+            }
             continue;
         }
 
